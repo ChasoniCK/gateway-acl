@@ -105,7 +105,7 @@ STRINGS = {
         "blockedTitle": "Стучались, но не пущены",
         "blockedHint": "Ядро запомнило адреса, чьи пакеты дропнуты за последние 6 часов.",
         "noData": "за этот месяц данных ещё нет",
-        "youAre": "это вы",
+        "youAre": "Вы",
         "turnOff": "выключить",
         "turnOn": "включить",
         "del": "удалить",
@@ -160,7 +160,7 @@ STRINGS = {
         "blockedHint": "The kernel recorded the addresses whose packets it dropped "
                        "in the last 6 hours.",
         "noData": "no data for this month yet",
-        "youAre": "this is you",
+        "youAre": "You",
         "turnOff": "turn off",
         "turnOn": "turn on",
         "del": "delete",
