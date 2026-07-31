@@ -99,9 +99,9 @@ if [ "$UILANG" = en ]; then
   M_STOPPED="stopped"; M_UNITGONE="removed"; M_RULESGONE="removed"
   M_KEPTDIR="kept (list and statistics intact)"; M_PURGED="deleted"
   M_UNTOUCHED="Done. ip_forward and $SYSCTL were not touched."
-  M_READY="Done.  Panel: http://%s:%s"
+  M_READY="Done.  Panel: http://{ip}:{port}"
   M_CLIENT="  On a client device set manually:"
-  M_CLIENT2="    gateway %s, netmask %s, DNS 1.1.1.1"
+  M_CLIENT2="    gateway {ip}, netmask {mask}, DNS 1.1.1.1"
   M_CHPW="  Change password:"; M_UPD="  Upgrade:"; M_DEL="  Remove:"
   M_ERR="Error:"
   L_SVC="service"; L_UNIT="unit"; L_PW="password"
@@ -144,9 +144,9 @@ else
   M_STOPPED="остановлена"; M_UNITGONE="снят"; M_RULESGONE="сняты"
   M_KEPTDIR="оставлен (список и статистика целы)"; M_PURGED="удалён"
   M_UNTOUCHED="Готово. ip_forward и $SYSCTL не трогались."
-  M_READY="Готово.  Панель: http://%s:%s"
+  M_READY="Готово.  Панель: http://{ip}:{port}"
   M_CLIENT="  На клиентском устройстве прописать вручную:"
-  M_CLIENT2="    шлюз %s, маска %s, DNS 1.1.1.1"
+  M_CLIENT2="    шлюз {ip}, маска {mask}, DNS 1.1.1.1"
   M_CHPW="  Сменить пароль:"; M_UPD="  Обновить:"; M_DEL="  Снести:"
   M_ERR="Ошибка:"
   L_SVC="служба"; L_UNIT="юнит"; L_PW="пароль"
@@ -375,10 +375,22 @@ nft list table inet gwacl >/dev/null || die "$M_NOTABLE"
 ok "inet gwacl" "$M_INKERNEL"
 
 trap - ERR
-# shellcheck disable=SC2059  # format string in a variable — that is how i18n works here
 MASK=$(python3 -c 'import ipaddress,sys;print(ipaddress.ip_network(sys.argv[1]).netmask)' "$LAN")
-printf '\n'; printf "$M_READY\n" "$SELF_IP" "$PORT"; printf '\n'
-printf '%s\n' "$M_CLIENT"; printf "$M_CLIENT2\n" "$SELF_IP" "$MASK"; printf '\n'
+
+# Подстановка по имени, а не формат printf: формат из переменной — это SC2059,
+# и та же схема с {ip} уже используется в строках панели.
+fill() { # fill "строка" ключ значение ключ значение ...
+  local out="$1"; shift
+  while [ $# -ge 2 ]; do out="${out//\{$1\}/$2}"; shift 2; done
+  printf '%s\n' "$out"
+}
+
+echo
+fill "$M_READY" ip "$SELF_IP" port "$PORT"
+echo
+printf '%s\n' "$M_CLIENT"
+fill "$M_CLIENT2" ip "$SELF_IP" mask "$MASK"
+echo
 printf '%s sudo python3 %s/panel.py --set-password\n' "$M_CHPW" "$ETC"
 printf '%s sudo ./install.sh\n' "$M_UPD"
 printf '%s sudo ./install.sh --uninstall\n' "$M_DEL"
