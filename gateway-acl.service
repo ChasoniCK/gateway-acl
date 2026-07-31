@@ -1,0 +1,15 @@
+[Unit]
+Description=gateway-acl — access control panel for the gateway
+Documentation=https://github.com/ChasoniCK/gateway-acl
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/python3 /etc/gateway-acl/panel.py
+Restart=always
+# No retry limit: if the service dies for good, the way to give anyone access
+# back dies with it.
+StartLimitIntervalSec=0
+
+[Install]
+WantedBy=multi-user.target
