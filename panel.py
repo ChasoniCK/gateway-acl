@@ -12,6 +12,9 @@ bytes into traffic.json per day, detecting resets (see accrue).
 Whoever knocks without being allowed is recorded by the kernel itself into the
 dynamic `blocked` set with a timeout — that is the unknown-devices list.
 
+The only request this program ever makes to the internet is a daily check of
+the latest release tag on GitHub, and `"update_check": false` turns it off.
+
 Run as root: nft is required.
   --selftest        checks, never touches the network
   --dump            print the ruleset, handy to pipe into `nft -c -f -`
@@ -20,17 +23,24 @@ Run as root: nft is required.
 import getpass
 import hashlib
 import hmac
+import html
 import ipaddress
 import json
 import os
 import secrets
+import socket
 import subprocess
 import sys
 import threading
 import time
+import urllib.request
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
+
+VERSION = "1.0.0"
+RELEASES_URL = "https://api.github.com/repos/ChasoniCK/gateway-acl/releases/latest"
+UPDATE_EVERY = 86400
 
 ETC = os.environ.get("GWACL_DIR", "/etc/gateway-acl")
 CONFIG = f"{ETC}/config.json"
@@ -38,7 +48,8 @@ DEVICES = f"{ETC}/devices.json"
 TRAFFIC = f"{ETC}/traffic.json"
 
 DEFAULTS = {"iface": "eno1", "lan": "192.168.1.0/24", "self_ip": "192.168.1.10",
-            "port": 8080, "poll_sec": 60, "pw": None, "lang": "ru"}
+            "port": 8080, "poll_sec": 60, "pw": None, "lang": "ru",
+            "update_check": True}
 SESSION_TTL = 7 * 86400
 FAIL_LIMIT = 5          # misses in a row from one address
 FAIL_BLOCK = 60         # and that is how long it then sits out
@@ -46,6 +57,7 @@ FAIL_BLOCK = 60         # and that is how long it then sits out
 _lock = threading.Lock()
 _sessions = {}          # token -> when it expires
 _fails = {}             # address -> (misses, blocked until)
+_upd = {"at": 0, "new": None}   # last check, and the tag worth showing
 
 
 def conf():
@@ -134,6 +146,35 @@ STRINGS = {
                     "Задайте: {cmd} --set-password",
         "cfgUnreadable": "{cfg} читается только root — беру значения по умолчанию",
         "pwShort": "пароль короче 8 символов",
+        "updateTitle": "Есть обновление",
+        "updateNew": "Вышла версия {v}, установлена {{VERSION}}.",
+        "updateHint": "Обновить: <code>git pull</code> в каталоге с исходниками, "
+                      "затем <code>sudo ./install.sh</code>. Список устройств и "
+                      "статистика не тронутся. Проверку можно выключить "
+                      "в настройках.",
+        "settingsTitle": "Настройки",
+        "sLang": "язык панели",
+        "sUpdate": "сообщать о новых версиях",
+        "sPoll": "опрос счётчиков, с",
+        "sIface": "интерфейс",
+        "sLan": "локальная сеть",
+        "sSelfIp": "адрес шлюза в ней",
+        "sPort": "порт панели",
+        "sPw": "новый пароль",
+        "sPwKeep": "оставить прежний",
+        "sSave": "сохранить",
+        "sNetHint": "Первые три поля — то же, что нашёл установщик. Меняйте их, только "
+                    "если сеть действительно переехала: правила nftables пересобираются "
+                    "сразу, а устройства вне новой сети добавить будет уже нельзя. "
+                    "Смена порта перезапускает панель. Всё лежит в {{CFG}}.",
+        "sRestart": "Порт изменён. Панель перезапускается — откройте {url}",
+        "badLang": "языка {lang} нет",
+        "badNumber": "здесь нужно число",
+        "badPoll": "опрос — от 5 до 3600 секунд",
+        "badPort": "порт — от 1 до 65535",
+        "badIface": "интерфейса {iface} в системе нет",
+        "selfOutside": "{ip} не входит в сеть {lan}",
+        "portBusy": "порт {port} уже занят — панель не поднимется на нём",
     },
     "en": {
         "title": "Gateway",
@@ -190,18 +231,115 @@ STRINGS = {
                     "Set one: {cmd} --set-password",
         "cfgUnreadable": "{cfg} is readable by root only — falling back to defaults",
         "pwShort": "password shorter than 8 characters",
+        "updateTitle": "Update available",
+        "updateNew": "Version {v} is out, you have {{VERSION}}.",
+        "updateHint": "To upgrade: <code>git pull</code> in the source directory, then "
+                      "<code>sudo ./install.sh</code>. Your device list and statistics "
+                      "are left alone. The check can be turned off in the "
+                      "settings.",
+        "settingsTitle": "Settings",
+        "sLang": "panel language",
+        "sUpdate": "tell me about new versions",
+        "sPoll": "counter poll, s",
+        "sIface": "interface",
+        "sLan": "local network",
+        "sSelfIp": "this gateway in it",
+        "sPort": "panel port",
+        "sPw": "new password",
+        "sPwKeep": "leave the current one",
+        "sSave": "save",
+        "sNetHint": "The first three are what the installer found. Change them only if "
+                    "the network really moved: the nftables rules are rebuilt at once, "
+                    "and devices outside the new network can no longer be added. "
+                    "Changing the port restarts the panel. All of it lives in {{CFG}}.",
+        "sRestart": "The port changed. The panel is restarting — open {url}",
+        "badLang": "there is no {lang} language",
+        "badNumber": "a number is expected here",
+        "badPoll": "the poll interval is 5 to 3600 seconds",
+        "badPort": "the port is 1 to 65535",
+        "badIface": "there is no {iface} interface on this system",
+        "selfOutside": "{ip} is outside the {lan} network",
+        "portBusy": "port {port} is taken — the panel would not come back up on it",
     },
 }
 
 
-CFG = conf()
-LANG = CFG.get("lang") if CFG.get("lang") in STRINGS else "ru"
-T = STRINGS[LANG]
-IFACE = CFG["iface"]
-PORT = int(CFG["port"])
-POLL_SEC = int(CFG["poll_sec"])
-LAN = ipaddress.ip_network(CFG["lan"])
-SELF_IP = ipaddress.ip_address(CFG["self_ip"])
+def reload_conf():
+    """Re-read config.json into the globals and rebuild the page.
+
+    Called once at import and again whenever the settings form saves, so a
+    changed language or network takes effect without a restart. Only the port
+    cannot be picked up this way — the socket is already bound (see restart).
+    """
+    global CFG, LANG, T, IFACE, PORT, POLL_SEC, LAN, SELF_IP, PAGE
+    CFG = conf()
+    LANG = CFG.get("lang") if CFG.get("lang") in STRINGS else "ru"
+    T = STRINGS[LANG]
+    IFACE = CFG["iface"]
+    PORT = int(CFG["port"])
+    POLL_SEC = int(CFG["poll_sec"])
+    LAN = ipaddress.ip_network(CFG["lan"])
+    SELF_IP = ipaddress.ip_address(CFG["self_ip"])
+    PAGE = render(PAGE_T)
+
+
+def check_settings(body, base):
+    """Validate the whole settings form and return the config to write.
+
+    Nothing is saved unless every field passes: a half-applied network change
+    is exactly how one locks oneself out of the panel. Only fields that
+    actually changed are checked against the system, so a save does not fail
+    because the configured interface happens to be down.
+    """
+    c = dict(base)
+    lang = str(body.get("lang", c["lang"]))
+    if lang not in STRINGS:
+        raise ValueError(T["badLang"].replace("{lang}", lang))
+    c["lang"] = lang
+    c["update_check"] = bool(body.get("update_check", c["update_check"]))
+
+    try:
+        poll_sec = int(body.get("poll_sec", c["poll_sec"]))
+        port = int(body.get("port", c["port"]))
+    except (TypeError, ValueError):
+        raise ValueError(T["badNumber"])
+    if not 5 <= poll_sec <= 3600:
+        raise ValueError(T["badPoll"])
+    if not 1 <= port <= 65535:
+        raise ValueError(T["badPort"])
+    c["poll_sec"], c["port"] = poll_sec, port
+
+    iface = str(body.get("iface", c["iface"])).strip()
+    if iface != base["iface"] and not os.path.isdir(f"/sys/class/net/{iface}"):
+        raise ValueError(T["badIface"].replace("{iface}", iface))
+    c["iface"] = iface
+
+    # ip_network is strict: 192.168.1.5/24 is rejected, and that is the point —
+    # a network with host bits set would quietly drop devices out of validate().
+    lan = ipaddress.ip_network(str(body.get("lan", c["lan"])).strip())
+    self_ip = ipaddress.ip_address(str(body.get("self_ip", c["self_ip"])).strip())
+    if self_ip not in lan:
+        raise ValueError(T["selfOutside"].replace("{ip}", str(self_ip))
+                                         .replace("{lan}", str(lan)))
+    c["lan"], c["self_ip"] = str(lan), str(self_ip)
+
+    if port != base["port"]:
+        # A port already taken would crash the restarted process, and systemd
+        # would keep restarting it — the panel would be gone for good.
+        with socket.socket() as s:
+            try:
+                s.bind(("", port))
+            except OSError:
+                raise ValueError(T["portBusy"].replace("{port}", str(port)))
+    return c
+
+
+def restart():
+    """Replace this process, the only way to bind a changed port."""
+    # ponytail: a fixed delay instead of a shutdown handshake — long enough for
+    # the reply to leave, and the browser is told to reconnect by hand anyway.
+    threading.Timer(0.7, lambda: os.execv(sys.executable,
+                                          [sys.executable] + sys.argv)).start()
 
 
 def load():
@@ -429,6 +567,48 @@ def poll():
             json.dump(h, f)
 
 
+def _ver(s):
+    """A release tag as a comparable tuple: v1.2 -> (1, 2, 0, 0).
+
+    None when the tag is not a plain numeric version. The padding is what makes
+    1.2 and 1.2.0 the same release instead of the former looking older forever.
+    """
+    try:
+        return (tuple(int(p) for p in s.strip().lstrip("vV").split(".")) + (0, 0, 0))[:4]
+    except ValueError:
+        return None
+
+
+def newer(tag, cur=VERSION):
+    """The tag worth announcing, or None. Equal, older and odd tags are silence."""
+    new, old = _ver(tag), _ver(cur)
+    return tag.strip() if new and old and new > old else None
+
+
+def check_update():
+    """Ask GitHub, at most once a day, whether a newer release is tagged.
+
+    Every failure is silence: a gateway that cannot reach the internet is a
+    supported setup, not a fault to report on the panel. The timestamp is
+    written before the request, so an unreachable GitHub is tried once a day
+    too, not once a minute. The whole body is inside the try — this runs in the
+    poller thread, and an answer of an unexpected shape must not take the
+    traffic counters down with it.
+    """
+    if not CFG.get("update_check", True) or time.time() - _upd["at"] < UPDATE_EVERY:
+        return
+    _upd["at"] = time.time()
+    try:
+        req = urllib.request.Request(RELEASES_URL, headers={
+            "Accept": "application/vnd.github+json",
+            # GitHub answers 403 to a request without a User-Agent.
+            "User-Agent": f"gateway-acl/{VERSION}"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            _upd["new"] = newer(json.loads(r.read(1 << 20)).get("tag_name") or "")
+    except Exception:
+        pass
+
+
 def month_totals(days, month):
     tot = {}
     for k, devs in days.items():
@@ -463,6 +643,7 @@ def state(month=None):
         "days": [[k, sum(v[0] for v in h["days"][k].values()),
                   sum(v[1] for v in h["days"][k].values())] for k in day_keys],
         "blocked": [ip for ip in blocked() if ip not in known],
+        "update": _upd["new"],
     }
 
 
@@ -484,7 +665,9 @@ CSS = """
           text-transform:uppercase;color:var(--dim);margin:0 0 .9rem}
  .num{font-family:ui-monospace,SFMono-Regular,monospace;font-variant-numeric:tabular-nums;
       white-space:nowrap}
- .hint{color:var(--dim);font-size:.83rem;margin:.4rem 0 0}
+ /* overflow-wrap: a hint carries file paths, and one long path would otherwise
+    push a phone screen sideways. */
+ .hint{color:var(--dim);font-size:.83rem;margin:.4rem 0 0;overflow-wrap:anywhere}
 """
 
 LOGIN_T = """<!doctype html><meta charset=utf-8>
@@ -521,6 +704,16 @@ def render(tpl, t=None):
     return (out.replace("{{GW}}", str(SELF_IP))
                .replace("{{MASK}}", str(LAN.netmask))
                .replace("{{PFX}}", str(LAN.prefixlen))
+               .replace("{{VERSION}}", VERSION)
+               .replace("{{CFG}}", CONFIG)
+               # The settings form is filled in from the running config.
+               .replace("{{IFACE}}", html.escape(IFACE, quote=True))
+               .replace("{{LANCIDR}}", str(LAN))
+               .replace("{{PORT}}", str(PORT))
+               .replace("{{POLL}}", str(POLL_SEC))
+               .replace("{{SEL_RU}}", " selected" if LANG == "ru" else "")
+               .replace("{{SEL_EN}}", " selected" if LANG == "en" else "")
+               .replace("{{UPD}}", " checked" if CFG["update_check"] else "")
                .replace("{{EXAMPLE}}",
                         str(LAN.network_address + min(56, LAN.num_addresses - 2))))
 
@@ -558,6 +751,23 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  .act button{padding:.22rem .5rem;font-size:.82rem;color:var(--dim)}
  .act button:hover{color:var(--fg);border-color:#4a505c}
  .act .on{color:#8fae8f;border-color:#3c4d3c}
+ /* The settings live in the corner: a summary that looks like the buttons
+    beside it, and a card that drops out of it. details does the opening on
+    its own — no script, and it works in whatever browser is at hand. */
+ .gear{position:relative}
+ .gear>summary{cursor:pointer;list-style:none;padding:.32rem .55rem;
+   border:1px solid var(--line);border-radius:5px;background:#1c2027}
+ .gear>summary::-webkit-details-marker{display:none}
+ .gear[open]>summary,.gear>summary:hover{border-color:#4a505c}
+ .gear>.card{position:absolute;right:0;top:calc(100% + .4rem);z-index:5;
+   width:min(36rem,88vw);margin:0;box-shadow:0 12px 34px #000a}
+ .set{display:grid;grid-template-columns:repeat(auto-fit,minmax(10rem,1fr));
+      gap:.7rem .9rem;margin-bottom:.9rem}
+ .set label{display:block;font-size:.75rem;color:var(--dim);letter-spacing:.04em}
+ .set input,.set select{width:100%;margin-top:.2rem}
+ .set .chk,.chk input{display:flex;align-items:center;width:auto;margin:0}
+ .set .chk{gap:.45rem;align-self:end;padding-bottom:.4rem}
+ .chk input{accent-color:var(--down)}
  .legend{display:flex;gap:1rem;font-size:.78rem;color:var(--dim);margin-top:.5rem}
  .legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:.35rem}
  form{display:flex;gap:.5rem;flex-wrap:wrap}
@@ -579,12 +789,41 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
   td.r{text-align:left}
   .share{display:none}
   .act{justify-content:flex-start}
+  /* Too narrow to hang off the corner: a sheet at the bottom instead, so it
+     never covers the button that opened it. */
+  .gear>.card{position:fixed;left:.7rem;right:.7rem;bottom:.7rem;top:auto;
+    width:auto;max-height:78vh;overflow:auto}
  }
 </style>
 <div class=bar>
  <h1>{{t.h1}}</h1><span class=sp></span>
  <select id=msel onchange="load(this.value)"></select>
+ <details class=gear>
+  <summary>{{t.settingsTitle}}</summary>
+  <div class=card>
+   <div class=set>
+    <label>{{t.sLang}}<select id=s_lang>
+     <option value=ru{{SEL_RU}}>Русский<option value=en{{SEL_EN}}>English</select></label>
+    <label>{{t.sPoll}}<input id=s_poll type=number min=5 max=3600 value="{{POLL}}"></label>
+    <label>{{t.sPort}}<input id=s_port type=number min=1 max=65535 value="{{PORT}}"></label>
+    <label>{{t.sIface}}<input id=s_iface value="{{IFACE}}"></label>
+    <label>{{t.sLan}}<input id=s_lan value="{{LANCIDR}}"></label>
+    <label>{{t.sSelfIp}}<input id=s_self value="{{GW}}"></label>
+    <label>{{t.sPw}}<input id=s_pw type=password autocomplete=new-password
+      placeholder="{{t.sPwKeep}}"></label>
+    <label class=chk><input id=s_upd type=checkbox{{UPD}}>{{t.sUpdate}}</label>
+   </div>
+   <div class=act><button onclick=saveCfg()>{{t.sSave}}</button></div>
+   <p class=hint>{{t.sNetHint}}</p>
+  </div>
+ </details>
  <button onclick="location='/logout'">{{t.logout}}</button>
+</div>
+
+<div class=card id=upd hidden>
+ <h2>{{t.updateTitle}}</h2>
+ <p id=updtext style="margin:0"></p>
+ <p class=hint>{{t.updateHint}}</p>
 </div>
 
 <div class=card>
@@ -617,6 +856,7 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  <div id=ub></div>
  <p class=hint>{{t.blockedHint}}</p>
 </div>
+
 <script>
 const T = {{T_JSON}};
 const esc = s => (s||'').replace(/[<&">]/g, c => ({'<':'&lt;','&':'&amp;','"':'&quot;','>':'&gt;'}[c]));
@@ -678,6 +918,9 @@ const draw = s => {
      + `onclick="post({ip:'${esc(x.ip)}',on:${!x.on}})">${x.on ? T.turnOff : T.turnOn}</button>`
      + `<button onclick="del('${esc(x.ip)}',${me})">${T.del}</button></div></td></tr>`;
   }).join('') || `<tr><td colspan=5 class=hint>${T.empty}</td></tr>`;
+  upd.hidden = !s.update;
+  // textContent, not innerHTML: the tag comes off the network.
+  if (s.update) updtext.textContent = T.updateNew.replace('{v}', s.update);
   unk.hidden = !s.blocked.length;
   ub.innerHTML = s.blocked.map(ip =>
     `<div class=act style="justify-content:flex-start;margin:.3rem 0">`
@@ -696,12 +939,20 @@ const del = (ip, me) => confirm((me ? T.confirmDelMe : T.confirmDel).replace('{i
      .then(r => r.ok ? load() : r.text().then(alert));
 f.onsubmit = e => { e.preventDefault();
   post({ip: f.ip.value, name: f.nm.value}).then(() => f.reset()); };
+// The answer is the new address when the port changed, and empty otherwise:
+// everything else is already live, the reload is only to redraw the labels.
+const saveCfg = () => fetch('/settings', {method:'POST', body: JSON.stringify({
+    lang: s_lang.value, update_check: s_upd.checked, poll_sec: +s_poll.value,
+    port: +s_port.value, iface: s_iface.value, lan: s_lan.value,
+    self_ip: s_self.value, pw: s_pw.value})})
+  .then(r => r.text().then(x => !r.ok ? alert(x)
+    : x ? alert(T.sRestart.replace('{url}', x)) : location.reload()));
 load();
 setInterval(() => document.activeElement.tagName === 'INPUT' || load(), 15000);
 </script>
 """
 
-PAGE = render(PAGE_T)
+reload_conf()
 
 
 class H(BaseHTTPRequestHandler):
@@ -758,6 +1009,9 @@ class H(BaseHTTPRequestHandler):
         if not self._authed():
             self._deny()
             return
+        if self.path == "/settings":
+            self._settings(raw)
+            return
         try:
             body = json.loads(raw or b"{}")
             ip = validate(body.get("ip", ""))
@@ -779,6 +1033,37 @@ class H(BaseHTTPRequestHandler):
             self._send(200, "ok", "text/plain")
         except ValueError as e:
             self._send(400, str(e), "text/plain")
+
+    def _settings(self, raw):
+        """Save the settings form. The answer is the new address, or empty.
+
+        Everything but the port is picked up by reload_conf on the spot; a
+        changed port needs the process replaced, and the browser is told where
+        to look rather than sent to a socket that is not listening yet.
+        """
+        try:
+            body = json.loads(raw or b"{}")
+            base = conf()
+            c = check_settings(body, base)
+            pw = str(body.get("pw") or "")
+            if pw and len(pw) < 8:
+                raise ValueError(T["pwShort"])   # before anything is written
+            save_conf(c)
+            if pw:
+                set_password(pw)   # re-reads the config just written
+            reload_conf()
+            if (c["iface"], c["lan"], c["self_ip"]) != \
+                    (base["iface"], base["lan"], base["self_ip"]):
+                apply(load())      # the rules are written against the new network
+        except ValueError as e:
+            self._send(400, str(e), "text/plain")
+            return
+        if c["port"] == base["port"]:
+            self._send(200, "", "text/plain")
+            return
+        host = (self.headers.get("Host") or "").rsplit(":", 1)[0]
+        self._send(200, f'http://{host or SELF_IP}:{c["port"]}/', "text/plain")
+        restart()
 
     def _login(self, raw):
         ip = self.client_address[0]
@@ -819,6 +1104,7 @@ def poller():
     while True:
         time.sleep(POLL_SEC)
         poll()
+        check_update()
 
 
 def selftest():
@@ -899,6 +1185,39 @@ def selftest():
     days = {"2026-07": {"1.1.1.1": [5, 5]}, "2026-07-30": {"1.1.1.1": [10, 20]},
             "2026-08-01": {"1.1.1.1": [99, 99]}}
     assert month_totals(days, "2026-07") == {"1.1.1.1": [15, 25]}, "the old format is lost"
+
+    assert newer("v1.0.1", "1.0.0") == "v1.0.1"
+    assert newer("v1.0.0", "1.0.0") is None, "the running version is not an update"
+    assert newer("v0.9.0", "1.0.0") is None, "a downgrade must not be announced"
+    assert newer("v1.10.0", "1.9.0"), "versions compare as numbers, not as text"
+    assert newer("1.2", "1.2.0") is None, "a short tag is the same release"
+    assert newer("nightly", "1.0.0") is None, "an odd tag is silence, not a banner"
+    assert _ver(VERSION), f"VERSION {VERSION!r} does not compare against a tag"
+
+    base = dict(DEFAULTS)
+    form = {"lang": "en", "update_check": False, "poll_sec": 30,
+            "port": base["port"], "iface": base["iface"],
+            "lan": "10.7.0.0/24", "self_ip": "10.7.0.1"}
+    c = check_settings(form, base)
+    assert (c["lang"], c["poll_sec"]) == ("en", 30)
+    assert c["update_check"] is False and c["lan"] == "10.7.0.0/24"
+    assert c["pw"] == base["pw"], "a settings save must not drop the password"
+    assert check_settings({}, base) == base, "an empty form changes nothing"
+    with socket.socket() as busy:
+        busy.bind(("", 0))                  # a port nobody else can have
+        busy.listen()
+        taken = busy.getsockname()[1]
+        for bad in ({"lan": "10.7.0.5/24"},              # host bits set
+                    {"self_ip": "192.168.9.9"},         # outside the network
+                    {"port": 0}, {"port": 70000}, {"port": "abc"},
+                    {"port": taken},                    # would not come back up
+                    {"poll_sec": 4}, {"poll_sec": 99999},
+                    {"lang": "de"}, {"iface": "no-such-iface0"}):
+            try:
+                check_settings(dict(form, **bad), base)
+            except ValueError:
+                continue
+            raise AssertionError(f"the settings form accepted {bad}")
 
     ru = set(STRINGS["ru"])
     for lang, t in STRINGS.items():

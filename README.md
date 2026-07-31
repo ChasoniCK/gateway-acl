@@ -31,6 +31,11 @@ device ──► this Linux host ──► uplink or tunnel (sing-box / WireGuar
 - **Unknown devices.** The kernel records who it dropped into a timeout set;
   the panel lists them with a one-click "allow".
 - **Rename devices** inline. Renaming never touches nftables, so counters survive.
+- **Update notice.** Once a day the panel asks GitHub for the latest release tag
+  and shows a banner if yours is older. Off with one checkbox.
+- **Settings in the corner.** Language, update notice, poll interval, LAN
+  interface, network, gateway address, port and the password — all of
+  `config.json` behind one form, validated before it is written.
 
 Everything is Python standard library and inline SVG. No pip, no npm, no CDN —
 the panel works with no internet at all.
@@ -106,6 +111,27 @@ ssh -L 8080:127.0.0.1:8080 you@gateway
 Anyone who knows the password can change the allowlist. There are no roles and
 no audit log — it is built for a network small enough that everyone with the
 password is meant to have it.
+
+**The panel reaches out exactly once a day** — a GET to
+`api.github.com/repos/ChasoniCK/gateway-acl/releases/latest` for the latest
+release tag. Nothing about you is sent, but the request itself is visible to
+GitHub: your address and the time. The check is on by default; the switch is
+under **Settings** in the corner of the panel, and takes effect at once. On a gateway
+with no internet the request simply fails and the panel stays quiet.
+
+## Settings
+
+Everything in `config.json` is editable from the panel — language, the update
+notice, the poll interval, the LAN interface, the network, the gateway address,
+the panel port and the password. The form is validated as a whole before
+anything is written: a network with host bits set, a gateway address outside its
+own network, an interface that does not exist or a port already in use are
+refused, and nothing is saved.
+
+Language, the update notice, the poll interval and the password apply
+immediately. A changed network rebuilds the nftables rules on the spot. Only a
+changed port needs the process replaced — the panel does that itself and tells
+you the new address.
 
 ## How it works
 

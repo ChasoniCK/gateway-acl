@@ -149,8 +149,8 @@ unshare -rn bash -c 'nft -f /tmp/gwacl.nft && nft -j list counters table inet gw
 
 ## Language
 
-Two languages, Russian and English, chosen at install time and stored as `lang`
-in `config.json`. Strings live in one `STRINGS` dict in `panel.py`; templates
+Two languages, Russian and English, chosen at install time, changed later in the
+panel's settings, and stored as `lang` in `config.json`. Strings live in one `STRINGS` dict in `panel.py`; templates
 carry `{{t.key}}` placeholders and the same dict is injected into the page as a
 `T` object so the JavaScript uses the same source. `install.sh` keeps its own
 messages in two variable blocks.

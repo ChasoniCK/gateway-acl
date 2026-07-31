@@ -333,6 +333,7 @@ except FileNotFoundError:
 c.update(iface=iface, lan=lan, self_ip=self_ip, port=int(port), lang=lang)
 c.setdefault("poll_sec", 60)
 c.setdefault("pw", None)
+c.setdefault("update_check", True)  # written out so it is visible and easy to flip
 fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
 with os.fdopen(fd, "w") as f: json.dump(c, f, indent=1)
 os.chmod(path, 0o600)  # O_CREAT does not change the mode of an existing file
