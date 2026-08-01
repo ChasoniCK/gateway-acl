@@ -92,6 +92,20 @@ Monthly totals are the sum of every day key starting with `YYYY-MM`. Day keys ar
 ten characters; anything shorter is a leftover from an older month-keyed format
 and is still summed, just not charted.
 
+### Retention
+
+`traffic.json` is read and rewritten on every poll — and a poll happens on every
+page refresh, from every open tab. A key per day per device would make that file
+grow without end, and with it the cost of every refresh for the rest of the
+gateway's life.
+
+So `roll_up` folds the day buckets of months older than `KEEP_MONTHS` into a
+single `"YYYY-MM"` key. That shape is one the program already reads:
+`month_totals` counts it, and the per-day chart skips it on key length
+(`len(k) == 10`). The monthly totals and the strip below the chart therefore
+stay exact to the byte — what is given up is the day-by-day chart of an old
+month, and the page says so rather than claiming there is no data.
+
 ### Renames are free
 
 Device names exist only in `devices.json` — they never appear in the ruleset. The
@@ -125,13 +139,19 @@ a read-only `/etc` simply puts the session back to living in memory only.
 set blocked {
   type ipv4_addr
   flags dynamic,timeout
-  timeout 6h
+  timeout 21600s
 }
 ```
 
 `update @blocked { ip saddr }` sits immediately before the final `drop`, so the
 kernel itself records every source it refused, and forgets them six hours later.
 The panel subtracts known devices and shows the rest.
+
+The kernel re-arms the timeout on every packet it drops, so what is left of it
+is how long ago that address last knocked — `BLOCK_TTL` minus the `expires` nft
+reports for the element. That is the difference between something hammering the
+gateway right now and something that gave up hours ago, and it costs nothing:
+the number is already in the answer the panel parses.
 
 This is strictly better than scanning ARP for this purpose: it lists exactly the
 devices that tried to route through the host and were refused, rather than
@@ -150,7 +170,7 @@ def rates(moved, devs, now):
     for ip, (u, d) in moved.items():
         p = _pend.setdefault(ip, [0, 0]); p[0] += u; p[1] += d
     dt = now - _rate_at
-    if dt < 2:
+    if dt < POLL_MIN:
         return
 ```
 
@@ -160,6 +180,56 @@ gone into the day's total, and dropping them from the rate would make a busy
 device look idle whenever two browsers happened to refresh together. A device
 that sent nothing is written as zero rather than left at its last value, or a
 machine that went quiet would keep claiming throughput forever.
+
+`POLL_MIN` is also what `poll()` itself refuses to run inside. Below that window
+there is no new rate to compute, so a second poll a second after the first would
+spend an `nft` call to learn nothing — and with three tabs open, each refreshing
+twelve times a minute, most of the calls are exactly that. `apply()` forces its
+way through regardless: that call exists to read the counters before the rebuild
+zeroes them, and skipping it would throw away whatever they hold.
+
+### What a refresh costs
+
+The page reloads itself every five seconds, because the "now" column is a rate
+measured over exactly that window — the interval is how alive the panel is
+allowed to look. Three things keep the price of that down, and they were put
+there in this order after measuring:
+
+- The counters are behind `POLL_MIN`, so several tabs collapse into one `nft`.
+- The blocked set is cached for `BLOCK_CACHE`. It was the busiest call the panel
+  made — once per request, with no window in front of it — for a set whose
+  elements time out after six hours.
+- `traffic.json` is written only when something in it changed. A poll where no
+  device moved a byte leaves the day, `seen` and the baseline exactly as they
+  were read, and rewriting the file identically is the whole cost of that poll.
+- What did change waits in memory. `flush()` writes at most every
+  `FLUSH_EVERY`, so the interval the page refreshes at and the rate the file is
+  rewritten at are no longer the same number.
+
+Measured on ten devices with three months of history, one tab refreshing every
+five seconds, per minute: fourteen `nft` calls, and **two** writes with traffic
+flowing, none with the network asleep. About 90 MB a day against the 535 MB the
+same interval would have cost writing on every poll — and less than half of what
+the old fifteen-second interval wrote before any of this.
+
+### What the buffer risks
+
+Less than it looks. The history is one object: the day buckets and `last`, the
+baseline every increment is measured from. They go to disk together, so the copy
+on disk is always self-consistent — merely old.
+
+- A **clean stop** loses nothing: systemd sends SIGTERM, the handler flushes.
+  That covers every update, since `install.sh` restarts the service.
+- A **crash or a kill** loses nothing either, which is the part worth stating
+  plainly: the baseline on disk is exactly as old as the totals beside it, so
+  the next poll measures the increment from that older baseline and arrives at
+  the same figure. The kernel's counters kept running through all of it.
+- A **reboot or a power cut** costs up to `FLUSH_EVERY` seconds, because that is
+  the one case where the kernel's counters are lost at the same moment.
+
+`apply()` is the exception that forces a write: it samples the counters
+precisely because the rebuild is about to zero them, and a baseline older than
+that sampling would read the drop as a reset and lose what stood between.
 
 The hourly chart is the same deltas in a second bucket, `_hours`, twenty-four
 keys wide and **in memory only**. Storing it would multiply `traffic.json` by

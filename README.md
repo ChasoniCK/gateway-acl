@@ -37,8 +37,10 @@ device ──► this Linux host ──► uplink or tunnel (sing-box / WireGuar
 - **Turn a device off** without deleting it — keeps its name and history.
 - **Unknown devices.** The kernel records who it dropped into a timeout set; the
   panel lists them, with the hostname out of the DHCP leases and the hardware
-  address out of the ARP cache when the system knows them, and allows one in a
-  click.
+  address out of the ARP cache when the system knows them, says how long ago
+  each one last knocked, and allows one in a click. The field for a new address
+  offers everything the system knows about the network, so nothing has to be
+  typed from memory.
 - **Rename devices** inline. Renaming never touches nftables, so counters
   survive. Sort the table by any column — with the mouse or the keyboard —
   filter it by address, name or hostname, and download the selected month
@@ -167,6 +169,15 @@ test a ruleset without touching your host: [docs/design.md](docs/design.md).
 - Traffic history is kept per address and outlives the device. Bytes of deleted
   ones stay in the month's totals — the panel shows them as a separate "other"
   share, because there is nobody left to attribute them to.
+- Counters accrue in memory and reach `traffic.json` at most once every half a
+  minute. A clean stop loses nothing, and neither does a crash — the baseline on
+  disk is exactly as old as the totals beside it, so the next poll measures the
+  difference from there. Only a sudden reboot costs up to half a minute of
+  accounting, because that is when the kernel's counters go too.
+- The day-by-day chart covers the last three months. Anything older is folded
+  into one figure per month: the monthly totals and the strip below the chart
+  stay exact to the byte, but the daily breakdown of an old month is gone. The
+  first poll after an upgrade folds whatever has already accumulated.
 
 ## License
 

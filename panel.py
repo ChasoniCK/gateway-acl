@@ -20,6 +20,7 @@ Run as root: nft is required.
   --selftest        checks, never touches the network
   --dump            print the ruleset, handy to pipe into `nft -c -f -`
   --set-password    read a password from stdin and store only its hash
+  --version         print the version and exit
 """
 import getpass
 import hashlib
@@ -29,6 +30,7 @@ import ipaddress
 import json
 import os
 import secrets
+import signal
 import socket
 import subprocess
 import sys
@@ -60,8 +62,22 @@ DEFAULTS = {"iface": "eno1", "lan": "192.168.1.0/24", "self_ip": "192.168.1.10",
 SESSION_TTL = 7 * 86400
 FAIL_LIMIT = 5          # misses in a row from one address
 FAIL_BLOCK = 60         # and that is how long it then sits out
+BLOCK_TTL = 6 * 3600    # how long the kernel remembers whom it dropped
+BLOCK_CACHE = 30        # and how long the panel reuses its own last look
+# How long traffic.json is allowed to lag behind memory. This is the seconds of
+# accounting a power cut costs — a clean stop or a crash costs nothing, see
+# flush() — and it is what keeps a page refreshing every five seconds from
+# rewriting the file every five seconds.
+FLUSH_EVERY = 30
+# A rate is measured over a window; below this one there is nothing new to
+# divide, so a poll inside it would spend an nft call to learn nothing.
+POLL_MIN = 2
+# Months kept day by day. Older ones are folded into a single figure: the file
+# is read and rewritten on every poll, and days accumulate for ever.
+KEEP_MONTHS = 3
 
 _lock = threading.Lock()
+_blklock = threading.Lock()
 _sessions = {}          # digest of the token -> when it expires
 _fails = {}             # address -> (misses, blocked until)
 _upd = {"at": 0, "new": None}   # last check, and the tag worth showing
@@ -218,6 +234,9 @@ STRINGS = {
         "csvWhat": "скачать таблицу за выбранный месяц",
         "offline": "нет связи, данные от {t}",
         "updateWhat": "что изменилось",
+        "dotLive": "трафик идёт",
+        "dotQuiet": "тихо",
+        "rolled": "подробности по дням за этот месяц свёрнуты — остался только итог",
     },
     "en": {
         "title": "Gateway",
@@ -339,6 +358,10 @@ STRINGS = {
         "csvWhat": "download the selected month as a table",
         "offline": "no connection, data from {t}",
         "updateWhat": "what changed",
+        "dotLive": "traffic is flowing",
+        "dotQuiet": "quiet",
+        "rolled": "the day-by-day detail for this month has been folded away — "
+                  "only the total is left",
     },
 }
 
@@ -413,12 +436,20 @@ def check_settings(body, base):
     return c
 
 
+def stop(*_):
+    """Everything that must reach the disk before this process goes away."""
+    with _lock:
+        flush(force=True)
+
+
 def restart():
     """Replace this process, the only way to bind a changed port."""
     # ponytail: a fixed delay instead of a shutdown handshake — long enough for
     # the reply to leave, and the browser is told to reconnect by hand anyway.
-    threading.Timer(0.7, lambda: os.execv(sys.executable,
-                                          [sys.executable] + sys.argv)).start()
+    def go():
+        stop()
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+    threading.Timer(0.7, go).start()
 
 
 def load():
@@ -439,6 +470,18 @@ def validate(ip):
     if a not in LAN or a == SELF_IP:
         raise ValueError(T["badIp"].replace("{ip}", str(a)).replace("{lan}", str(LAN)))
     return str(a)
+
+
+def lan_client(ip):
+    """The same question validate() answers, without raising: an address on
+    this network that is not the gateway. The lease file is written by another
+    program and may hold anything, IPv6 entries included — a junk line there
+    must not take the whole page down."""
+    try:
+        a = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return a in LAN and a != SELF_IP
 
 
 def cname(direction, ip):
@@ -560,7 +603,7 @@ table inet gwacl {{
   set blocked {{
     type ipv4_addr
     flags dynamic,timeout
-    timeout 6h
+    timeout {BLOCK_TTL}s
   }}
   chain prerouting {{
     type filter hook prerouting priority raw; policy accept;
@@ -594,27 +637,70 @@ def counters():
             for o in nft_json("counters", "table", "inet", "gwacl") if "counter" in o}
 
 
+def _secs(v):
+    """A duration out of nft's json. Some builds write 21599, others "21599s"."""
+    try:
+        return int(str(v).rstrip("s"))
+    except (TypeError, ValueError):
+        return None
+
+
 def parse_blocked(objs):
-    """Addresses from the dynamic set. Without a timeout an element is a
-    string, with one it is a dict.
+    """{address: seconds since it last knocked}. Without a timeout an element
+    is a string, with one it is a dict.
+
+    The kernel re-arms the timeout on every packet it drops, so what is left of
+    it says when the address last tried — the difference between somebody
+    hammering the gateway right now and somebody who gave up hours ago. None
+    when this build tells us nothing.
     """
+    out = {}
     for o in objs:
-        if "set" in o:
-            return sorted({e["elem"]["val"] if isinstance(e, dict) else e
-                           for e in o["set"].get("elem", [])})
-    return []
+        if "set" not in o:
+            continue
+        for e in o["set"].get("elem", []):
+            if not isinstance(e, dict):
+                out[e] = None
+                continue
+            left = _secs(e["elem"].get("expires"))
+            ttl = _secs(e["elem"].get("timeout")) or BLOCK_TTL
+            out[e["elem"]["val"]] = None if left is None else max(0, ttl - left)
+        break
+    return out
+
+
+_blk = {"at": 0.0, "set": {}}
 
 
 def blocked():
-    try:
-        return parse_blocked(nft_json("set", "inet", "gwacl", "blocked"))
-    except (OSError, subprocess.CalledProcessError, ValueError, KeyError):
-        return []
+    """The dynamic set, cached for BLOCK_CACHE seconds.
+
+    Every page refresh asks for this, and unlike the counters it is not covered
+    by the poll window — so it was the busiest nft call the panel made. A set
+    with a six-hour timeout has nothing new to say in the seconds between two
+    refreshes. apply() drops the cache: rebuilding the table empties the set,
+    and the page should not go on showing what the kernel has forgotten.
+    """
+    with _blklock:
+        if time.time() - _blk["at"] < BLOCK_CACHE:
+            return _blk["set"]
+        try:
+            _blk["set"] = parse_blocked(nft_json("set", "inet", "gwacl", "blocked"))
+        except (OSError, subprocess.CalledProcessError, ValueError, KeyError):
+            _blk["set"] = {}
+        _blk["at"] = time.time()
+        return _blk["set"]
 
 
 def apply(devs):
-    poll()  # sample the counters before the rebuild zeroes them
+    poll(force=True)  # sample the counters before the rebuild zeroes them
+    with _lock:
+        # ...and get that reading onto the disk. The rebuild zeroes the
+        # counters, so a baseline older than this sampling would read the drop
+        # as a reset and lose whatever stood between the two.
+        flush(force=True)
     subprocess.run(["nft", "-f", "-"], input=ruleset(devs), text=True, check=True)
+    _blk["at"] = 0.0  # the rebuild emptied the blocked set; the cache is a lie now
     # The baseline is deliberately left alone: after the rebuild a counter is
     # below it, and accrue reads that as a reset and returns zero.
 
@@ -626,7 +712,7 @@ def accrue(prev, cur):
     return cur if cur < prev else cur - prev
 
 
-def history():
+def _read_history():
     try:
         with open(TRAFFIC) as f:
             h = json.load(f)
@@ -637,6 +723,59 @@ def history():
     h.setdefault("seen", {})
     h.setdefault("last", {})
     return h
+
+
+_hist = None            # the history itself; the file is a copy taken now and then
+_flushed = 0.0          # when that copy was last brought up to date
+_dirty = False          # whether it is behind
+
+
+def history():
+    """The traffic history, read from disk once and then kept in memory.
+
+    Both halves of it have to move together: the day buckets and `last`, the
+    baseline the increments are measured from. Re-reading the file after a poll
+    that was not written would hand back a stale baseline, and the same bytes
+    would be counted a second time into the hourly chart and the rate.
+
+    Callers must hold _lock. Readers that do not want to hold it use snapshot().
+    """
+    global _hist
+    if _hist is None:
+        _hist = _read_history()
+    return _hist
+
+
+def snapshot():
+    """A private copy for a reader outside the lock.
+
+    poll() mutates the live history in place — a new day, a device seen for the
+    first time — and iterating it from an HTTP thread at that moment is how a
+    page refresh crashes on "dictionary changed size during iteration". One
+    level deep is all state() reads.
+    """
+    with _lock:
+        h = history()
+        return {"days": {k: dict(v) for k, v in h["days"].items()},
+                "seen": dict(h["seen"])}
+
+
+def flush(force=False):
+    """Write the history out, at most every FLUSH_EVERY seconds. Holds _lock.
+
+    Buffering costs nothing on a clean stop — SIGTERM flushes — and nothing
+    even on a kill: the baseline on disk is exactly as old as the totals beside
+    it, so the next poll measures the increment from there and lands on the
+    same figure. Only losing the kernel's counters at the same moment, which
+    means a reboot or a power cut, costs the last FLUSH_EVERY seconds.
+    """
+    global _flushed, _dirty
+    if not _dirty or (not force and time.time() - _flushed < FLUSH_EVERY):
+        return False
+    with open(TRAFFIC, "w") as f:
+        json.dump(_hist, f)
+    _flushed, _dirty = time.time(), False
+    return True
 
 
 def apply_deltas(cur, last, day, devs):
@@ -686,7 +825,7 @@ def rates(moved, devs, now):
         p[0] += u
         p[1] += d
     dt = now - _rate_at
-    if dt < 2:
+    if dt < POLL_MIN:
         return
     _rate_at = now
     _rate.clear()
@@ -715,16 +854,57 @@ def note_hour(moved, key=None):
     return bucket
 
 
-def poll():
-    """Sample the nftables counters and add the increment to today."""
+def roll_up(days, month, keep=KEEP_MONTHS):
+    """Fold the day buckets of long-past months into one figure per month.
+
+    A month key is a shape this program already reads: month_totals counts it,
+    and the per-day chart skips it on key length. So the monthly totals and the
+    strip below the chart stay exact to the byte; what is given up is the
+    day-by-day chart of a month older than `keep`.
+
+    Without this, days accumulate for ever in a file that is read and rewritten
+    on every poll. Returns how many day buckets were folded — poll() writes the
+    file only when something in it actually changed.
+    """
+    cut = month
+    for _ in range(keep):
+        cut = prev_month(cut)
+    old = [k for k in days if len(k) == 10 and k[:7] <= cut]
+    for k in old:
+        into = days.setdefault(k[:7], {})
+        for ip, (u, d) in days.pop(k).items():
+            row = into.setdefault(ip, [0, 0])
+            row[0] += u
+            row[1] += d
+    return len(old)
+
+
+_polled = 0.0
+
+
+def poll(force=False):
+    """Sample the nftables counters and add the increment to today.
+
+    Called on the poller's tick and by every page refresh — every open tab, four
+    times a minute. Two of them a second apart would run nft twice to learn the
+    same thing, so anything inside POLL_MIN is dropped. apply() forces its way
+    through: that call exists to read the counters before the rebuild zeroes
+    them, and skipping it would lose whatever they hold.
+    """
+    global _polled, _dirty
     with _lock:
+        now = time.time()
+        if not force and now - _polled < POLL_MIN:
+            return
+        _polled = now
         try:
             cur = counters()
         except (OSError, subprocess.CalledProcessError, ValueError, KeyError):
             return  # no table yet — first run
         h = history()
+        folded = roll_up(h["days"], time.strftime("%Y-%m"))
+        was = dict(h["last"])
         day = h["days"].setdefault(time.strftime("%Y-%m-%d"), {})
-        now = time.time()
         devs = load()
         moved = apply_deltas(cur, h["last"], day, devs)
         for ip in moved:
@@ -733,8 +913,12 @@ def poll():
         rates(moved, devs, now)
         # Counters of removed devices are not kept in the baseline.
         h["last"] = {k: v for k, v in h["last"].items() if k in cur}
-        with open(TRAFFIC, "w") as f:
-            json.dump(h, f)
+        # Nothing moved means nothing to record: a delta of zero leaves the day,
+        # `seen` and the baseline exactly as they were. What did change waits in
+        # memory until flush() decides the file has lagged long enough.
+        if moved or folded or h["last"] != was:
+            _dirty = True
+        flush()
 
 
 def _ver(s):
@@ -977,7 +1161,7 @@ def month_totals(days, month):
 
 def state(month=None):
     poll()
-    h = history()
+    h = snapshot()
     months = sorted({k[:7] for k in h["days"]} | {time.strftime("%Y-%m")})
     if month not in months:
         month = time.strftime("%Y-%m")
@@ -1017,8 +1201,13 @@ def state(month=None):
                   sum(v[1] for v in h["days"][k].values())] for k in day_keys],
         "hours": [[k[-2:], sum(v[0] for v in _hours.get(k, {}).values()),
                    sum(v[1] for v in _hours.get(k, {}).values())] for k in hour_keys],
-        "blocked": [[ip] + names.get(ip, ["", ""])
-                    for ip in blocked() if ip not in known],
+        # Address, whatever the network calls it, and how long ago it knocked.
+        "blocked": [[ip] + names.get(ip, ["", ""]) + [ago]
+                    for ip, ago in sorted(blocked().items()) if ip not in known],
+        # Everything the system knows of on this network and the list does not:
+        # the add form offers them rather than asking anyone to remember one.
+        "lan": [[ip, names[ip][0]] for ip in sorted(names)
+                if ip not in known and lan_client(ip)],
         "sys": sysinfo(),
         "update": _upd["new"],
     }
@@ -1068,7 +1257,8 @@ LOGIN_T = """<!doctype html><meta charset=utf-8>
 <div class=card>
  <h2>{{t.panelTitle}}</h2>
  <form method=post action=/login>
-  <input type=password name=password placeholder="{{t.password}}" autofocus required>
+  <input type=password name=password placeholder="{{t.password}}"
+         autocomplete=current-password autofocus required>
   <button>{{t.signIn}}</button>
  </form>
  {{MSG}}
@@ -1188,6 +1378,10 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  .me{color:var(--dim);font-size:.72rem;margin-left:.4rem}
  #flt{max-width:9rem}
  #off{color:var(--warn);font-size:.82rem}
+ /* Which version this gateway is on, where one goes to ask. Pushed left so it
+    sits opposite the save button instead of costing the card a line. */
+ .ver{margin-right:auto;color:var(--dim);font-size:.78rem;
+      font-family:ui-monospace,monospace;align-self:center}
  /* Every sparkline is scaled to the same peak day, so the rows compare
     against each other and not only against themselves. */
  .spark{display:block;margin:.25rem 0 0 auto}
@@ -1200,6 +1394,8 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  /* A basis, not flex:1 — the button belongs next to the address it acts on,
     not pushed to the far edge of a full-width card. */
  .blk .mini{flex:0 1 16rem;min-width:7rem;overflow-wrap:anywhere;white-space:normal}
+ /* When it last knocked: its own width, so it does not share the name's. */
+ .blk .knock{flex:0 0 auto;min-width:6.5rem}
  .act button{padding:.22rem .5rem;font-size:.82rem;color:var(--dim)}
  .act button:hover{color:var(--fg);border-color:#4a505c}
  .act .on{color:#8fae8f;border-color:#3c4d3c}
@@ -1273,7 +1469,8 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
       placeholder="{{t.sPwKeep}}"></label>
     <label class=chk><input id=s_upd type=checkbox{{UPD}}>{{t.sUpdate}}</label>
    </div>
-   <div class=act><button onclick=saveCfg()>{{t.sSave}}</button></div>
+   <div class=act><span class=ver>gateway-acl {{VERSION}}</span>
+    <button onclick=saveCfg()>{{t.sSave}}</button></div>
    <p class=hint>{{t.sNetHint}}</p>
   </div>
  </details>
@@ -1335,7 +1532,10 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
   <th></tr></thead>
  <tbody id=tb></tbody></table>
  <form id=f style="margin-top:1rem">
-  <input name=ip placeholder="{{EXAMPLE}}" required>
+  <!-- The list is what ARP and the DHCP leases already know and this table
+       does not: a native datalist, so the browser does the completing. -->
+  <input name=ip placeholder="{{EXAMPLE}}" list=lanips required>
+  <datalist id=lanips></datalist>
   <input name=nm placeholder="{{t.phName}}">
   <button>{{t.add}}</button>
  </form>
@@ -1372,7 +1572,8 @@ const upfmt = s => {
 
 // S is the last answer from the server, kept so that sorting, the day/hour
 // switch and picking a device redraw from memory instead of asking again.
-let S = null, month = null, sel = null, mode = 'day', sortk = 'ip', sortd = 1, oth = 0;
+let S = null, month = null, sel = null, mode = 'day', sortk = 'ip', sortd = 1,
+    oth = 0, mtot = 0;
 
 // [short label, up, down, full label, other] — the chart draws whatever this
 // returns, so the month, the last 24 hours and one device's slice are the same
@@ -1391,7 +1592,10 @@ const rows = () => {
 };
 
 const chart = (rs, cum) => {
-  if (!rs.length) return `<p class=hint>${mode === 'hour' ? T.noHours : T.noData}</p>`;
+  // A month with a total but no days behind it is one that has been rolled up.
+  // "no data" would contradict the figure standing right above the chart.
+  if (!rs.length) return `<p class=hint>${mode === 'hour' ? T.noHours
+    : mtot ? T.rolled : T.noData}</p>`;
   // Take the actual width: one viewBox unit is then one pixel, and the
   // labels do not shrink on a phone.
   const W = Math.max(chartbox.clientWidth || 720, 280), H = 190,
@@ -1491,9 +1695,9 @@ const CMP = {
 };
 // The view someone left behind, so a reload does not throw them back to the
 // default sort. In a private window localStorage throws — then it is simply
-// not remembered.
+// not remembered. The picked device is not here: it lives in the address bar.
 const keep = () => { try {
-  localStorage.gwacl = JSON.stringify({sel, mode, sortk, sortd});
+  localStorage.gwacl = JSON.stringify({mode, sortk, sortd});
 } catch (e) {} };
 const sortBy = k => {
   // Names and addresses read best ascending, quantities biggest-first.
@@ -1502,7 +1706,11 @@ const sortBy = k => {
   keep(); draw();
 };
 const setMode = m => { mode = m; keep(); draw(); };
-const pickDev = ip => { sel = sel === ip ? null : ip; keep(); draw(); };
+// The picked device goes in the fragment and nowhere else: that makes it a
+// link one can send, and gives the back button something to undo. Picking only
+// moves the address on — onhashchange is what redraws, once.
+const pickDev = ip => { location.hash = (!ip || sel === ip) ? '' : ip; };
+onhashchange = () => { sel = location.hash.slice(1) || null; draw(); };
 const addKnown = b => post({ip: b.dataset.ip, name: b.dataset.nm});
 
 // The table as the panel shows it, for a spreadsheet. Built here rather than
@@ -1534,8 +1742,12 @@ const draw = () => {
   const one = sel && S.devices.find(x => x.ip === sel);
   msel.innerHTML = S.months.map(m =>
     `<option${m[0] === S.month ? ' selected' : ''}>${m[0]}</option>`).join('');
-  for (const k in HEADS) document.getElementById('h_' + k).textContent =
-    T[HEADS[k]] + (sortk === k ? (sortd > 0 ? ' ↑' : ' ↓') : '');
+  for (const k in HEADS) {
+    const th = document.getElementById('h_' + k), on = sortk === k;
+    th.textContent = T[HEADS[k]] + (on ? (sortd > 0 ? ' ↑' : ' ↓') : '');
+    // The arrow says it to the eye, aria-sort to everything else.
+    th.setAttribute('aria-sort', on ? (sortd > 0 ? 'ascending' : 'descending') : 'none');
+  }
   bday.className = mode === 'day' ? 'on' : '';
   bhour.className = mode === 'hour' ? 'on' : '';
   chsel.innerHTML = one ? `<button onclick="pickDev(null)" title="${T.showAll}">`
@@ -1546,7 +1758,7 @@ const draw = () => {
   // The month's total counts every address the history knows of, the devices
   // only those still on the list. What is left over is "other" — hence a total
   // that is more than inbound plus outbound, and a tile that says why.
-  const mtot = (S.months.find(m => m[0] === S.month) || [0, 0])[1];
+  mtot = (S.months.find(m => m[0] === S.month) || [0, 0])[1];
   oth = one ? 0 : Math.max(0, mtot - S.devices.reduce((a,x) => a+x.up+x.down, 0));
   kt.textContent = fmt(U+D+oth); kd.textContent = fmt(D); ku.textContent = fmt(U);
   ka.textContent = fmt(Math.round((U+D+oth) / Math.max(S.days.length, 1)));
@@ -1579,9 +1791,11 @@ const draw = () => {
     });
   tb.innerHTML = list.map(x => {
     const t = x.up + x.down, me = x.ip === S.you, r = x.rate[0] + x.rate[1];
+    const live = r > 0 || (x.seen && S.now - x.seen < fresh);
     return `<tr class="${x.on ? '' : 'off'}${x.ip === sel ? ' pick' : ''}">`
      + `<td class=ip title="${esc(x.mac)}" onclick="pickDev('${esc(x.ip)}')">`
-     + `<i class="dot${r > 0 || (x.seen && S.now - x.seen < fresh) ? ' live' : ''}"></i>`
+     // The dot carries its meaning in colour alone; the title is the rest of it.
+     + `<i class="dot${live ? ' live' : ''}" title="${live ? T.dotLive : T.dotQuiet}"></i>`
      + `${esc(x.ip)}${me ? `<span class=me>${T.youAre}</span>` : ''}</td>`
      + `<td><input value="${esc(x.name)}" placeholder="${esc(x.host || T.phName)}" `
      + `onchange="setName('${esc(x.ip)}',this.value)"></td>`
@@ -1600,11 +1814,15 @@ const draw = () => {
   unk.hidden = !S.blocked.length;
   // The name and the hardware address go through data-, not into the onclick:
   // both come out of a lease file this program does not own.
-  ub.innerHTML = S.blocked.map(([ip, host, mac]) =>
+  ub.innerHTML = S.blocked.map(([ip, host, mac, knocked]) =>
     `<div class=blk><span class=num>${esc(ip)}</span>`
     + `<span class=mini>${esc(host)}${host && mac ? ' · ' : ''}${esc(mac)}</span>`
+    + `<span class="mini knock">${knocked === null ? '' : ago(knocked)}</span>`
     + `<button data-ip="${esc(ip)}" data-nm="${esc(host)}" onclick="addKnown(this)">`
     + `${T.add}</button></div>`).join('');
+
+  lanips.innerHTML = S.lan.map(([ip, host]) =>
+    `<option value="${esc(ip)}">${esc(host)}</option>`).join('');
 };
 
 // Without this the page keeps showing the last good numbers for as long as it
@@ -1650,6 +1868,14 @@ for (const th of document.querySelectorAll('th.s')) {
   };
 }
 
+// "/" is where one starts typing at a table, in every other program.
+document.onkeydown = e => {
+  if (e.key === '/' && !/^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName)) {
+    e.preventDefault();
+    flt.focus();
+  }
+};
+
 // Whatever was left behind last time, checked before it is trusted: this comes
 // out of storage the panel does not control, and an unknown sort key would
 // take the table down with it.
@@ -1657,16 +1883,20 @@ try {
   const p = JSON.parse(localStorage.gwacl || '{}');
   if (CMP[p.sortk]) { sortk = p.sortk; sortd = p.sortd === -1 ? -1 : 1; }
   if (p.mode === 'day' || p.mode === 'hour') mode = p.mode;
-  if (typeof p.sel === 'string') sel = p.sel;   // draw() drops it if it is gone
 } catch (e) {}
+sel = location.hash.slice(1) || null;   // draw() drops it if it is gone
 
 load();
 // A hidden tab asks for nothing: every /api costs the gateway an nft call, and
 // a page left open in a background tab would go on paying for it all week.
 // Coming back is worth a fresh look, though.
 document.onvisibilitychange = () => document.hidden || load();
+// Five seconds, not fifteen: the "now" column is a rate measured over exactly
+// this window, so the interval is how alive the page is allowed to look. What
+// it costs the gateway is two comparisons and, on a quiet network, no write at
+// all — the counters are behind the poll window and the blocked set is cached.
 setInterval(() => document.hidden
-  || document.activeElement.tagName === 'INPUT' || load(), 15000);
+  || document.activeElement.tagName === 'INPUT' || load(), 5000);
 </script>
 """
 
@@ -1681,6 +1911,12 @@ class H(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(b)))
+        # Nothing here survives its own request: /api is a live reading and the
+        # page itself carries the current settings. Without this the address is
+        # the same on every refresh, the answer has no validator and no expiry,
+        # and a browser is free to serve its own copy — a panel frozen on old
+        # numbers with nothing in the console to say why.
+        self.send_header("Cache-Control", "no-store")
         if cookie:
             self.send_header("Set-Cookie", cookie)
         self.end_headers()
@@ -1845,6 +2081,8 @@ def selftest():
     assert f"counter {cname('up', b)} {{ }}" in r, "but it still needs its counters"
     assert f"ip daddr {a} counter name {cname('down', a)}" in r
     assert "update @blocked { ip saddr }" in r
+    # The panel subtracts what is left of this to say when an address knocked.
+    assert f"timeout {BLOCK_TTL}s" in r
     assert "dport" not in r, "the panel port is open to the whole LAN, the password guards it"
     assert "elements" not in ruleset([]), "an empty set breaks nft syntax"
     assert ruleset([]).count("drop") == 1
@@ -1980,11 +2218,97 @@ def selftest():
     assert fail_blocked(ip), "after the limit of misses the address must sit it out"
     _fails.pop(ip)
 
-    # A real answer from nft 1.1.6.
+    # A real answer from nft 1.1.6. What is left of the timeout is how long ago
+    # the address last knocked — the kernel re-arms it on every dropped packet.
     assert parse_blocked(json.loads('{"nftables":[{"metainfo":{}},{"set":{"name":"blocked",'
         '"elem":[{"elem":{"val":"192.168.1.99","expires":21599}}]}}]}')["nftables"]) \
-        == ["192.168.1.99"]
-    assert parse_blocked([{"set": {"name": "blocked"}}]) == []
+        == {"192.168.1.99": 1}
+    assert parse_blocked([{"set": {"name": "blocked"}}]) == {}
+    # Some builds write a duration as a string, and give the element a timeout
+    # of its own rather than leaving it to the table's.
+    assert parse_blocked([{"set": {"elem": [
+        {"elem": {"val": "10.0.0.1", "expires": "1200s", "timeout": "1800s"}},
+        {"elem": {"val": "10.0.0.2"}}, "10.0.0.3"]}}]) \
+        == {"10.0.0.1": 600, "10.0.0.2": None, "10.0.0.3": None}, \
+        "an element that says nothing about time must not invent a number"
+
+    # The set is asked for once per BLOCK_CACHE, not once per page refresh:
+    # this is the one nft call the poll window does not cover.
+    global nft_json
+    real_nft, asked = nft_json, []
+    nft_json = lambda *a: (asked.append(a), [{"set": {"elem": []}}])[1]
+    _blk["at"] = 0.0
+    blocked(), blocked(), blocked()
+    assert len(asked) == 1, f"the blocked set was asked for {len(asked)} times"
+    _blk["at"] = 0.0
+    blocked()
+    assert len(asked) == 2, "and once more when the cache is out"
+    nft_json = real_nft
+
+    assert lan_client(str(LAN.network_address + 9))
+    assert not lan_client(str(SELF_IP)), "the gateway is not a client of itself"
+    for junk in ("203.0.113.7", "2001:db8::1", "quest-2", ""):
+        assert not lan_client(junk), f"the lease file offered {junk!r} and it was taken"
+
+    days = {"2026-04-30": {"a": [1, 2]}, "2026-05": {"a": [10, 10]},
+            "2026-05-02": {"a": [3, 4], "b": [5, 6]},
+            "2026-06-11": {"a": [7, 8]}, "2026-08-01": {"a": [9, 9]}}
+    was = {m: month_totals(days, m) for m in ("2026-04", "2026-05", "2026-06", "2026-08")}
+    roll_up(days, "2026-08", keep=3)
+    assert {m: month_totals(days, m) for m in was} == was, "a rollup must not lose a byte"
+    assert days["2026-05"] == {"a": [13, 14], "b": [5, 6]}, "folded into the key that was there"
+    assert days["2026-04"] == {"a": [1, 2]}, "and into a new one where there was none"
+    assert [k for k in sorted(days) if len(k) == 10] == ["2026-06-11", "2026-08-01"], \
+        "three months keep their days, everything older keeps only a total"
+    assert roll_up({"2026-08-01": {"a": [1, 1]}}, "2026-08") == 0, \
+        "a fresh install has nothing to fold"
+
+    # The file lags memory on purpose. A poll that moved nothing has nothing to
+    # write; a poll that moved bytes waits for the window; and what waits must
+    # not be lost, so the same reading has to come back after a restart.
+    with tempfile.TemporaryDirectory() as td:
+        global TRAFFIC, counters, load, _hist, _flushed, _dirty
+        keep_io = (TRAFFIC, counters, load)
+        TRAFFIC = os.path.join(td, "traffic.json")
+        counters = lambda: {"up_10_0_0_5": 500, "down_10_0_0_5": 900}
+        load = lambda: [{"ip": "10.0.0.5", "name": "x", "on": True}]
+        _hist, _flushed, _dirty = None, 0.0, False
+        today = time.strftime("%Y-%m-%d")
+
+        poll(force=True)                     # first reading, window wide open
+        stamp = os.stat(TRAFFIC).st_mtime_ns
+        time.sleep(0.01)                     # so any write shows in the mtime
+        _flushed = 0.0                       # even with the window wide open
+        poll(force=True)
+        assert os.stat(TRAFFIC).st_mtime_ns == stamp, "an idle poll wrote the file"
+
+        _flushed = time.time()               # and now the window is shut
+        counters = lambda: {"up_10_0_0_5": 700, "down_10_0_0_5": 900}
+        poll(force=True)                     # moved, but inside the window
+        assert os.stat(TRAFFIC).st_mtime_ns == stamp, "the write was not buffered"
+        assert history()["days"][today] == {"10.0.0.5": [700, 900]}, \
+            "the increment must be in memory the moment it is measured"
+        _flushed = 0.0
+        poll(force=True)
+        assert os.stat(TRAFFIC).st_mtime_ns != stamp, "the buffer was never flushed"
+        assert json.load(open(TRAFFIC))["days"][today] == {"10.0.0.5": [700, 900]}
+
+        # What the buffer still holds is not lost when the process goes: the
+        # baseline on disk is exactly as old as the totals beside it, so the
+        # next poll measures the increment from there and arrives at the same
+        # figure. Here that process is a fresh _hist read back off the file.
+        counters = lambda: {"up_10_0_0_5": 1500, "down_10_0_0_5": 900}
+        poll(force=True)                     # +800, buffered and then dropped
+        _hist, _flushed, _dirty = None, 0.0, False
+        poll(force=True)
+        assert history()["days"][today] == {"10.0.0.5": [1500, 900]}, \
+            "a reading lost with the buffer must come back from the counters"
+
+        _hist, _flushed, _dirty = None, 0.0, False
+        TRAFFIC, counters, load = keep_io
+    _rate.clear()
+    _pend.clear()
+    _hours.clear()
 
     days = {"2026-07": {"1.1.1.1": [5, 5]}, "2026-07-30": {"1.1.1.1": [10, 20]},
             "2026-08-01": {"1.1.1.1": [99, 99]}}
@@ -2031,7 +2355,7 @@ def selftest():
     for el in ("msel", "upd", "updtext", "kt", "kd", "ku", "ka", "kdelta", "chsel",
                "bday", "bhour", "chartbox", "cumlbl", "mstrip", "sysbox", "tb",
                "h_ip", "h_name", "h_traf", "h_now", "h_seen", "unk", "ub",
-               "flt", "off", "kother", "kotherbox", "othlbl"):
+               "flt", "off", "kother", "kotherbox", "othlbl", "lanips"):
         assert f"id={el}>" in page or f"id={el} " in page, f"the page has no {el}"
 
     ru = set(STRINGS["ru"])
@@ -2045,7 +2369,9 @@ def selftest():
 
 
 def main():
-    if "--selftest" in sys.argv:
+    if "--version" in sys.argv:
+        print(VERSION)
+    elif "--selftest" in sys.argv:
         selftest()
     elif "--dump" in sys.argv:
         print(ruleset(load()), end="")
@@ -2060,6 +2386,9 @@ def main():
         if not conf()["pw"]:
             print(T["noPwWarn"].replace("{cmd}", sys.argv[0]), file=sys.stderr)
         apply(load())  # on start (a reboot included) raise the table from disk
+        # systemd stops the service on every update; the buffered counters go
+        # out with it rather than waiting for a flush that never comes.
+        signal.signal(signal.SIGTERM, lambda *a: (stop(), sys.exit(0)))
         threading.Thread(target=poller, daemon=True).start()
         ThreadingHTTPServer(("", PORT), H).serve_forever()
 
