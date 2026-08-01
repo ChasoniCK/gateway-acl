@@ -12,6 +12,18 @@ jobs:
         run: bash -n install.sh
       - name: shellcheck
         run: shellcheck install.sh
+      # Every install compares its own VERSION against the newest tag here. If
+      # a tag ships with the constant left behind, that install decides it is
+      # out of date and says so until the end of time.
+      - name: VERSION matches the tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tag="${GITHUB_REF#refs/tags/v}"
+          ver=$(python3 -c 'import panel; print(panel.VERSION)')
+          if [ "$tag" != "$ver" ]; then
+            echo "tag v$tag, but panel.py says VERSION = $ver" >&2
+            exit 1
+          fi
 
   ruleset:
     runs-on: ubuntu-latest

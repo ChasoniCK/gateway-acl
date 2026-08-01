@@ -191,6 +191,27 @@ absent files simply mean the list looks the way it always did. A lease name
 never reaches the page through an `onclick`; it goes through a `data-`
 attribute, because this program does not own that file.
 
+## The version constant
+
+`VERSION` is what every install compares against the newest tag on GitHub. It
+is a hand-written constant, which is exactly the kind of thing that gets left
+behind — and when it does, the install decides it is out of date and shows a
+banner that no upgrade will ever clear, because the number it reports about
+itself never changes.
+
+So CI refuses the tag rather than trusting anyone to remember:
+
+```yaml
+- name: VERSION matches the tag
+  if: startsWith(github.ref, 'refs/tags/v')
+```
+
+The answer is cached for a day (`UPDATE_EVERY`), so several releases cut in one
+afternoon are not visible to a running panel until tomorrow. Saving the
+settings form resets that timer: it is the one moment the user is demonstrably
+asking about updates, and it gives them a way to force a check without
+restarting the service.
+
 ## Testing a ruleset without risking the host
 
 `nft -c -f file` checks a ruleset, but still needs `CAP_NET_ADMIN` and will not

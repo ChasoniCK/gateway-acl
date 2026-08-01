@@ -12,8 +12,9 @@ bytes into traffic.json per day, detecting resets (see accrue).
 Whoever knocks without being allowed is recorded by the kernel itself into the
 dynamic `blocked` set with a timeout — that is the unknown-devices list.
 
-The only request this program ever makes to the internet is a daily check of
-the latest release tag on GitHub, and `"update_check": false` turns it off.
+The only request this program ever makes to the internet is a check of the
+latest release tag on GitHub — once a day, and once more whenever the settings
+are saved. `"update_check": false` turns it off.
 
 Run as root: nft is required.
   --selftest        checks, never touches the network
@@ -38,7 +39,11 @@ from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
-VERSION = "1.0.0"
+# Must equal the release tag this code is published under: the panel compares
+# it against the newest tag on GitHub, so a forgotten bump makes every install
+# claim to be older than it is and show a banner that never goes away. CI
+# refuses a tag push where the two disagree.
+VERSION = "1.0.4"
 RELEASES_URL = "https://api.github.com/repos/ChasoniCK/gateway-acl/releases/latest"
 UPDATE_EVERY = 86400
 
@@ -1581,6 +1586,11 @@ class H(BaseHTTPRequestHandler):
             if pw:
                 set_password(pw)   # re-reads the config just written
             reload_conf()
+            # Saving the form is the one moment the user is asking about this,
+            # so drop the once-a-day timer and let the next tick go and look.
+            # Without it a release cut this morning stays invisible until
+            # tomorrow, and there would be no way to ask short of a restart.
+            _upd["at"] = 0
             if (c["iface"], c["lan"], c["self_ip"]) != \
                     (base["iface"], base["lan"], base["self_ip"]):
                 apply(load())      # the rules are written against the new network
@@ -1790,6 +1800,8 @@ def selftest():
     assert newer("v1.10.0", "1.9.0"), "versions compare as numbers, not as text"
     assert newer("1.2", "1.2.0") is None, "a short tag is the same release"
     assert newer("nightly", "1.0.0") is None, "an odd tag is silence, not a banner"
+    assert newer("v1.0.3", "1.0.2") == "v1.0.3", "a patch release is an update"
+    assert newer("v1.0.3", "1.1.0") is None, "a minor release outranks a patch"
     assert _ver(VERSION), f"VERSION {VERSION!r} does not compare against a tag"
 
     base = dict(DEFAULTS)
