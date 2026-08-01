@@ -126,6 +126,63 @@ This is strictly better than scanning ARP for this purpose: it lists exactly the
 devices that tried to route through the host and were refused, rather than
 everything that happens to be on the wire.
 
+## Rates, and the hour
+
+`apply_deltas` returns what moved, so the same poll that fills the day bucket
+also feeds a rate. The awkward part is the window: `poll()` runs both on the
+poller's tick and on every page refresh, so the gap between two calls is
+anything from a second to a minute, and dividing by a one-second gap invents
+spikes.
+
+```python
+def rates(moved, devs, now):
+    for ip, (u, d) in moved.items():
+        p = _pend.setdefault(ip, [0, 0]); p[0] += u; p[1] += d
+    dt = now - _rate_at
+    if dt < 2:
+        return
+```
+
+Increments are therefore held in `_pend` until the window is at least two
+seconds wide. Holding rather than discarding matters: the bytes have already
+gone into the day's total, and dropping them from the rate would make a busy
+device look idle whenever two browsers happened to refresh together. A device
+that sent nothing is written as zero rather than left at its last value, or a
+machine that went quiet would keep claiming throughput forever.
+
+The hourly chart is the same deltas in a second bucket, `_hours`, twenty-four
+keys wide and **in memory only**. Storing it would multiply `traffic.json` by
+twenty-four for a view whose whole point is the last day — the month is already
+on disk. The cost is that a restart of the service starts the day over, which
+the panel says out loud rather than drawing a chart that is quietly missing its
+left half.
+
+## The machine
+
+`sysinfo()` reads `/proc/stat`, `/proc/meminfo`, `/proc/uptime`,
+`/sys/class/net/<iface>/statistics/` and `/sys/class/thermal/`, plus
+`os.statvfs` and `os.getloadavg`. Everything is optional: a file that is not
+there yields `None` and the panel leaves that row out instead of refusing to
+draw. That is what makes `--selftest` pass on a machine without procfs at all.
+
+Two of the numbers — processor share and interface throughput — are rates and
+need two readings, so the first call after a start reports zero. They are kept
+under their own lock, apart from the traffic counters: a kernel that stops
+answering questions about itself must not stop the accounting.
+
+Idle counts `iowait` as well. A gateway waiting on its disk is not busy, and
+calling it busy would light the meter for no reason.
+
+## Names for the unknown
+
+The blocked list is a column of bare addresses, which does not answer *whose
+box is knocking*. Two files the system already keeps do: the kernel's ARP cache
+at `/proc/net/arp` for hardware addresses, and dnsmasq's lease file for
+hostnames, when dnsmasq happens to run on this gateway. Both are a courtesy —
+absent files simply mean the list looks the way it always did. A lease name
+never reaches the page through an `onclick`; it goes through a `data-`
+attribute, because this program does not own that file.
+
 ## Testing a ruleset without risking the host
 
 `nft -c -f file` checks a ruleset, but still needs `CAP_NET_ADMIN` and will not
@@ -169,6 +226,8 @@ user as a stray Russian word in an English panel.
 - **No NAT.** This project never adds masquerade rules. Routing is somebody
   else's job — usually a tunnel.
 - **No per-port or per-time rules.** An address is allowed or it is not.
+- **Hourly history on disk.** The last day lives in memory and dies with the
+  process; the month is what `traffic.json` is for.
 - **Sessions in memory.** Restarting the service logs everyone out. Persisting
   them would mean writing a secret to disk to sign cookies, for a panel that is
   already only as strong as its password.

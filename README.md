@@ -26,11 +26,21 @@ device ──► this Linux host ──► uplink or tunnel (sing-box / WireGuar
 - **Allowlist by IP.** Not on the list, not routed. One nftables table, rebuilt
   atomically on every change.
 - **Per-device traffic**, upload and download, accumulated per day and summed per
-  month. Daily chart, month picker, no external libraries.
+  month. A daily chart with the running total drawn over it, the last 24 hours,
+  a bar per month, a sparkline in every row, and any single device on its own —
+  click its address. All inline SVG, no external libraries.
+- **Live speed.** The poll that accrues the counters also divides them by the
+  window it covered, so each row says what that device is pulling right now.
+- **The machine itself.** Processor, memory, swap, disk, load, temperature,
+  uptime and the interface's throughput, read straight out of `/proc` and
+  `/sys`.
 - **Turn a device off** without deleting it — keeps its name and history.
-- **Unknown devices.** The kernel records who it dropped into a timeout set;
-  the panel lists them with a one-click "allow".
-- **Rename devices** inline. Renaming never touches nftables, so counters survive.
+- **Unknown devices.** The kernel records who it dropped into a timeout set; the
+  panel lists them, with the hostname out of the DHCP leases and the hardware
+  address out of the ARP cache when the system knows them, and allows one in a
+  click.
+- **Rename devices** inline. Renaming never touches nftables, so counters
+  survive. Sort the table by any column.
 - **Update notice.** Once a day the panel asks GitHub for the latest release tag
   and shows a banner if yours is older. Off with one checkbox.
 - **Settings in the corner.** Language, update notice, poll interval, LAN

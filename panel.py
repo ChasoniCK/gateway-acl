@@ -175,6 +175,28 @@ STRINGS = {
         "badIface": "интерфейса {iface} в системе нет",
         "selfOutside": "{ip} не входит в сеть {lan}",
         "portBusy": "порт {port} уже занят — панель не поднимется на нём",
+        "colNow": "сейчас",
+        "byDay": "по дням",
+        "byHour": "за сутки",
+        "byMonth": "по месяцам",
+        "cumul": "накопительно",
+        "vsPrev": "к прошлому месяцу",
+        "noHours": "часы копятся с запуска панели — подождите немного",
+        "showAll": "показать все",
+        "sysTitle": "Машина",
+        "sCpu": "процессор",
+        "sMem": "память",
+        "sSwap": "подкачка",
+        "sDisk": "диск",
+        "sNetIf": "интерфейс {iface}",
+        "sLoad": "нагрузка",
+        "sTemp": "температура",
+        "sUptime": "аптайм",
+        "cores": "ядер {n}",
+        "sysNone": "эта система не отдаёт метрики",
+        "perSec": "/с",
+        "dShort": "д",
+        "hShort": "ч",
     },
     "en": {
         "title": "Gateway",
@@ -260,6 +282,28 @@ STRINGS = {
         "badIface": "there is no {iface} interface on this system",
         "selfOutside": "{ip} is outside the {lan} network",
         "portBusy": "port {port} is taken — the panel would not come back up on it",
+        "colNow": "now",
+        "byDay": "by day",
+        "byHour": "last 24 h",
+        "byMonth": "by month",
+        "cumul": "cumulative",
+        "vsPrev": "against the previous month",
+        "noHours": "hours accrue from the panel's start — give it a moment",
+        "showAll": "show all",
+        "sysTitle": "Machine",
+        "sCpu": "cpu",
+        "sMem": "memory",
+        "sSwap": "swap",
+        "sDisk": "disk",
+        "sNetIf": "interface {iface}",
+        "sLoad": "load",
+        "sTemp": "temperature",
+        "sUptime": "uptime",
+        "cores": "{n} cores",
+        "sysNone": "this system exposes no metrics",
+        "perSec": "/s",
+        "dShort": "d",
+        "hShort": "h",
     },
 }
 
@@ -530,12 +574,13 @@ def apply_deltas(cur, last, day, devs):
 
     `last` is the baseline of readings, updated in place. It has to survive a
     restart of the process, or the entire content of the counters gets counted
-    a second time. Returns the addresses that moved.
+    a second time. Returns {address: [up, down]} for whatever moved.
     """
-    moved = set()
+    moved = {}
     for d in devs:
         ip = d["ip"]
         row = day.setdefault(ip, [0, 0])
+        got = [0, 0]
         for i, w in enumerate(("up", "down")):
             key = cname(w, ip)
             n = cur.get(key)
@@ -543,10 +588,59 @@ def apply_deltas(cur, last, day, devs):
                 continue
             delta = accrue(last.get(key, 0), n)
             row[i] += delta
+            got[i] = delta
             last[key] = n
-            if delta:
-                moved.add(ip)
+        if got[0] or got[1]:
+            moved[ip] = got
     return moved
+
+
+_rate = {}              # ip -> [up B/s, down B/s], what the panel calls "now"
+_pend = {}              # bytes seen since the window the rates were last cut on
+_rate_at = time.time()
+_hours = {}             # "YYYY-MM-DD HH" -> {ip: [up, down]}, memory only
+
+
+def rates(moved, devs, now):
+    """Turn the increment into bytes per second.
+
+    poll() runs both on the poller's tick and on every page refresh, so the
+    gap between two calls is anything from a second to a minute. Increments
+    are therefore held in `_pend` until the window is wide enough to divide by
+    — otherwise two refreshes in a row would report a wild number, or drop the
+    bytes that fell between them on the floor.
+    """
+    global _rate_at
+    for ip, (u, d) in moved.items():
+        p = _pend.setdefault(ip, [0, 0])
+        p[0] += u
+        p[1] += d
+    dt = now - _rate_at
+    if dt < 2:
+        return
+    _rate_at = now
+    _rate.clear()
+    for d in devs:
+        u, dn = _pend.get(d["ip"], (0, 0))
+        _rate[d["ip"]] = [u / dt, dn / dt]
+    _pend.clear()
+
+
+def note_hour(moved, key=None):
+    """Keep the last 24 hourly buckets, per device.
+
+    ponytail: memory only, so a restart of the service starts the day over.
+    Storing them would multiply traffic.json by twenty-four for a chart whose
+    whole point is the last day — the month is already on disk.
+    """
+    bucket = _hours.setdefault(key or time.strftime("%Y-%m-%d %H"), {})
+    for ip, (u, d) in moved.items():
+        row = bucket.setdefault(ip, [0, 0])
+        row[0] += u
+        row[1] += d
+    for old in sorted(_hours)[:-24]:
+        del _hours[old]
+    return bucket
 
 
 def poll():
@@ -558,9 +652,13 @@ def poll():
             return  # no table yet — first run
         h = history()
         day = h["days"].setdefault(time.strftime("%Y-%m-%d"), {})
-        now = int(time.time())
-        for ip in apply_deltas(cur, h["last"], day, load()):
-            h["seen"][ip] = now
+        now = time.time()
+        devs = load()
+        moved = apply_deltas(cur, h["last"], day, devs)
+        for ip in moved:
+            h["seen"][ip] = int(now)
+        note_hour(moved)
+        rates(moved, devs, now)
         # Counters of removed devices are not kept in the baseline.
         h["last"] = {k: v for k, v in h["last"].items() if k in cur}
         with open(TRAFFIC, "w") as f:
@@ -609,6 +707,183 @@ def check_update():
         pass
 
 
+# --- the machine itself -----------------------------------------------------
+
+LEASES = ("/var/lib/misc/dnsmasq.leases", "/var/lib/dnsmasq/dnsmasq.leases")
+_syslock = threading.Lock()
+_sys = {"at": 0.0, "cpu": None, "net": None, "pct": None, "bps": [0, 0]}
+
+
+def _read(path):
+    """A whole small /proc or /sys file, or "" when this kernel has no such
+    thing. Every metric below is optional — the panel leaves out what it did
+    not get rather than refusing to draw."""
+    try:
+        with open(path) as f:
+            return f.read()
+    except OSError:
+        return ""
+
+
+def _num(s):
+    try:
+        return float(s.split()[0])
+    except (ValueError, IndexError):
+        return None
+
+
+def cpu_jiffies(text):
+    """(idle, total) off the first line of /proc/stat, None if it is not one.
+
+    Idle counts iowait as well: a gateway waiting on its disk is not busy, and
+    calling it busy would light the meter up for no reason.
+    """
+    f = text.split("\n", 1)[0].split()
+    if len(f) < 5 or f[0] != "cpu":
+        return None
+    try:
+        n = [int(x) for x in f[1:]]
+    except ValueError:
+        return None
+    return n[3] + n[4], sum(n)
+
+
+def cpu_pct(prev, cur):
+    """Busy share between two /proc/stat readings, or None if it cannot tell."""
+    if not prev or not cur:
+        return None
+    idle, total = cur[0] - prev[0], cur[1] - prev[1]
+    if total <= 0:
+        return None
+    return round(max(0.0, min(100.0, 100 * (1 - idle / total))), 1)
+
+
+def parse_meminfo(text):
+    """/proc/meminfo as bytes. It speaks kB, everything else here speaks bytes."""
+    m = {}
+    for line in text.splitlines():
+        k, _, v = line.partition(":")
+        try:
+            m[k] = int(v.split()[0]) * 1024
+        except (ValueError, IndexError):
+            continue
+    return m
+
+
+def temp_c(root="/sys/class/thermal"):
+    """The warmest sensor the kernel exposes, in °C. None when there are none.
+
+    Zones are milli-degrees and a machine has several; the hottest is the one
+    worth showing. Absurd readings are dropped — an empty or disabled zone
+    happily reports 0 or −273.
+    """
+    best = None
+    try:
+        zones = os.listdir(root)
+    except OSError:
+        return None
+    for z in zones:
+        t = _num(_read(f"{root}/{z}/temp"))
+        if t is not None and 0 < t / 1000 < 150:
+            best = max(best or 0, t / 1000)
+    return best
+
+
+def sysinfo():
+    """CPU, memory, disk and interface throughput, straight out of /proc and /sys.
+
+    Two of those are rates and need two readings, so the first call after a
+    start reports zero and each later one covers the time since the previous
+    one. The readings are kept apart from the traffic counters on purpose: a
+    machine that stops answering about itself must not stop the accounting.
+    """
+    with _syslock:
+        now = time.time()
+        dt = now - _sys["at"]
+        cpu = cpu_jiffies(_read("/proc/stat"))
+        net = [_num(_read(f"/sys/class/net/{IFACE}/statistics/{w}_bytes"))
+               for w in ("rx", "tx")]
+        if dt >= 2:
+            pct = cpu_pct(_sys["cpu"], cpu)
+            if pct is not None:
+                _sys["pct"] = pct
+            if None not in net and _sys["net"] and None not in _sys["net"]:
+                _sys["bps"] = [max(0.0, (b - a) / dt) for a, b in zip(_sys["net"], net)]
+            _sys["at"], _sys["cpu"], _sys["net"] = now, cpu, net
+        mem = parse_meminfo(_read("/proc/meminfo"))
+        try:
+            v = os.statvfs("/")
+            disk = [(v.f_blocks - v.f_bavail) * v.f_frsize, v.f_blocks * v.f_frsize]
+        except OSError:
+            disk = None
+        try:
+            load = list(os.getloadavg())
+        except (OSError, AttributeError):
+            load = None
+        return {
+            "cpu": _sys["pct"],
+            "cores": os.cpu_count(),
+            "load": load,
+            "mem": ([mem["MemTotal"] - mem["MemAvailable"], mem["MemTotal"]]
+                    if mem.get("MemTotal") and "MemAvailable" in mem else None),
+            "swap": ([mem["SwapTotal"] - mem["SwapFree"], mem["SwapTotal"]]
+                     if mem.get("SwapTotal") else None),
+            "disk": disk,
+            "temp": temp_c(),
+            "up": _num(_read("/proc/uptime")),
+            "iface": IFACE,
+            "bps": _sys["bps"],
+        }
+
+
+def parse_arp(text):
+    """{address: hardware address} out of /proc/net/arp, skipping empty entries."""
+    out = {}
+    for line in text.splitlines()[1:]:
+        f = line.split()
+        if len(f) >= 4 and f[3] != "00:00:00:00:00:00":
+            out[f[0]] = f[3]
+    return out
+
+
+def parse_leases(text):
+    """{address: hostname} out of a dnsmasq lease file.
+
+    A line is `expiry mac address name clientid`, and a client that gave no
+    name leaves a bare `*` there — that is not a name, it is a placeholder.
+    """
+    out = {}
+    for line in text.splitlines():
+        f = line.split()
+        if len(f) >= 4 and f[3] != "*":
+            out[f[2]] = f[3]
+    return out
+
+
+def lan_names():
+    """{address: [hostname, mac]} — whatever the system already knows.
+
+    Hardware addresses come from the kernel's ARP cache, names from dnsmasq if
+    it happens to run on this gateway. Both are a courtesy: without them the
+    unknown-devices list is a column of bare numbers, and with them it says
+    which box in the flat is knocking.
+    """
+    out = {ip: ["", mac] for ip, mac in parse_arp(_read("/proc/net/arp")).items()}
+    for path in LEASES:
+        text = _read(path)
+        if text:
+            for ip, host in parse_leases(text).items():
+                out.setdefault(ip, ["", ""])[0] = host
+            break
+    return out
+
+
+def prev_month(m):
+    """The month before "YYYY-MM"."""
+    y, mo = int(m[:4]), int(m[5:7])
+    return f"{y - 1:04d}-12" if mo == 1 else f"{y:04d}-{mo - 1:02d}"
+
+
 def month_totals(days, month):
     tot = {}
     for k, devs in days.items():
@@ -632,17 +907,40 @@ def state(month=None):
     # len == 10 filters out old-format keys ("2026-07"): they still count
     # towards the month total, but never into the per-day chart.
     day_keys = sorted(k for k in h["days"] if k.startswith(month) and len(k) == 10)
+    hour_keys = sorted(_hours)
+    names = lan_names()
+
+    def total(m):
+        return sum(sum(v) for v in month_totals(h["days"], m).values())
+
     return {
         "month": month,
-        "months": months,
+        # Every month is offered in the picker; the strip below the chart draws
+        # the last twelve of them.
+        "months": [[m, total(m)] for m in months],
+        "prev": total(prev_month(month)),
         "now": int(time.time()),
+        "poll": POLL_SEC,
         "devices": [dict(d, on=d.get("on", True),
                          up=tot.get(d["ip"], [0, 0])[0],
                          down=tot.get(d["ip"], [0, 0])[1],
-                         seen=h["seen"].get(d["ip"], 0)) for d in load()],
+                         seen=h["seen"].get(d["ip"], 0),
+                         rate=_rate.get(d["ip"], [0, 0]),
+                         host=names.get(d["ip"], ["", ""])[0],
+                         mac=names.get(d["ip"], ["", ""])[1],
+                         series=[h["days"][k].get(d["ip"], [0, 0]) for k in day_keys],
+                         # .get: the poller may drop the oldest hour between
+                         # the snapshot of the keys and the read.
+                         hseries=[_hours.get(k, {}).get(d["ip"], [0, 0])
+                                  for k in hour_keys])
+                    for d in load()],
         "days": [[k, sum(v[0] for v in h["days"][k].values()),
                   sum(v[1] for v in h["days"][k].values())] for k in day_keys],
-        "blocked": [ip for ip in blocked() if ip not in known],
+        "hours": [[k[-2:], sum(v[0] for v in _hours.get(k, {}).values()),
+                   sum(v[1] for v in _hours.get(k, {}).values())] for k in hour_keys],
+        "blocked": [[ip] + names.get(ip, ["", ""])
+                    for ip in blocked() if ip not in known],
+        "sys": sysinfo(),
         "update": _upd["new"],
     }
 
@@ -651,10 +949,12 @@ def state(month=None):
 
 CSS = """
  :root{--bg:#101216;--card:#171a20;--line:#262a33;--fg:#d8dce3;--dim:#767d8a;
-       --up:#a8763f;--down:#5b9bb5}
+       --up:#a8763f;--down:#5b9bb5;--warn:#c4756a}
  *{box-sizing:border-box}
- body{font:15px/1.55 system-ui,sans-serif;max-width:52rem;margin:0 auto;
-      padding:2rem 1rem 4rem;background:var(--bg);color:var(--fg)}
+ /* The page takes the whole window. Nothing here is prose, so a reading
+    measure would only push the numbers apart. */
+ body{font:15px/1.55 system-ui,sans-serif;margin:0;
+      padding:1.5rem 1.75rem 4rem;background:var(--bg);color:var(--fg)}
  h1{font-size:1.05rem;font-weight:600;margin:0;letter-spacing:.01em}
  select,input,button{font:inherit;background:#1c2027;border:1px solid var(--line);
    color:var(--fg);border-radius:5px;padding:.32rem .55rem}
@@ -674,7 +974,7 @@ LOGIN_T = """<!doctype html><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
 <title>{{t.loginTitle}}</title>
 <style>{{CSS}}
- body{max-width:22rem;padding-top:22vh}
+ body{max-width:22rem;margin:0 auto;padding-top:22vh}
  form{display:flex;gap:.5rem;margin-top:.9rem}
  input{flex:1;min-width:0}
  .err{color:#d08a8a;font-size:.85rem;margin-top:.7rem}
@@ -729,25 +1029,71 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  .bar{display:flex;align-items:baseline;gap:.75rem;flex-wrap:wrap;margin-bottom:1.25rem}
  .bar .sp{flex:1}
  .big{font-size:1.5rem}
+ /* The chart earns the width, the machine's numbers do not. */
+ .row{display:grid;gap:1rem;grid-template-columns:minmax(0,2fr) minmax(0,24rem);
+      align-items:start}
+ .ch{display:flex;align-items:baseline;gap:.6rem;margin-bottom:.9rem}
+ .ch h2{margin:0}
+ .ch .sp{flex:1}
+ .sub{font-size:.72rem;font-weight:600;letter-spacing:.09em;text-transform:uppercase;
+      color:var(--dim);margin:1.2rem 0 .5rem}
  .kpi{display:flex;gap:2rem;flex-wrap:wrap;margin-bottom:.4rem}
  .kpi div{min-width:6rem}
  .kpi span{display:block;font-size:.75rem;color:var(--dim);letter-spacing:.05em}
- svg{display:block;width:100%;height:auto}
+ .delta{font-style:normal;font-size:.8rem;color:var(--dim);margin-left:.45rem}
+ #chartbox svg{display:block;width:100%;height:auto}
+ /* One bar per month, click to go there. The height is the month's total, so
+    a glance says whether this one is out of the ordinary. */
+ .months{display:flex;gap:.25rem;align-items:flex-end}
+ .mo{flex:1;min-width:0;background:none;border:0;padding:.15rem 0;display:flex;
+     flex-direction:column;justify-content:flex-end;align-items:center;gap:.3rem}
+ /* Narrow: at full page width a bar as wide as its cell reads as a tile, and
+    the differences in height stop being the thing you notice. */
+ .mo i{display:block;width:100%;max-width:1.6rem;background:#2f3542;border-radius:2px}
+ .mo:hover i{background:#485162}
+ .mo.cur i{background:var(--down)}
+ .mo span{font-size:.68rem;color:var(--dim);font-family:ui-monospace,monospace}
+ .mo.cur span{color:var(--fg)}
+ .srow{display:grid;grid-template-columns:6.5rem minmax(0,1fr);gap:.2rem .8rem;
+       align-items:baseline;padding:.45rem 0;border-bottom:1px solid var(--line)}
+ .srow:last-child{border-bottom:0}
+ .srow>span{font-size:.78rem;color:var(--dim)}
+ /* Beats .num's nowrap: the load line carries the core count and an interface
+    name can be anything, so a long value wraps instead of leaving the card. */
+ .srow b{white-space:normal;overflow-wrap:anywhere}
+ .meter{grid-column:2;height:3px;border-radius:2px;background:#22262e}
+ .meter i{display:block;height:100%;border-radius:2px;background:var(--down)}
+ .dot{display:inline-block;width:6px;height:6px;border-radius:50%;
+      background:#6f9f6f;margin-right:.45rem;vertical-align:middle}
  table{width:100%;border-collapse:collapse}
  th{font-size:.72rem;font-weight:600;letter-spacing:.08em;text-transform:uppercase;
     color:var(--dim);text-align:left;padding:0 .4rem .5rem;border-bottom:1px solid var(--line)}
  th.r,td.r{text-align:right}
+ th.s{cursor:pointer;user-select:none}
+ th.s:hover{color:var(--fg)}
  td{padding:.55rem .4rem;border-bottom:1px solid var(--line);vertical-align:middle}
  tbody tr:last-child td{border-bottom:0}
- td.ip{font-family:ui-monospace,monospace;white-space:nowrap}
+ td.ip{font-family:ui-monospace,monospace;white-space:nowrap;cursor:pointer}
+ td.ip:hover{color:#9cc4d6}
+ tr.pick td.ip{color:var(--down)}
+ tr.pick{background:#1b2029}
  td input{width:100%;background:transparent;border:1px solid transparent;padding:.2rem .35rem}
  td input:hover{border-color:var(--line)}
  td input:focus{background:#1c2027;border-color:#3d434f;outline:none}
  .off td.ip,.off td input{color:var(--dim)}
  .me{color:var(--dim);font-size:.72rem;margin-left:.4rem}
- .share{height:3px;border-radius:2px;background:var(--down);margin-top:.3rem;min-width:2px}
+ /* Every sparkline is scaled to the same peak day, so the rows compare
+    against each other and not only against themselves. */
+ .spark{display:block;margin:.25rem 0 0 auto}
  .mini{font-size:.78rem;color:var(--dim);white-space:nowrap}
  .act{display:flex;gap:.35rem;justify-content:flex-end}
+ /* Address, whatever the network knows it as, and the button. It wraps: on a
+    phone the three of them do not fit on one line. */
+ .blk{display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;margin:.35rem 0}
+ .blk .num{min-width:9rem}
+ /* A basis, not flex:1 — the button belongs next to the address it acts on,
+    not pushed to the far edge of a full-width card. */
+ .blk .mini{flex:0 1 16rem;min-width:7rem;overflow-wrap:anywhere;white-space:normal}
  .act button{padding:.22rem .5rem;font-size:.82rem;color:var(--dim)}
  .act button:hover{color:var(--fg);border-color:#4a505c}
  .act .on{color:#8fae8f;border-color:#3c4d3c}
@@ -770,8 +1116,11 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  .chk input{accent-color:var(--down)}
  .legend{display:flex;gap:1rem;font-size:.78rem;color:var(--dim);margin-top:.5rem}
  .legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:.35rem}
+ .legend i.dash{width:14px;height:0;border-radius:0;border-top:1.5px dashed #6d7686;
+                vertical-align:middle}
  form{display:flex;gap:.5rem;flex-wrap:wrap}
  form input{flex:1;min-width:8rem}
+ @media (max-width:900px){.row{grid-template-columns:1fr}}
  /* On a phone the columns do not fit — a row becomes a block of two lines:
     address with name, then traffic, activity and buttons. */
  @media (max-width:620px){
@@ -787,7 +1136,8 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
   td{display:block;border:0;padding:0}
   td:nth-child(2){flex:1 1 8rem}
   td.r{text-align:left}
-  .share{display:none}
+  .spark{display:none}
+  .srow{grid-template-columns:6.5rem minmax(0,1fr)}
   .act{justify-content:flex-start}
   /* Too narrow to hang off the corner: a sheet at the bottom instead, so it
      never covers the button that opened it. */
@@ -826,22 +1176,44 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  <p class=hint>{{t.updateHint}}</p>
 </div>
 
-<div class=card>
- <h2>{{t.monthUse}}</h2>
- <div class=kpi>
-  <div><span>{{t.total}}</span><b class="num big" id=kt></b></div>
-  <div><span>{{t.inbound}}</span><b class=num id=kd></b></div>
-  <div><span>{{t.outbound}}</span><b class=num id=ku></b></div>
-  <div><span>{{t.perDay}}</span><b class=num id=ka></b></div>
+<div class=row>
+ <div class=card>
+  <div class=ch>
+   <h2>{{t.monthUse}}</h2><span id=chsel></span><span class=sp></span>
+   <div class=act>
+    <button id=bday onclick="setMode('day')">{{t.byDay}}</button>
+    <button id=bhour onclick="setMode('hour')">{{t.byHour}}</button>
+   </div>
+  </div>
+  <div class=kpi>
+   <div><span>{{t.total}}</span><b class="num big" id=kt></b><em class=delta id=kdelta></em></div>
+   <div><span>{{t.inbound}}</span><b class=num id=kd></b></div>
+   <div><span>{{t.outbound}}</span><b class=num id=ku></b></div>
+   <div><span>{{t.perDay}}</span><b class=num id=ka></b></div>
+  </div>
+  <div id=chartbox></div>
+  <div class=legend><span><i style="background:var(--down)"></i>{{t.inbound}}</span>
+   <span><i style="background:var(--up)"></i>{{t.outbound}}</span>
+   <span id=cumlbl><i class=dash></i>{{t.cumul}}</span></div>
+  <h3 class=sub>{{t.byMonth}}</h3>
+  <div id=mstrip></div>
  </div>
- <div id=chartbox></div>
- <div class=legend><span><i style="background:var(--down)"></i>{{t.inbound}}</span>
-  <span><i style="background:var(--up)"></i>{{t.outbound}}</span></div>
+
+ <div class=card>
+  <div class=ch><h2>{{t.sysTitle}}</h2></div>
+  <div id=sysbox></div>
+ </div>
 </div>
 
 <div class=card>
  <h2>{{t.devicesTitle}}</h2>
- <table><thead><tr><th>{{t.colAddr}}<th>{{t.colName}}<th class=r>{{t.colTraffic}}<th class=r>{{t.colSeen}}<th></tr></thead>
+ <table><thead><tr>
+  <th class=s id=h_ip onclick="sortBy('ip')">
+  <th class=s id=h_name onclick="sortBy('name')">
+  <th class="r s" id=h_traf onclick="sortBy('traf')">
+  <th class="r s" id=h_now onclick="sortBy('now')">
+  <th class="r s" id=h_seen onclick="sortBy('seen')">
+  <th></tr></thead>
  <tbody id=tb></tbody></table>
  <form id=f style="margin-top:1rem">
   <input name=ip placeholder="{{EXAMPLE}}" required>
@@ -872,65 +1244,194 @@ const n = (tpl, v) => tpl.replace('{n}', v);
 const ago = s => s < 90 ? T.now : s < 3600 ? n(T.minAgo, Math.round(s/60))
   : s < 86400 ? n(T.hAgo, Math.round(s/3600)) : n(T.dAgo, Math.round(s/86400));
 
-const chart = days => {
-  if (!days.length) return `<p class=hint>${T.noData}</p>`;
+const upfmt = s => {
+  const d = Math.floor(s/86400), h = Math.floor(s%86400/3600);
+  return (d ? d + T.dShort + ' ' : '') + h + T.hShort;
+};
+
+// S is the last answer from the server, kept so that sorting, the day/hour
+// switch and picking a device redraw from memory instead of asking again.
+let S = null, month = null, sel = null, mode = 'day', sortk = 'ip', sortd = 1;
+
+// [short label, up, down, full label] — the chart draws whatever this returns,
+// so the month, the last 24 hours and one device's slice are the same code.
+const rows = () => {
+  const src = mode === 'hour' ? S.hours : S.days;
+  const d = sel && S.devices.find(x => x.ip === sel);
+  const ser = d && (mode === 'hour' ? d.hseries : d.series);
+  return src.map((r, i) => [mode === 'hour' ? r[0] : String(+r[0].slice(8)),
+                            ser ? ser[i][0] : r[1], ser ? ser[i][1] : r[2], r[0]]);
+};
+
+const chart = (rs, cum) => {
+  if (!rs.length) return `<p class=hint>${mode === 'hour' ? T.noHours : T.noData}</p>`;
   // Take the actual width: one viewBox unit is then one pixel, and the
   // labels do not shrink on a phone.
-  const W = Math.max(chartbox.clientWidth || 720, 280), H = 168,
-        L = 54, B = 20, top = 8;
-  const max = Math.max(...days.map(d => d[1] + d[2]), 1024);
-  const bw = (W - L) / days.length, plot = H - B - top;
+  const W = Math.max(chartbox.clientWidth || 720, 280), H = 190,
+        L = 54, B = 20, top = 10;
+  const max = Math.max(...rs.map(d => d[1] + d[2]), 1024);
+  const bw = (W - L) / rs.length, plot = H - B - top;
   const y = v => top + plot - (v / max) * plot;
   let g = '';
   for (const f of [0, .5, 1]) g += `<line x1=${L} x2=${W} y1=${y(max*f)} y2=${y(max*f)} `
     + `stroke="#262a33"/><text x=${L-8} y=${y(max*f)+4} text-anchor=end fill="#767d8a" `
     + `font-size=10 font-family=ui-monospace>${f ? fmtAx(max*f) : 0}</text>`;
-  const bars = days.map((d, i) => {
+  const bars = rs.map((d, i) => {
     const x = L + i*bw + bw*.18, w = Math.max(1, bw*.64);
     const hu = (d[1]/max)*plot, hd = (d[2]/max)*plot;
-    const lbl = days.length > 20 ? (i % 5 === 0) : true;
-    return `<g><title>${d[0]}  ↓ ${fmt(d[2])}  ↑ ${fmt(d[1])}</title>`
+    const lbl = rs.length > 20 ? (i % 5 === 0) : true;
+    return `<g><title>${d[3]}  ↓ ${fmt(d[2])}  ↑ ${fmt(d[1])}</title>`
       + `<rect x=${x} y=${y(d[1]+d[2])} width=${w} height=${hu} fill="var(--up)"/>`
       + `<rect x=${x} y=${y(d[2])} width=${w} height=${hd} fill="var(--down)"/>`
       + `<rect x=${L+i*bw} y=${top} width=${bw} height=${plot} fill="none" pointer-events="all"/></g>`
-      + (lbl ? `<text x=${x+w/2} y=${H-5} text-anchor=middle fill="#767d8a" font-size=10 font-family=ui-monospace>${+d[0].slice(8)}</text>` : '');
+      + (lbl ? `<text x=${x+w/2} y=${H-5} text-anchor=middle fill="#767d8a" font-size=10 font-family=ui-monospace>${d[0]}</text>` : '');
   }).join('');
-  return `<svg viewBox="0 0 ${W} ${H}">${g}${bars}</svg>`;
+  // The running total, scaled so the end of the line is the top of the plot:
+  // the shape answers "are we going faster than last time", the tooltip the
+  // exact figure. A second axis would cost more than it explains.
+  let line = '';
+  const tot = rs.reduce((a, d) => a + d[1] + d[2], 0);
+  if (cum && rs.length > 1 && tot) {
+    let run = 0;
+    const pts = rs.map((d, i) => { run += d[1] + d[2];
+      return `${(L + i*bw + bw/2).toFixed(1)},${(top + plot - run/tot*plot).toFixed(1)}`;
+    }).join(' ');
+    line = `<polyline fill=none stroke="#6d7686" stroke-width=1.4 stroke-dasharray="3 3"`
+      + ` points="${pts}"><title>${T.cumul}  ${fmt(tot)}</title></polyline>`;
+  }
+  return `<svg viewBox="0 0 ${W} ${H}">${g}${bars}${line}</svg>`;
 };
 
-const draw = s => {
-  msel.innerHTML = s.months.map(m =>
-    `<option${m === s.month ? ' selected' : ''}>${m}</option>`).join('');
-  const U = s.devices.reduce((a,x) => a+x.up, 0), D = s.devices.reduce((a,x) => a+x.down, 0);
+const spark = (ser, max, on) => {
+  if (!ser || ser.length < 2) return '';
+  const w = 72, h = 15, bw = w/ser.length;
+  return `<svg class=spark viewBox="0 0 ${w} ${h}" width=${w} height=${h} `
+    + `fill="var(--down)"${on ? '' : ' opacity=.35'}>`
+    + ser.map((v, i) => { const t = (v[0]+v[1])/max*h;
+        // Quoted: an unquoted last attribute would swallow the closing slash.
+        return t < .4 ? '' : `<rect x="${(i*bw).toFixed(2)}" y="${(h-t).toFixed(2)}" `
+          + `width="${Math.max(.7, bw*.72).toFixed(2)}" height="${t.toFixed(2)}"/>`;
+      }).join('') + `</svg>`;
+};
+
+const strip = () => {
+  const ms = S.months.slice(-12), max = Math.max(...ms.map(m => m[1]), 1);
+  return `<div class=months>` + ms.map(m =>
+    `<button class="mo${m[0] === S.month ? ' cur' : ''}" onclick="load('${m[0]}')" `
+    + `title="${m[0]}  ${fmt(m[1])}"><i style="height:${Math.max(2, m[1]/max*46).toFixed(0)}px">`
+    + `</i><span>${m[0].slice(5)}</span></button>`).join('') + `</div>`;
+};
+
+const meter = (pct, warn) => `<div class=meter><i style="width:${Math.min(100, Math.max(0, pct)).toFixed(0)}%`
+  + `${pct >= warn ? ';background:var(--warn)' : ''}"></i></div>`;
+const srow = (label, val, pct, warn) => `<div class=srow><span>${label}</span>`
+  + `<b class=num>${val}</b>${pct === null ? '' : meter(pct, warn)}</div>`;
+
+const machine = s => {
+  let h = '';
+  if (s.cpu !== null) h += srow(T.sCpu, s.cpu.toFixed(0) + '%', s.cpu, 85);
+  if (s.mem) h += srow(T.sMem, `${fmt(s.mem[0])} / ${fmt(s.mem[1])}`,
+                       s.mem[0]/s.mem[1]*100, 88);
+  if (s.swap) h += srow(T.sSwap, `${fmt(s.swap[0])} / ${fmt(s.swap[1])}`,
+                        s.swap[0]/s.swap[1]*100, 50);
+  if (s.disk) h += srow(T.sDisk, `${fmt(s.disk[0])} / ${fmt(s.disk[1])}`,
+                        s.disk[0]/s.disk[1]*100, 90);
+  h += srow(T.sNetIf.replace('{iface}', esc(s.iface)),
+            `↓ ${fmt(s.bps[0])}${T.perSec}  ↑ ${fmt(s.bps[1])}${T.perSec}`, null);
+  if (s.load) h += srow(T.sLoad, s.load.map(x => x.toFixed(2)).join('  ')
+      + (s.cores ? '  · ' + n(T.cores, s.cores) : ''),
+      s.cores ? s.load[0]/s.cores*100 : null, 100);
+  if (s.temp) h += srow(T.sTemp, s.temp.toFixed(0) + ' °C', (s.temp-30)/50*100, 80);
+  if (s.up) h += srow(T.sUptime, upfmt(s.up), null);
+  return h || `<p class=hint>${T.sysNone}</p>`;
+};
+
+const HEADS = {ip: 'colAddr', name: 'colName', traf: 'colTraffic',
+               now: 'colNow', seen: 'colSeen'};
+const CMP = {
+  // Octets padded, or 192.168.1.9 would sort after 192.168.1.10.
+  ip: x => x.ip.split('.').map(o => o.padStart(3, '0')).join('.'),
+  name: x => (x.name || '￿').toLowerCase(),
+  traf: x => x.up + x.down,
+  now: x => x.rate[0] + x.rate[1],
+  seen: x => x.seen,
+};
+const sortBy = k => {
+  // Names and addresses read best ascending, quantities biggest-first.
+  sortd = sortk === k ? -sortd : (k === 'ip' || k === 'name' ? 1 : -1);
+  sortk = k;
+  draw();
+};
+const setMode = m => { mode = m; draw(); };
+const pickDev = ip => { sel = sel === ip ? null : ip; draw(); };
+const addKnown = b => post({ip: b.dataset.ip, name: b.dataset.nm});
+
+const draw = () => {
+  if (!S) return;
+  if (sel && !S.devices.some(x => x.ip === sel)) sel = null;
+  const one = sel && S.devices.find(x => x.ip === sel);
+  msel.innerHTML = S.months.map(m =>
+    `<option${m[0] === S.month ? ' selected' : ''}>${m[0]}</option>`).join('');
+  for (const k in HEADS) document.getElementById('h_' + k).textContent =
+    T[HEADS[k]] + (sortk === k ? (sortd > 0 ? ' ↑' : ' ↓') : '');
+  bday.className = mode === 'day' ? 'on' : '';
+  bhour.className = mode === 'hour' ? 'on' : '';
+  chsel.innerHTML = one ? `<button onclick="pickDev(null)" title="${T.showAll}">`
+    + `${esc(one.name || one.ip)} ×</button>` : '';
+
+  const dv = one ? [one] : S.devices;
+  const U = dv.reduce((a,x) => a+x.up, 0), D = dv.reduce((a,x) => a+x.down, 0);
   kt.textContent = fmt(U+D); kd.textContent = fmt(D); ku.textContent = fmt(U);
-  ka.textContent = fmt(Math.round((U+D) / Math.max(s.days.length, 1)));
-  chartbox.innerHTML = chart(s.days);
-  const peak = Math.max(...s.devices.map(x => x.up + x.down), 1);
-  tb.innerHTML = s.devices.map(x => {
-    const t = x.up + x.down, me = x.ip === s.you;
-    return `<tr class="${x.on ? '' : 'off'}"><td class=ip>${esc(x.ip)}`
-     + `${me ? `<span class=me>${T.youAre}</span>` : ''}`
-     + `<td><input value="${esc(x.name)}" onchange="setName('${esc(x.ip)}',this.value)"></td>`
-     + `<td class="r num">${fmt(t)}<div class=share style="width:${(t/peak*100).toFixed(1)}%;`
-     + `margin-left:auto;opacity:${x.on ? 1 : .35}"></div></td>`
-     + `<td class="r mini">${x.seen ? ago(s.now - x.seen) : '—'}</td>`
+  ka.textContent = fmt(Math.round((U+D) / Math.max(S.days.length, 1)));
+  // Only against the whole month: a single device against everything last
+  // month would be a comparison of two different things.
+  const pc = (!one && S.prev) ? Math.round((U+D-S.prev)/S.prev*100) : null;
+  kdelta.textContent = pc === null ? '' : (pc > 0 ? '+' : '') + pc + '%';
+  kdelta.title = pc === null ? '' : T.vsPrev;
+  chartbox.innerHTML = chart(rows(), mode === 'day');
+  cumlbl.hidden = mode !== 'day';
+  mstrip.innerHTML = strip();
+  sysbox.innerHTML = S.sys ? machine(S.sys) : `<p class=hint>${T.sysNone}</p>`;
+
+  const peak = Math.max(1, ...S.devices.flatMap(x => x.series.map(v => v[0]+v[1])));
+  const fresh = Math.max(120, S.poll * 2);
+  const list = S.devices.slice().sort((a, b) => {
+    const p = CMP[sortk](a), q = CMP[sortk](b);
+    return (p < q ? -1 : p > q ? 1 : 0) * sortd;
+  });
+  tb.innerHTML = list.map(x => {
+    const t = x.up + x.down, me = x.ip === S.you, r = x.rate[0] + x.rate[1];
+    return `<tr class="${x.on ? '' : 'off'}${x.ip === sel ? ' pick' : ''}">`
+     + `<td class=ip title="${esc(x.mac)}" onclick="pickDev('${esc(x.ip)}')">`
+     + `${r > 0 || (x.seen && S.now - x.seen < fresh) ? '<i class=dot></i>' : ''}`
+     + `${esc(x.ip)}${me ? `<span class=me>${T.youAre}</span>` : ''}</td>`
+     + `<td><input value="${esc(x.name)}" placeholder="${esc(x.host || T.phName)}" `
+     + `onchange="setName('${esc(x.ip)}',this.value)"></td>`
+     + `<td class="r num">${fmt(t)}${spark(x.series, peak, x.on)}</td>`
+     + `<td class="r num mini">${r > 0 ? `↓ ${fmt(x.rate[1])}${T.perSec}`
+        + `  ↑ ${fmt(x.rate[0])}${T.perSec}` : '—'}</td>`
+     + `<td class="r mini">${x.seen ? ago(S.now - x.seen) : '—'}</td>`
      + `<td><div class=act><button class="${x.on ? '' : 'on'}" `
      + `onclick="post({ip:'${esc(x.ip)}',on:${!x.on}})">${x.on ? T.turnOff : T.turnOn}</button>`
      + `<button onclick="del('${esc(x.ip)}',${me})">${T.del}</button></div></td></tr>`;
-  }).join('') || `<tr><td colspan=5 class=hint>${T.empty}</td></tr>`;
-  upd.hidden = !s.update;
+  }).join('') || `<tr><td colspan=6 class=hint>${T.empty}</td></tr>`;
+
+  upd.hidden = !S.update;
   // textContent, not innerHTML: the tag comes off the network.
-  if (s.update) updtext.textContent = T.updateNew.replace('{v}', s.update);
-  unk.hidden = !s.blocked.length;
-  ub.innerHTML = s.blocked.map(ip =>
-    `<div class=act style="justify-content:flex-start;margin:.3rem 0">`
-    + `<span class="num" style="min-width:9rem">${esc(ip)}</span>`
-    + `<button onclick="post({ip:'${esc(ip)}',name:''})">${T.add}</button></div>`).join('');
+  if (S.update) updtext.textContent = T.updateNew.replace('{v}', S.update);
+  unk.hidden = !S.blocked.length;
+  // The name and the hardware address go through data-, not into the onclick:
+  // both come out of a lease file this program does not own.
+  ub.innerHTML = S.blocked.map(([ip, host, mac]) =>
+    `<div class=blk><span class=num>${esc(ip)}</span>`
+    + `<span class=mini>${esc(host)}${host && mac ? ' · ' : ''}${esc(mac)}</span>`
+    + `<button data-ip="${esc(ip)}" data-nm="${esc(host)}" onclick="addKnown(this)">`
+    + `${T.add}</button></div>`).join('');
 };
 
-let month = null;
 const load = m => fetch('/api?month=' + (month = m || month || ''))
-  .then(r => r.status === 401 ? location.reload() : r.json().then(draw));
+  .then(r => r.status === 401 ? location.reload()
+    : r.json().then(s => { S = s; draw(); }));
 const post = body => fetch('/api', {method:'POST', body: JSON.stringify(body)})
   .then(r => r.ok ? load() : r.text().then(alert));
 const setName = (ip, name) => post({ip, name});
@@ -947,6 +1448,9 @@ const saveCfg = () => fetch('/settings', {method:'POST', body: JSON.stringify({
     self_ip: s_self.value, pw: s_pw.value})})
   .then(r => r.text().then(x => !r.ok ? alert(x)
     : x ? alert(T.sRestart.replace('{url}', x)) : location.reload()));
+// Only the chart depends on the pixel width. Redrawing the table here would
+// take the cursor out of a name someone is in the middle of typing.
+onresize = () => { if (S) chartbox.innerHTML = chart(rows(), mode === 'day'); };
 load();
 setInterval(() => document.activeElement.tagName === 'INPUT' || load(), 15000);
 </script>
@@ -1148,14 +1652,72 @@ def selftest():
     # A restart of the process must not re-count the counters from scratch.
     cur, last, day = {"up_10_0_0_5": 1000, "down_10_0_0_5": 5000}, {}, {}
     devs = [{"ip": "10.0.0.5"}]
-    assert apply_deltas(cur, last, day, devs) == {"10.0.0.5"}
-    assert apply_deltas(cur, last, day, devs) == set(), "nothing moved without traffic"
+    assert apply_deltas(cur, last, day, devs) == {"10.0.0.5": [1000, 5000]}
+    assert apply_deltas(cur, last, day, devs) == {}, "nothing moved without traffic"
     assert day["10.0.0.5"] == [1000, 5000], "a restart counted the readings a second time"
     cur = {"up_10_0_0_5": 1200, "down_10_0_0_5": 5000}
-    apply_deltas(cur, last, day, devs)
+    assert apply_deltas(cur, last, day, devs) == {"10.0.0.5": [200, 0]}
     assert day["10.0.0.5"] == [1200, 5000], "the increment is measured from the baseline"
     apply_deltas({"up_10_0_0_5": 7, "down_10_0_0_5": 0}, last, day, devs)
     assert day["10.0.0.5"] == [1207, 5000], "a counter reset is taken in full"
+
+    # Rates: a window too short to divide by holds the bytes over instead of
+    # either inventing a spike or losing them.
+    global _rate_at
+    _rate.clear()
+    _pend.clear()
+    _rate_at = 1000.0
+    rates({"10.0.0.5": [100, 400]}, devs, 1000.5)
+    assert _rate == {}, "half a second is not a window"
+    rates({"10.0.0.5": [100, 400]}, devs, 1010.0)
+    assert _rate == {"10.0.0.5": [20.0, 80.0]}, "the held bytes must land in the rate"
+    rates({}, devs, 1020.0)
+    assert _rate == {"10.0.0.5": [0.0, 0.0]}, "a silent device must fall back to zero"
+
+    _hours.clear()
+    note_hour({"10.0.0.5": [5, 5]}, "2026-08-01 10")
+    assert note_hour({"10.0.0.5": [1, 2]}, "2026-08-01 10") == {"10.0.0.5": [6, 7]}
+    for i in range(30):
+        note_hour({}, f"2026-08-02 {i:02d}")
+    assert len(_hours) == 24, "the hourly ring must not grow past a day"
+    assert "2026-08-01 10" not in _hours
+    _hours.clear()
+
+    assert prev_month("2026-08") == "2026-07"
+    assert prev_month("2026-01") == "2025-12", "January reaches into last year"
+
+    # /proc/stat as the kernel writes it: idle is field four, iowait five.
+    st = "cpu  100 0 100 700 100 0 0 0 0 0\ncpu0 1 2 3 4\nintr 9\n"
+    assert cpu_jiffies(st) == (800, 1000)
+    assert cpu_jiffies("Darwin has no procfs") is None
+    assert cpu_jiffies("") is None
+    assert cpu_pct((800, 1000), (900, 1100)) == 0.0, "every jiffy went to idle"
+    assert cpu_pct((800, 1000), (800, 1100)) == 100.0, "none of them did"
+    assert cpu_pct((800, 1000), (850, 1100)) == 50.0
+    assert cpu_pct((800, 1000), (800, 1000)) is None, "no time passed, no answer"
+    assert cpu_pct(None, (800, 1000)) is None
+
+    mi = parse_meminfo("MemTotal:  2048 kB\nMemAvailable: 1024 kB\nHugePages_Total: 0\nx\n")
+    assert mi["MemTotal"] == 2048 * 1024 and mi["MemAvailable"] == 1024 * 1024
+    assert parse_meminfo("") == {}
+
+    with tempfile.TemporaryDirectory() as td:
+        os.mkdir(f"{td}/thermal_zone0")
+        os.mkdir(f"{td}/thermal_zone1")
+        open(f"{td}/thermal_zone0/temp", "w").write("41200\n")
+        open(f"{td}/thermal_zone1/temp", "w").write("53900\n")
+        assert temp_c(td) == 53.9, "the warmest sensor is the one worth showing"
+    assert temp_c("/no/such/place") is None
+
+    arp = ("IP address       HW type  Flags  HW address         Mask  Device\n"
+           "192.168.1.99     0x1      0x2    aa:bb:cc:dd:ee:ff  *     eno1\n"
+           "192.168.1.98     0x1      0x0    00:00:00:00:00:00  *     eno1\n")
+    assert parse_arp(arp) == {"192.168.1.99": "aa:bb:cc:dd:ee:ff"}, "an empty entry is not a device"
+    assert parse_arp("") == {}
+    leases = ("1786000000 aa:bb:cc:dd:ee:ff 192.168.1.99 quest-2 01:aa\n"
+              "1786000000 11:22:33:44:55:66 192.168.1.97 * *\n")
+    assert parse_leases(leases) == {"192.168.1.99": "quest-2"}, "* is a placeholder, not a name"
+    assert parse_leases("") == {}
 
     salt = secrets.token_bytes(16)
     h = pw_hash("correct horse", salt)
@@ -1218,6 +1780,14 @@ def selftest():
             except ValueError:
                 continue
             raise AssertionError(f"the settings form accepted {bad}")
+
+    # The script drives the page by id. A rename on one side only leaves a card
+    # silently empty in the browser, which no other check here would notice.
+    page = render(PAGE_T)
+    for el in ("msel", "upd", "updtext", "kt", "kd", "ku", "ka", "kdelta", "chsel",
+               "bday", "bhour", "chartbox", "cumlbl", "mstrip", "sysbox", "tb",
+               "h_ip", "h_name", "h_traf", "h_now", "h_seen", "unk", "ub"):
+        assert f"id={el}>" in page or f"id={el} " in page, f"the page has no {el}"
 
     ru = set(STRINGS["ru"])
     for lang, t in STRINGS.items():
