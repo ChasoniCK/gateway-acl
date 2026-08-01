@@ -1076,8 +1076,18 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  .mo.cur span{color:var(--fg)}
  .srow{display:grid;grid-template-columns:7rem minmax(0,1fr);gap:.2rem .8rem;
        align-items:baseline;padding:.45rem 0;border-bottom:1px solid var(--line)}
- .q{margin-left:.3rem;padding:0 .3rem;border:1px solid var(--line);border-radius:50%;
-    color:var(--dim);font-size:.62rem;font-style:normal;cursor:help}
+ /* Not a title attribute: this card is rebuilt on every poll, and the browser
+    drops a pending native tooltip whenever the node under the cursor is
+    replaced. A CSS one survives that, opens on focus as well as on hover — so
+    a tap works too — and shows up in a screenshot. */
+ .q{position:relative;margin-left:.3rem;padding:0 .3rem;border:1px solid var(--line);
+    border-radius:50%;color:var(--dim);font-size:.62rem;font-style:normal;cursor:help}
+ .q:hover,.q:focus{color:var(--fg);border-color:#4a505c;outline:none}
+ .q>span{display:none;position:absolute;z-index:9;left:-.5rem;top:calc(100% + .5rem);
+    width:min(15rem,62vw);padding:.55rem .65rem;background:#1c2027;
+    border:1px solid #333844;border-radius:6px;box-shadow:0 10px 26px #000b;
+    color:var(--fg);font-size:.76rem;line-height:1.45;white-space:normal}
+ .q:hover>span,.q:focus>span{display:block}
  .srow:last-child{border-bottom:0}
  .srow>span{font-size:.78rem;color:var(--dim)}
  /* Beats .num's nowrap: the load line carries the core count and an interface
@@ -1350,7 +1360,7 @@ const strip = () => {
 };
 
 // A number nobody can interpret is not a metric. Hover says which sensor.
-const q = title => `<i class=q title="${esc(title)}">?</i>`;
+const q = text => `<i class=q tabindex=0>?<span>${esc(text)}</span></i>`;
 const meter = (pct, warn) => `<div class=meter><i style="width:${Math.min(100, Math.max(0, pct)).toFixed(0)}%`
   + `${pct >= warn ? ';background:var(--warn)' : ''}"></i></div>`;
 const srow = (label, val, pct, warn) => `<div class=srow><span>${label}</span>`
@@ -1421,7 +1431,11 @@ const draw = () => {
   chartbox.innerHTML = chart(rows(), mode === 'day');
   cumlbl.hidden = mode !== 'day';
   mstrip.innerHTML = strip();
-  sysbox.innerHTML = S.sys ? machine(S.sys) : `<p class=hint>${T.sysNone}</p>`;
+  // Not while the pointer is in there: rebuilding the card would close an open
+  // tooltip, and holding the numbers still is exactly what someone reading
+  // them wants anyway.
+  if (!sysbox.matches(':hover'))
+    sysbox.innerHTML = S.sys ? machine(S.sys) : `<p class=hint>${T.sysNone}</p>`;
 
   const peak = Math.max(1, ...S.devices.flatMap(x => x.series.map(v => v[0]+v[1])));
   const fresh = Math.max(120, S.poll * 2);
