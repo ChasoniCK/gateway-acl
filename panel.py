@@ -194,6 +194,9 @@ STRINGS = {
         "sUptime": "аптайм",
         "cores": "ядер {n}",
         "sysNone": "эта система не отдаёт метрики",
+        "tempWhat": "Датчик {n} — самый горячий из тех, что ядро показывает "
+                    "в /sys/class/thermal. Их несколько, и меряют они разное: "
+                    "пакет процессора, чипсет, диск.",
         "perSec": "/с",
         "dShort": "д",
         "hShort": "ч",
@@ -301,6 +304,9 @@ STRINGS = {
         "sUptime": "uptime",
         "cores": "{n} cores",
         "sysNone": "this system exposes no metrics",
+        "tempWhat": "Sensor {n} — the warmest of the ones the kernel exposes in "
+                    "/sys/class/thermal. There are several, and they measure "
+                    "different things: the processor package, the chipset, a disk.",
         "perSec": "/s",
         "dShort": "d",
         "hShort": "h",
@@ -622,7 +628,9 @@ def rates(moved, devs, now):
     _rate.clear()
     for d in devs:
         u, dn = _pend.get(d["ip"], (0, 0))
-        _rate[d["ip"]] = [u / dt, dn / dt]
+        # Whole bytes: a rate is a measurement over a ragged window, and the
+        # fraction is noise the page would faithfully print to ten decimals.
+        _rate[d["ip"]] = [round(u / dt), round(dn / dt)]
     _pend.clear()
 
 
@@ -771,21 +779,27 @@ def parse_meminfo(text):
 
 
 def temp_c(root="/sys/class/thermal"):
-    """The warmest sensor the kernel exposes, in °C. None when there are none.
+    """The warmest sensor the kernel exposes: (°C, what it calls itself).
 
-    Zones are milli-degrees and a machine has several; the hottest is the one
-    worth showing. Absurd readings are dropped — an empty or disabled zone
-    happily reports 0 or −273.
+    Zones are milli-degrees and a machine has several, measuring different
+    things — the processor package, the chipset, an NVMe drive. The hottest is
+    the one worth showing, but on its own it is an anonymous number, so the
+    zone's `type` goes with it and the panel names the sensor it picked.
+    Absurd readings are dropped: an empty or disabled zone happily reports 0
+    or −273.
     """
     best = None
     try:
-        zones = os.listdir(root)
+        zones = sorted(os.listdir(root))
     except OSError:
         return None
     for z in zones:
         t = _num(_read(f"{root}/{z}/temp"))
-        if t is not None and 0 < t / 1000 < 150:
-            best = max(best or 0, t / 1000)
+        if t is None or not 0 < t / 1000 < 150:
+            continue
+        if best is None or t / 1000 > best[0]:
+            # A zone without a type file is named after its directory.
+            best = (round(t / 1000, 1), _read(f"{root}/{z}/type").strip() or z)
     return best
 
 
@@ -808,7 +822,8 @@ def sysinfo():
             if pct is not None:
                 _sys["pct"] = pct
             if None not in net and _sys["net"] and None not in _sys["net"]:
-                _sys["bps"] = [max(0.0, (b - a) / dt) for a, b in zip(_sys["net"], net)]
+                _sys["bps"] = [round(max(0.0, (b - a) / dt))
+                               for a, b in zip(_sys["net"], net)]
             _sys["at"], _sys["cpu"], _sys["net"] = now, cpu, net
         mem = parse_meminfo(_read("/proc/meminfo"))
         try:
@@ -1054,8 +1069,10 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  .mo.cur i{background:var(--down)}
  .mo span{font-size:.68rem;color:var(--dim);font-family:ui-monospace,monospace}
  .mo.cur span{color:var(--fg)}
- .srow{display:grid;grid-template-columns:6.5rem minmax(0,1fr);gap:.2rem .8rem;
+ .srow{display:grid;grid-template-columns:7rem minmax(0,1fr);gap:.2rem .8rem;
        align-items:baseline;padding:.45rem 0;border-bottom:1px solid var(--line)}
+ .q{margin-left:.3rem;padding:0 .3rem;border:1px solid var(--line);border-radius:50%;
+    color:var(--dim);font-size:.62rem;font-style:normal;cursor:help}
  .srow:last-child{border-bottom:0}
  .srow>span{font-size:.78rem;color:var(--dim)}
  /* Beats .num's nowrap: the load line carries the core count and an interface
@@ -1063,8 +1080,11 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  .srow b{white-space:normal;overflow-wrap:anywhere}
  .meter{grid-column:2;height:3px;border-radius:2px;background:#22262e}
  .meter i{display:block;height:100%;border-radius:2px;background:var(--down)}
+ /* Every row carries the dot, so the column keeps its shape and the eye reads
+    a colour change rather than something appearing out of nowhere. */
  .dot{display:inline-block;width:6px;height:6px;border-radius:50%;
-      background:#6f9f6f;margin-right:.45rem;vertical-align:middle}
+      background:#484e5a;margin-right:.45rem;vertical-align:middle}
+ .dot.live{background:#6f9f6f}
  table{width:100%;border-collapse:collapse}
  th{font-size:.72rem;font-weight:600;letter-spacing:.08em;text-transform:uppercase;
     color:var(--dim);text-align:left;padding:0 .4rem .5rem;border-bottom:1px solid var(--line)}
@@ -1137,7 +1157,7 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
   td:nth-child(2){flex:1 1 8rem}
   td.r{text-align:left}
   .spark{display:none}
-  .srow{grid-template-columns:6.5rem minmax(0,1fr)}
+  .srow{grid-template-columns:7rem minmax(0,1fr)}
   .act{justify-content:flex-start}
   /* Too narrow to hang off the corner: a sheet at the bottom instead, so it
      never covers the button that opened it. */
@@ -1232,7 +1252,9 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
 <script>
 const T = {{T_JSON}};
 const esc = s => (s||'').replace(/[<&">]/g, c => ({'<':'&lt;','&':'&amp;','"':'&quot;','>':'&gt;'}[c]));
-const fmt = b => b < 1024 ? b + T.b
+// Math.round on the first branch: the others end in toFixed, but a rate is a
+// float and bare bytes would print as 957.4611172333846.
+const fmt = b => b < 1024 ? Math.round(b) + T.b
   : b < 1048576 ? (b/1024).toFixed(0) + T.kb
   : b < 1073741824 ? (b/1048576).toFixed(1) + T.mb
   : (b/1073741824).toFixed(2) + T.gb;
@@ -1322,6 +1344,8 @@ const strip = () => {
     + `</i><span>${m[0].slice(5)}</span></button>`).join('') + `</div>`;
 };
 
+// A number nobody can interpret is not a metric. Hover says which sensor.
+const q = title => `<i class=q title="${esc(title)}">?</i>`;
 const meter = (pct, warn) => `<div class=meter><i style="width:${Math.min(100, Math.max(0, pct)).toFixed(0)}%`
   + `${pct >= warn ? ';background:var(--warn)' : ''}"></i></div>`;
 const srow = (label, val, pct, warn) => `<div class=srow><span>${label}</span>`
@@ -1341,7 +1365,8 @@ const machine = s => {
   if (s.load) h += srow(T.sLoad, s.load.map(x => x.toFixed(2)).join('  ')
       + (s.cores ? '  · ' + n(T.cores, s.cores) : ''),
       s.cores ? s.load[0]/s.cores*100 : null, 100);
-  if (s.temp) h += srow(T.sTemp, s.temp.toFixed(0) + ' °C', (s.temp-30)/50*100, 80);
+  if (s.temp) h += srow(T.sTemp + q(n(T.tempWhat, s.temp[1])),
+                        s.temp[0].toFixed(0) + ' °C', (s.temp[0]-30)/50*100, 80);
   if (s.up) h += srow(T.sUptime, upfmt(s.up), null);
   return h || `<p class=hint>${T.sysNone}</p>`;
 };
@@ -1403,7 +1428,7 @@ const draw = () => {
     const t = x.up + x.down, me = x.ip === S.you, r = x.rate[0] + x.rate[1];
     return `<tr class="${x.on ? '' : 'off'}${x.ip === sel ? ' pick' : ''}">`
      + `<td class=ip title="${esc(x.mac)}" onclick="pickDev('${esc(x.ip)}')">`
-     + `${r > 0 || (x.seen && S.now - x.seen < fresh) ? '<i class=dot></i>' : ''}`
+     + `<i class="dot${r > 0 || (x.seen && S.now - x.seen < fresh) ? ' live' : ''}"></i>`
      + `${esc(x.ip)}${me ? `<span class=me>${T.youAre}</span>` : ''}</td>`
      + `<td><input value="${esc(x.name)}" placeholder="${esc(x.host || T.phName)}" `
      + `onchange="setName('${esc(x.ip)}',this.value)"></td>`
@@ -1670,9 +1695,12 @@ def selftest():
     rates({"10.0.0.5": [100, 400]}, devs, 1000.5)
     assert _rate == {}, "half a second is not a window"
     rates({"10.0.0.5": [100, 400]}, devs, 1010.0)
-    assert _rate == {"10.0.0.5": [20.0, 80.0]}, "the held bytes must land in the rate"
+    assert _rate == {"10.0.0.5": [20, 80]}, "the held bytes must land in the rate"
     rates({}, devs, 1020.0)
-    assert _rate == {"10.0.0.5": [0.0, 0.0]}, "a silent device must fall back to zero"
+    assert _rate == {"10.0.0.5": [0, 0]}, "a silent device must fall back to zero"
+    # Whole bytes, or the page prints 957.4611172333846 B/s.
+    rates({"10.0.0.5": [1, 2]}, devs, 1023.0)
+    assert all(isinstance(v, int) for v in _rate["10.0.0.5"]), "a rate must be whole"
 
     _hours.clear()
     note_hour({"10.0.0.5": [5, 5]}, "2026-08-01 10")
@@ -1702,11 +1730,19 @@ def selftest():
     assert parse_meminfo("") == {}
 
     with tempfile.TemporaryDirectory() as td:
-        os.mkdir(f"{td}/thermal_zone0")
-        os.mkdir(f"{td}/thermal_zone1")
-        open(f"{td}/thermal_zone0/temp", "w").write("41200\n")
-        open(f"{td}/thermal_zone1/temp", "w").write("53900\n")
-        assert temp_c(td) == 53.9, "the warmest sensor is the one worth showing"
+        for z, t in (("thermal_zone0", "41200"), ("thermal_zone1", "53900")):
+            os.mkdir(f"{td}/{z}")
+            with open(f"{td}/{z}/temp", "w") as f:
+                f.write(t + "\n")
+        with open(f"{td}/thermal_zone1/type", "w") as f:
+            f.write("x86_pkg_temp\n")
+        assert temp_c(td) == (53.9, "x86_pkg_temp"), \
+            "the warmest sensor is the one worth showing, and it has a name"
+        os.remove(f"{td}/thermal_zone1/type")
+        assert temp_c(td) == (53.9, "thermal_zone1"), "no type file, so the directory"
+        with open(f"{td}/thermal_zone0/temp", "w") as f:
+            f.write("-273000\n")   # a disabled zone
+        assert temp_c(td) == (53.9, "thermal_zone1"), "an absurd reading is not a sensor"
     assert temp_c("/no/such/place") is None
 
     arp = ("IP address       HW type  Flags  HW address         Mask  Device\n"

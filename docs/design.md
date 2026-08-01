@@ -173,6 +173,14 @@ answering questions about itself must not stop the accounting.
 Idle counts `iowait` as well. A gateway waiting on its disk is not busy, and
 calling it busy would light the meter for no reason.
 
+Temperature is the **warmest** of the kernel's thermal zones, and which zone
+that is depends entirely on the machine — `x86_pkg_temp` or `coretemp` on a
+typical x86 box, `cpu-thermal` on a Pi, sometimes `acpitz`, `nvme` or a wifi
+chip. A bare number would therefore mean something different on every host, so
+`temp_c` returns the zone's `type` alongside it and the panel puts it behind
+the `?` next to the row. Zones with no `type` file are named after their
+directory.
+
 ## Names for the unknown
 
 The blocked list is a column of bare addresses, which does not answer *whose
