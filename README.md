@@ -40,7 +40,9 @@ device ──► this Linux host ──► uplink or tunnel (sing-box / WireGuar
   address out of the ARP cache when the system knows them, and allows one in a
   click.
 - **Rename devices** inline. Renaming never touches nftables, so counters
-  survive. Sort the table by any column.
+  survive. Sort the table by any column — with the mouse or the keyboard —
+  filter it by address, name or hostname, and download the selected month
+  as CSV.
 - **Update notice.** Once a day the panel asks GitHub for the latest release tag
   and shows a banner if yours is older. Off with one checkbox.
 - **Settings in the corner.** Language, update notice, poll interval, LAN
@@ -106,8 +108,11 @@ The panel is reachable from the whole LAN and protected by **one password**.
 
 - Stored as scrypt with a random salt, never in plaintext. The installer reads it
   and pipes it straight into `panel.py --set-password`.
-- Session cookie is `HttpOnly`, `SameSite=Strict`, seven days. Sessions live in
-  memory, so a restart logs everyone out.
+- Session cookie is `HttpOnly`, `SameSite=Strict`, seven days. Sessions are kept
+  in `sessions.json` (mode 0600) as digests, so they survive a restart of the
+  service — an upgrade no longer signs everyone out — while the file on its own
+  opens nothing: what is in it cannot be presented as a cookie. Logging out
+  really does revoke.
 - Five wrong guesses from one address, and that address waits a minute.
 
 **It is plain HTTP.** The password crosses the network unencrypted. On a small
@@ -159,7 +164,9 @@ test a ruleset without touching your host: [docs/design.md](docs/design.md).
 - IPv4 only. IPv6 is passed through untouched.
 - Traffic to the host itself (SSH, the panel) is counted too.
 - A device that is switched off still accrues a few kilobytes of its own retries.
-- Sessions do not survive a restart of the service.
+- Traffic history is kept per address and outlives the device. Bytes of deleted
+  ones stay in the month's totals — the panel shows them as a separate "other"
+  share, because there is nobody left to attribute them to.
 
 ## License
 

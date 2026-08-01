@@ -45,12 +45,14 @@ from urllib.parse import urlparse, parse_qs
 # refuses a tag push where the two disagree.
 VERSION = "1.0.5"
 RELEASES_URL = "https://api.github.com/repos/ChasoniCK/gateway-acl/releases/latest"
+RELEASES_PAGE = "https://github.com/ChasoniCK/gateway-acl/releases/latest"
 UPDATE_EVERY = 86400
 
 ETC = os.environ.get("GWACL_DIR", "/etc/gateway-acl")
 CONFIG = f"{ETC}/config.json"
 DEVICES = f"{ETC}/devices.json"
 TRAFFIC = f"{ETC}/traffic.json"
+SESSIONS = f"{ETC}/sessions.json"
 
 DEFAULTS = {"iface": "eno1", "lan": "192.168.1.0/24", "self_ip": "192.168.1.10",
             "port": 8080, "poll_sec": 60, "pw": None, "lang": "ru",
@@ -60,7 +62,7 @@ FAIL_LIMIT = 5          # misses in a row from one address
 FAIL_BLOCK = 60         # and that is how long it then sits out
 
 _lock = threading.Lock()
-_sessions = {}          # token -> when it expires
+_sessions = {}          # digest of the token -> when it expires
 _fails = {}             # address -> (misses, blocked until)
 _upd = {"at": 0, "new": None}   # last check, and the tag worth showing
 
@@ -205,6 +207,17 @@ STRINGS = {
         "perSec": "/с",
         "dShort": "д",
         "hShort": "ч",
+        "other": "прочее",
+        "otherWhat": "Трафик адресов, которых в списке уже нет. История привязана "
+                     "к адресу и переживает удаление устройства, поэтому байты "
+                     "остаются в итогах месяца — но приписать их больше некому. "
+                     "Сюда же попадает всё, что было учтено до того, как адрес "
+                     "добавили заново.",
+        "filter": "фильтр",
+        "noMatch": "под фильтр ничего не подошло",
+        "csvWhat": "скачать таблицу за выбранный месяц",
+        "offline": "нет связи, данные от {t}",
+        "updateWhat": "что изменилось",
     },
     "en": {
         "title": "Gateway",
@@ -315,6 +328,17 @@ STRINGS = {
         "perSec": "/s",
         "dShort": "d",
         "hShort": "h",
+        "other": "other",
+        "otherWhat": "Traffic of addresses that are no longer on the list. History "
+                     "is kept per address and outlives the device, so its bytes "
+                     "stay in the month's totals — but there is nobody left to "
+                     "attribute them to. Anything counted before an address was "
+                     "added back lands here too.",
+        "filter": "filter",
+        "noMatch": "nothing matches the filter",
+        "csvWhat": "download the selected month as a table",
+        "offline": "no connection, data from {t}",
+        "updateWhat": "what changed",
     },
 }
 
@@ -445,18 +469,53 @@ def check_password(password):
     return hmac.compare_digest(pw_hash(password, bytes.fromhex(pw["salt"])), pw["hash"])
 
 
+def _tok(token):
+    """What is kept on disk instead of the cookie itself: a leaked
+    sessions.json then hands over nothing that can be presented as a session."""
+    return hashlib.sha256((token or "").encode()).hexdigest()
+
+
+def _save_sessions():
+    try:
+        write_private(SESSIONS, _sessions)
+    except OSError:
+        # A read-only /etc is not a reason to refuse a login — the session
+        # simply goes back to living only in memory.
+        pass
+
+
 def new_session():
     t = secrets.token_urlsafe(32)
-    _sessions[t] = time.time() + SESSION_TTL
+    _sessions[_tok(t)] = time.time() + SESSION_TTL
+    _save_sessions()
     return t
 
 
+def drop_session(token):
+    if _sessions.pop(_tok(token), None) is not None:
+        _save_sessions()
+
+
 def session_ok(token):
-    exp = _sessions.get(token or "")
+    exp = _sessions.get(_tok(token))
     if exp and exp > time.time():
         return True
-    _sessions.pop(token or "", None)
+    drop_session(token)
     return False
+
+
+def _load_sessions():
+    """Sessions outlive the process: an update runs install.sh, which restarts
+    the service, and being thrown out of the panel by its own upgrade is the
+    one moment it stings most. Expired ones are dropped on the way in."""
+    try:
+        with open(SESSIONS) as f:
+            return {k: v for k, v in json.load(f).items() if v > time.time()}
+    except (OSError, ValueError, TypeError, AttributeError):
+        return {}   # missing, or a file this program did not write
+
+
+_sessions.update(_load_sessions())
 
 
 def note_fail(ip):
@@ -990,8 +1049,15 @@ CSS = """
  .hint{color:var(--dim);font-size:.83rem;margin:.4rem 0 0;overflow-wrap:anywhere}
 """
 
+# ponytail: one inline glyph instead of a file to serve — it also stops the
+# browser asking for /favicon.ico on every page.
+ICON = ("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'>"
+        "<rect width='16' height='16' rx='3' fill='%23171a20'/>"
+        "<circle cx='8' cy='8' r='3.4' fill='%235b9bb5'/></svg>")
+
 LOGIN_T = """<!doctype html><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
+<link rel=icon href="{{ICON}}">
 <title>{{t.loginTitle}}</title>
 <style>{{CSS}}
  body{max-width:22rem;margin:0 auto;padding-top:22vh}
@@ -1026,6 +1092,8 @@ def render(tpl, t=None):
                .replace("{{PFX}}", str(LAN.prefixlen))
                .replace("{{VERSION}}", VERSION)
                .replace("{{CFG}}", CONFIG)
+               .replace("{{ICON}}", ICON)
+               .replace("{{RELEASES}}", RELEASES_PAGE)
                # The settings form is filled in from the running config.
                .replace("{{IFACE}}", html.escape(IFACE, quote=True))
                .replace("{{LANCIDR}}", str(LAN))
@@ -1044,6 +1112,7 @@ def login_page(msg="", t=None):
 
 PAGE_T = """<!doctype html><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
+<link rel=icon href="{{ICON}}">
 <title>{{t.title}}</title>
 <style>{{CSS}}
  .bar{display:flex;align-items:baseline;gap:.75rem;flex-wrap:wrap;margin-bottom:1.25rem}
@@ -1105,7 +1174,7 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
     color:var(--dim);text-align:left;padding:0 .4rem .5rem;border-bottom:1px solid var(--line)}
  th.r,td.r{text-align:right}
  th.s{cursor:pointer;user-select:none}
- th.s:hover{color:var(--fg)}
+ th.s:hover,th.s:focus-visible{color:var(--fg)}
  td{padding:.55rem .4rem;border-bottom:1px solid var(--line);vertical-align:middle}
  tbody tr:last-child td{border-bottom:0}
  td.ip{font-family:ui-monospace,monospace;white-space:nowrap;cursor:pointer}
@@ -1117,6 +1186,8 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  td input:focus{background:#1c2027;border-color:#3d434f;outline:none}
  .off td.ip,.off td input{color:var(--dim)}
  .me{color:var(--dim);font-size:.72rem;margin-left:.4rem}
+ #flt{max-width:9rem}
+ #off{color:var(--warn);font-size:.82rem}
  /* Every sparkline is scaled to the same peak day, so the rows compare
     against each other and not only against themselves. */
  .spark{display:block;margin:.25rem 0 0 auto}
@@ -1153,6 +1224,9 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  .legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:.35rem}
  .legend i.dash{width:14px;height:0;border-radius:0;border-top:1.5px dashed #6d7686;
                 vertical-align:middle}
+ /* The legend paints every <i> as a swatch — the question mark is not one. */
+ .legend .q{width:auto;height:auto;border-radius:50%;margin:0 0 0 .3rem}
+ a{color:#8ab6c8}
  form{display:flex;gap:.5rem;flex-wrap:wrap}
  form input{flex:1;min-width:8rem}
  @media (max-width:900px){.row{grid-template-columns:1fr}}
@@ -1181,8 +1255,9 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  }
 </style>
 <div class=bar>
- <h1>{{t.h1}}</h1><span class=sp></span>
+ <h1>{{t.h1}}</h1><span id=off hidden></span><span class=sp></span>
  <select id=msel onchange="load(this.value)"></select>
+ <button onclick=csv() title="{{t.csvWhat}}">CSV</button>
  <details class=gear>
   <summary>{{t.settingsTitle}}</summary>
   <div class=card>
@@ -1208,6 +1283,10 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
 <div class=card id=upd hidden>
  <h2>{{t.updateTitle}}</h2>
  <p id=updtext style="margin:0"></p>
+ <!-- A fixed address, not one taken from the answer: the tag comes off the
+      network, the link must not. -->
+ <p style="margin:.35rem 0 0"><a href="{{RELEASES}}" target=_blank
+    rel="noopener noreferrer">{{t.updateWhat}}</a></p>
  <p class=hint>{{t.updateHint}}</p>
 </div>
 
@@ -1225,10 +1304,13 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
    <div><span>{{t.inbound}}</span><b class=num id=kd></b></div>
    <div><span>{{t.outbound}}</span><b class=num id=ku></b></div>
    <div><span>{{t.perDay}}</span><b class=num id=ka></b></div>
+   <div id=kotherbox hidden><span>{{t.other}}</span><b class=num id=kother></b></div>
   </div>
   <div id=chartbox></div>
   <div class=legend><span><i style="background:var(--down)"></i>{{t.inbound}}</span>
    <span><i style="background:var(--up)"></i>{{t.outbound}}</span>
+   <span id=othlbl hidden><i style="background:#3b414e"></i>{{t.other}}<i class=q
+     tabindex=0>?<span>{{t.otherWhat}}</span></i></span>
    <span id=cumlbl><i class=dash></i>{{t.cumul}}</span></div>
   <h3 class=sub>{{t.byMonth}}</h3>
   <div id=mstrip></div>
@@ -1241,7 +1323,9 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
 </div>
 
 <div class=card>
- <h2>{{t.devicesTitle}}</h2>
+ <div class=ch><h2>{{t.devicesTitle}}</h2><span class=sp></span>
+  <input id=flt placeholder="{{t.filter}}" aria-label="{{t.filter}}" oninput=draw()>
+ </div>
  <table><thead><tr>
   <th class=s id=h_ip onclick="sortBy('ip')">
   <th class=s id=h_name onclick="sortBy('name')">
@@ -1288,16 +1372,22 @@ const upfmt = s => {
 
 // S is the last answer from the server, kept so that sorting, the day/hour
 // switch and picking a device redraw from memory instead of asking again.
-let S = null, month = null, sel = null, mode = 'day', sortk = 'ip', sortd = 1;
+let S = null, month = null, sel = null, mode = 'day', sortk = 'ip', sortd = 1, oth = 0;
 
-// [short label, up, down, full label] — the chart draws whatever this returns,
-// so the month, the last 24 hours and one device's slice are the same code.
+// [short label, up, down, full label, other] — the chart draws whatever this
+// returns, so the month, the last 24 hours and one device's slice are the same
+// code. "other" is what the bucket holds and nobody on the list accounts for:
+// history is kept per address and outlives the device it belonged to. With one
+// device picked there is nothing to attribute, so it stays out.
 const rows = () => {
   const src = mode === 'hour' ? S.hours : S.days;
+  const key = mode === 'hour' ? 'hseries' : 'series';
   const d = sel && S.devices.find(x => x.ip === sel);
-  const ser = d && (mode === 'hour' ? d.hseries : d.series);
+  const ser = d && d[key];
+  const sum = (i, j) => S.devices.reduce((a, x) => a + x[key][i][j], 0);
   return src.map((r, i) => [mode === 'hour' ? r[0] : String(+r[0].slice(8)),
-                            ser ? ser[i][0] : r[1], ser ? ser[i][1] : r[2], r[0]]);
+                            ser ? ser[i][0] : r[1], ser ? ser[i][1] : r[2], r[0],
+                            ser ? 0 : Math.max(0, r[1] + r[2] - sum(i, 0) - sum(i, 1))]);
 };
 
 const chart = (rs, cum) => {
@@ -1306,7 +1396,7 @@ const chart = (rs, cum) => {
   // labels do not shrink on a phone.
   const W = Math.max(chartbox.clientWidth || 720, 280), H = 190,
         L = 54, B = 20, top = 10;
-  const max = Math.max(...rs.map(d => d[1] + d[2]), 1024);
+  const max = Math.max(...rs.map(d => d[1] + d[2] + d[4]), 1024);
   const bw = (W - L) / rs.length, plot = H - B - top;
   const y = v => top + plot - (v / max) * plot;
   let g = '';
@@ -1314,10 +1404,13 @@ const chart = (rs, cum) => {
     + `stroke="#262a33"/><text x=${L-8} y=${y(max*f)+4} text-anchor=end fill="#767d8a" `
     + `font-size=10 font-family=ui-monospace>${f ? fmtAx(max*f) : 0}</text>`;
   const bars = rs.map((d, i) => {
-    const x = L + i*bw + bw*.18, w = Math.max(1, bw*.64);
+    const x = L + i*bw + bw*.18, w = Math.max(1, bw*.64), o = d[4];
     const hu = (d[1]/max)*plot, hd = (d[2]/max)*plot;
     const lbl = rs.length > 20 ? (i % 5 === 0) : true;
-    return `<g><title>${d[3]}  ↓ ${fmt(d[2])}  ↑ ${fmt(d[1])}</title>`
+    return `<g><title>${d[3]}  ↓ ${fmt(d[2])}  ↑ ${fmt(d[1])}`
+      + `${o ? `  ${T.other} ${fmt(o)}` : ''}</title>`
+      + (o ? `<rect x=${x} y=${y(d[1]+d[2]+o)} width=${w} height=${(o/max)*plot} `
+           + `fill="#3b414e"/>` : '')
       + `<rect x=${x} y=${y(d[1]+d[2])} width=${w} height=${hu} fill="var(--up)"/>`
       + `<rect x=${x} y=${y(d[2])} width=${w} height=${hd} fill="var(--down)"/>`
       + `<rect x=${L+i*bw} y=${top} width=${bw} height=${plot} fill="none" pointer-events="all"/></g>`
@@ -1327,10 +1420,10 @@ const chart = (rs, cum) => {
   // the shape answers "are we going faster than last time", the tooltip the
   // exact figure. A second axis would cost more than it explains.
   let line = '';
-  const tot = rs.reduce((a, d) => a + d[1] + d[2], 0);
+  const tot = rs.reduce((a, d) => a + d[1] + d[2] + d[4], 0);
   if (cum && rs.length > 1 && tot) {
     let run = 0;
-    const pts = rs.map((d, i) => { run += d[1] + d[2];
+    const pts = rs.map((d, i) => { run += d[1] + d[2] + d[4];
       return `${(L + i*bw + bw/2).toFixed(1)},${(top + plot - run/tot*plot).toFixed(1)}`;
     }).join(' ');
     line = `<polyline fill=none stroke="#6d7686" stroke-width=1.4 stroke-dasharray="3 3"`
@@ -1396,15 +1489,44 @@ const CMP = {
   now: x => x.rate[0] + x.rate[1],
   seen: x => x.seen,
 };
+// The view someone left behind, so a reload does not throw them back to the
+// default sort. In a private window localStorage throws — then it is simply
+// not remembered.
+const keep = () => { try {
+  localStorage.gwacl = JSON.stringify({sel, mode, sortk, sortd});
+} catch (e) {} };
 const sortBy = k => {
   // Names and addresses read best ascending, quantities biggest-first.
   sortd = sortk === k ? -sortd : (k === 'ip' || k === 'name' ? 1 : -1);
   sortk = k;
-  draw();
+  keep(); draw();
 };
-const setMode = m => { mode = m; draw(); };
-const pickDev = ip => { sel = sel === ip ? null : ip; draw(); };
+const setMode = m => { mode = m; keep(); draw(); };
+const pickDev = ip => { sel = sel === ip ? null : ip; keep(); draw(); };
 const addKnown = b => post({ip: b.dataset.ip, name: b.dataset.nm});
+
+// The table as the panel shows it, for a spreadsheet. Built here rather than
+// on the gateway: everything it needs is already in the browser.
+const csv = () => {
+  if (!S) return;
+  const cell = v => typeof v === 'number' ? v
+    : '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"';
+  const B = T.b.trim();
+  const out = [[T.colAddr, T.colName, `${T.inbound}, ${B}`, `${T.outbound}, ${B}`,
+                `${T.total}, ${B}`, T.colSeen]];
+  for (const x of S.devices)
+    out.push([x.ip, x.name || x.host || '', x.down, x.up, x.up + x.down,
+              x.seen ? new Date(x.seen*1000).toISOString() : '']);
+  if (oth) out.push([T.other, '', 0, 0, oth, '']);
+  // A BOM, or a spreadsheet opens Cyrillic names as mojibake.
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob(
+    ['\\ufeff' + out.map(r => r.map(cell).join(';')).join('\\r\\n')],
+    {type: 'text/csv;charset=utf-8'}));
+  a.download = `gateway-${S.month}.csv`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+};
 
 const draw = () => {
   if (!S) return;
@@ -1421,11 +1543,18 @@ const draw = () => {
 
   const dv = one ? [one] : S.devices;
   const U = dv.reduce((a,x) => a+x.up, 0), D = dv.reduce((a,x) => a+x.down, 0);
-  kt.textContent = fmt(U+D); kd.textContent = fmt(D); ku.textContent = fmt(U);
-  ka.textContent = fmt(Math.round((U+D) / Math.max(S.days.length, 1)));
+  // The month's total counts every address the history knows of, the devices
+  // only those still on the list. What is left over is "other" — hence a total
+  // that is more than inbound plus outbound, and a tile that says why.
+  const mtot = (S.months.find(m => m[0] === S.month) || [0, 0])[1];
+  oth = one ? 0 : Math.max(0, mtot - S.devices.reduce((a,x) => a+x.up+x.down, 0));
+  kt.textContent = fmt(U+D+oth); kd.textContent = fmt(D); ku.textContent = fmt(U);
+  ka.textContent = fmt(Math.round((U+D+oth) / Math.max(S.days.length, 1)));
+  kother.textContent = fmt(oth);
+  kotherbox.hidden = othlbl.hidden = !oth;
   // Only against the whole month: a single device against everything last
   // month would be a comparison of two different things.
-  const pc = (!one && S.prev) ? Math.round((U+D-S.prev)/S.prev*100) : null;
+  const pc = (!one && S.prev) ? Math.round((U+D+oth-S.prev)/S.prev*100) : null;
   kdelta.textContent = pc === null ? '' : (pc > 0 ? '+' : '') + pc + '%';
   kdelta.title = pc === null ? '' : T.vsPrev;
   chartbox.innerHTML = chart(rows(), mode === 'day');
@@ -1439,10 +1568,15 @@ const draw = () => {
 
   const peak = Math.max(1, ...S.devices.flatMap(x => x.series.map(v => v[0]+v[1])));
   const fresh = Math.max(120, S.poll * 2);
-  const list = S.devices.slice().sort((a, b) => {
-    const p = CMP[sortk](a), q = CMP[sortk](b);
-    return (p < q ? -1 : p > q ? 1 : 0) * sortd;
-  });
+  // The peak stays the whole list's, so filtering does not silently rescale
+  // every sparkline against whatever happens to be left on screen.
+  const fq = flt.value.trim().toLowerCase();
+  const list = S.devices.filter(x => !fq ||
+      (x.ip + ' ' + x.name + ' ' + (x.host || '')).toLowerCase().includes(fq))
+    .sort((a, b) => {
+      const p = CMP[sortk](a), q = CMP[sortk](b);
+      return (p < q ? -1 : p > q ? 1 : 0) * sortd;
+    });
   tb.innerHTML = list.map(x => {
     const t = x.up + x.down, me = x.ip === S.you, r = x.rate[0] + x.rate[1];
     return `<tr class="${x.on ? '' : 'off'}${x.ip === sel ? ' pick' : ''}">`
@@ -1458,7 +1592,7 @@ const draw = () => {
      + `<td><div class=act><button class="${x.on ? '' : 'on'}" `
      + `onclick="post({ip:'${esc(x.ip)}',on:${!x.on}})">${x.on ? T.turnOff : T.turnOn}</button>`
      + `<button onclick="del('${esc(x.ip)}',${me})">${T.del}</button></div></td></tr>`;
-  }).join('') || `<tr><td colspan=6 class=hint>${T.empty}</td></tr>`;
+  }).join('') || `<tr><td colspan=6 class=hint>${fq ? T.noMatch : T.empty}</td></tr>`;
 
   upd.hidden = !S.update;
   // textContent, not innerHTML: the tag comes off the network.
@@ -1473,9 +1607,20 @@ const draw = () => {
     + `${T.add}</button></div>`).join('');
 };
 
+// Without this the page keeps showing the last good numbers for as long as it
+// is open: the service restarts, the gateway goes down, and nothing on screen
+// changes. The header says so instead, and names the time it last heard back.
+let okAt = null;
+const stale = bad => {
+  off.hidden = !bad;
+  if (bad) off.textContent = T.offline.replace('{t}', okAt
+    ? okAt.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'}) : '—');
+  else okAt = new Date();
+};
 const load = m => fetch('/api?month=' + (month = m || month || ''))
   .then(r => r.status === 401 ? location.reload()
-    : r.json().then(s => { S = s; draw(); }));
+    : r.json().then(s => { S = s; draw(); }))
+  .then(() => stale(0), () => stale(1));
 const post = body => fetch('/api', {method:'POST', body: JSON.stringify(body)})
   .then(r => r.ok ? load() : r.text().then(alert));
 const setName = (ip, name) => post({ip, name});
@@ -1495,8 +1640,33 @@ const saveCfg = () => fetch('/settings', {method:'POST', body: JSON.stringify({
 // Only the chart depends on the pixel width. Redrawing the table here would
 // take the cursor out of a name someone is in the middle of typing.
 onresize = () => { if (S) chartbox.innerHTML = chart(rows(), mode === 'day'); };
+
+// The sort headers are cells, not buttons — a tab stop and the two keys a
+// button would answer to cost less than rebuilding the row out of buttons.
+for (const th of document.querySelectorAll('th.s')) {
+  th.tabIndex = 0;
+  th.onkeydown = e => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); th.click(); }
+  };
+}
+
+// Whatever was left behind last time, checked before it is trusted: this comes
+// out of storage the panel does not control, and an unknown sort key would
+// take the table down with it.
+try {
+  const p = JSON.parse(localStorage.gwacl || '{}');
+  if (CMP[p.sortk]) { sortk = p.sortk; sortd = p.sortd === -1 ? -1 : 1; }
+  if (p.mode === 'day' || p.mode === 'hour') mode = p.mode;
+  if (typeof p.sel === 'string') sel = p.sel;   // draw() drops it if it is gone
+} catch (e) {}
+
 load();
-setInterval(() => document.activeElement.tagName === 'INPUT' || load(), 15000);
+// A hidden tab asks for nothing: every /api costs the gateway an nft call, and
+// a page left open in a background tab would go on paying for it all week.
+// Coming back is worth a fresh look, though.
+document.onvisibilitychange = () => document.hidden || load();
+setInterval(() => document.hidden
+  || document.activeElement.tagName === 'INPUT' || load(), 15000);
 </script>
 """
 
@@ -1531,7 +1701,7 @@ class H(BaseHTTPRequestHandler):
         if self.path == "/logout":
             raw = self.headers.get("Cookie")
             if raw and "sess" in SimpleCookie(raw):
-                _sessions.pop(SimpleCookie(raw)["sess"].value, None)
+                drop_session(SimpleCookie(raw)["sess"].value)
             self._send(200, login_page(f'<p class=hint>{T["loggedOut"]}</p>'),
                        cookie="sess=; Path=/; Max-Age=0")
             return
@@ -1785,10 +1955,22 @@ def selftest():
     assert h != pw_hash("correct hors", salt)
     assert pw_hash("x", salt) != pw_hash("x", secrets.token_bytes(16)), "the salt does nothing"
 
-    t = new_session()
-    assert session_ok(t) and not session_ok("forged")
-    _sessions[t] = time.time() - 1
-    assert not session_ok(t), "an expired session must be rejected"
+    with tempfile.TemporaryDirectory() as td:
+        global SESSIONS
+        SESSIONS = os.path.join(td, "sessions.json")
+        # Whatever the running panel has on disk is not this test's business.
+        # Nothing is put back: --selftest exits right after.
+        _sessions.clear()
+        t = new_session()
+        assert session_ok(t) and not session_ok("forged")
+        assert _load_sessions() == _sessions, "a session must survive a restart"
+        assert t not in open(SESSIONS).read(), "the cookie itself must not be on disk"
+        drop_session(t)
+        assert not session_ok(t) and _load_sessions() == {}, "logging out must revoke"
+        u = new_session()
+        _sessions[_tok(u)] = time.time() - 1
+        assert not session_ok(u), "an expired session must be rejected"
+        assert _load_sessions() == {}, "and it must not come back from disk"
 
     ip = "10.9.9.9"
     for _ in range(FAIL_LIMIT - 1):
@@ -1848,7 +2030,8 @@ def selftest():
     page = render(PAGE_T)
     for el in ("msel", "upd", "updtext", "kt", "kd", "ku", "ka", "kdelta", "chsel",
                "bday", "bhour", "chartbox", "cumlbl", "mstrip", "sysbox", "tb",
-               "h_ip", "h_name", "h_traf", "h_now", "h_seen", "unk", "ub"):
+               "h_ip", "h_name", "h_traf", "h_now", "h_seen", "unk", "ub",
+               "flt", "off", "kother", "kotherbox", "othlbl"):
         assert f"id={el}>" in page or f"id={el} " in page, f"the page has no {el}"
 
     ru = set(STRINGS["ru"])

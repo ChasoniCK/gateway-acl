@@ -108,6 +108,17 @@ Comparing generated text is exact and needs no reasoning about which fields
 matter. Renaming produces identical text, so nftables is never touched and the
 counters keep running.
 
+## Sessions
+
+Tokens live in `sessions.json` (0600) as SHA-256 digests, so the file grants
+nothing if it leaks — what is on disk cannot be presented as a cookie. They are
+loaded at startup and expired entries are dropped on the way in.
+
+They are on disk at all because updating means `install.sh`, which restarts the
+service: being logged out by one's own upgrade is where it stings most. A write
+happens only on sign-in and sign-out, and a failed write is not an error —
+a read-only `/etc` simply puts the session back to living in memory only.
+
 ## Unknown devices
 
 ```
@@ -257,6 +268,5 @@ user as a stray Russian word in an English panel.
 - **No per-port or per-time rules.** An address is allowed or it is not.
 - **Hourly history on disk.** The last day lives in memory and dies with the
   process; the month is what `traffic.json` is for.
-- **Sessions in memory.** Restarting the service logs everyone out. Persisting
-  them would mean writing a secret to disk to sign cookies, for a panel that is
-  already only as strong as its password.
+- **No roles, and no audit log.** One password, and everyone who has it can do
+  everything. Which of them acted is outside what this program can know.
