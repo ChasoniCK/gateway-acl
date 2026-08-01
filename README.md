@@ -169,15 +169,20 @@ test a ruleset without touching your host: [docs/design.md](docs/design.md).
 - Traffic history is kept per address and outlives the device. Bytes of deleted
   ones stay in the month's totals — the panel shows them as a separate "other"
   share, because there is nobody left to attribute them to.
-- Counters accrue in memory and reach `traffic.json` at most once every half a
-  minute. A clean stop loses nothing, and neither does a crash — the baseline on
-  disk is exactly as old as the totals beside it, so the next poll measures the
-  difference from there. Only a sudden reboot costs up to half a minute of
-  accounting, because that is when the kernel's counters go too.
-- The day-by-day chart covers the last three months. Anything older is folded
-  into one figure per month: the monthly totals and the strip below the chart
-  stay exact to the byte, but the daily breakdown of an old month is gone. The
-  first poll after an upgrade folds whatever has already accumulated.
+- Counters accrue in memory and reach `today.json` at most once every five
+  minutes; the days already closed sit in `traffic.json`, which is rewritten
+  only when a day ends. Recording the day in progress therefore costs about a
+  kilobyte, not the whole history — under half a megabyte a day on the flash of
+  a machine that is never turned off. A clean stop loses nothing, and neither
+  does a crash — the baseline on disk is exactly as old as the totals beside it,
+  so the next poll measures the difference from there. Only a sudden reboot
+  costs up to five minutes of accounting, because that is when the kernel's
+  counters go too.
+- The day-by-day chart covers the last three months, `keep days by day` in the
+  settings, 1 to 24. Anything older is folded into one figure per month: the
+  monthly totals and the strip below the chart stay exact to the byte, but the
+  daily breakdown of an old month is gone. Lowering the number folds what is
+  over the line as soon as the form is saved.
 
 ## License
 

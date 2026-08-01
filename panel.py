@@ -7,7 +7,9 @@ Nothing else on the system is touched.
 
 Traffic is counted by named nftables counters, two per device (up/down). They
 are zeroed when the table is rebuilt and on reboot, so the poller accumulates
-bytes into traffic.json per day, detecting resets (see accrue).
+bytes per day, detecting resets (see accrue). The day in progress lives in
+today.json and the days already closed in traffic.json — see flush() for why
+the two are not one file.
 
 Whoever knocks without being allowed is recorded by the kernel itself into the
 dynamic `blocked` set with a timeout — that is the unknown-devices list.
@@ -45,7 +47,7 @@ from urllib.parse import urlparse, parse_qs
 # it against the newest tag on GitHub, so a forgotten bump makes every install
 # claim to be older than it is and show a banner that never goes away. CI
 # refuses a tag push where the two disagree.
-VERSION = "1.1.1"
+VERSION = "1.2.0"
 RELEASES_URL = "https://api.github.com/repos/ChasoniCK/gateway-acl/releases/latest"
 RELEASES_PAGE = "https://github.com/ChasoniCK/gateway-acl/releases/latest"
 UPDATE_EVERY = 86400
@@ -54,27 +56,31 @@ ETC = os.environ.get("GWACL_DIR", "/etc/gateway-acl")
 CONFIG = f"{ETC}/config.json"
 DEVICES = f"{ETC}/devices.json"
 TRAFFIC = f"{ETC}/traffic.json"
+TODAY = f"{ETC}/today.json"
 SESSIONS = f"{ETC}/sessions.json"
 
 DEFAULTS = {"iface": "eno1", "lan": "192.168.1.0/24", "self_ip": "192.168.1.10",
             "port": 8080, "poll_sec": 60, "pw": None, "lang": "ru",
-            "update_check": True}
+            "update_check": True, "keep_months": 3}
 SESSION_TTL = 7 * 86400
 FAIL_LIMIT = 5          # misses in a row from one address
 FAIL_BLOCK = 60         # and that is how long it then sits out
 BLOCK_TTL = 6 * 3600    # how long the kernel remembers whom it dropped
 BLOCK_CACHE = 30        # and how long the panel reuses its own last look
-# How long traffic.json is allowed to lag behind memory. This is the seconds of
+# How long today.json is allowed to lag behind memory. This is the seconds of
 # accounting a power cut costs — a clean stop or a crash costs nothing, see
 # flush() — and it is what keeps a page refreshing every five seconds from
-# rewriting the file every five seconds.
-FLUSH_EVERY = 30
+# rewriting the file every five seconds. Five minutes of a gateway's traffic is
+# worth less than the flash this saves: the file is rewritten whole, so this
+# number divides the bytes written per day straight down.
+FLUSH_EVERY = 300
 # A rate is measured over a window; below this one there is nothing new to
 # divide, so a poll inside it would spend an nft call to learn nothing.
 POLL_MIN = 2
-# Months kept day by day. Older ones are folded into a single figure: the file
-# is read and rewritten on every poll, and days accumulate for ever.
-KEEP_MONTHS = 3
+# Months kept day by day, from "keep_months". Older ones are folded into a
+# single figure per month: monthly totals stay exact to the byte, what is given
+# up is the per-day chart of a month that far back. Set by reload_conf.
+KEEP_MONTHS = DEFAULTS["keep_months"]
 
 _lock = threading.Lock()
 _blklock = threading.Lock()
@@ -109,6 +115,24 @@ def write_private(path, obj):
     with os.fdopen(fd, "w") as f:
         json.dump(obj, f, indent=1)
     os.chmod(path, 0o600)
+
+
+def write_atomic(path, obj):
+    """Write json so that a power cut leaves either the old file or the new one.
+
+    `open(path, "w")` truncates first: cut the power in that window and what
+    comes back up is half a file, which is not json and takes the panel with it
+    on the next start. The rename is the atomic step, and the fsync is what
+    makes it mean anything — without it the rename can reach the disk before
+    the bytes do. Compact separators because nobody reads these two files by
+    hand and every comma is written FLUSH_EVERY seconds apart, for ever.
+    """
+    tmp = f"{path}.tmp"
+    with open(tmp, "w") as f:
+        json.dump(obj, f, separators=(",", ":"))
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
 
 
 def save_conf(c):
@@ -179,6 +203,11 @@ STRINGS = {
         "sLang": "язык панели",
         "sUpdate": "сообщать о новых версиях",
         "sPoll": "опрос счётчиков, с",
+        "sKeep": "хранить по дням, мес.",
+        "sKeepWhat": "Сколько месяцев держать разбивку по дням. Что старше — "
+                     "сворачивается в одну цифру за месяц: итоги месяцев и "
+                     "устройств остаются точными до байта, пропадает только "
+                     "график по дням. Уменьшение сворачивает лишнее сразу.",
         "sIface": "интерфейс",
         "sLan": "локальная сеть",
         "sSelfIp": "адрес шлюза в ней",
@@ -194,6 +223,7 @@ STRINGS = {
         "badLang": "языка {lang} нет",
         "badNumber": "здесь нужно число",
         "badPoll": "опрос — от 5 до 3600 секунд",
+        "badKeep": "хранить по дням — от 1 до 24 месяцев",
         "badPort": "порт — от 1 до 65535",
         "badIface": "интерфейса {iface} в системе нет",
         "selfOutside": "{ip} не входит в сеть {lan}",
@@ -303,6 +333,11 @@ STRINGS = {
         "sLang": "panel language",
         "sUpdate": "tell me about new versions",
         "sPoll": "counter poll, s",
+        "sKeep": "keep day by day, months",
+        "sKeepWhat": "How many months keep their day-by-day breakdown. Older "
+                     "ones are folded into one figure per month: monthly and "
+                     "per-device totals stay exact to the byte, only the daily "
+                     "chart goes. Lowering this folds what is over the line at once.",
         "sIface": "interface",
         "sLan": "local network",
         "sSelfIp": "this gateway in it",
@@ -318,6 +353,7 @@ STRINGS = {
         "badLang": "there is no {lang} language",
         "badNumber": "a number is expected here",
         "badPoll": "the poll interval is 5 to 3600 seconds",
+        "badKeep": "days are kept for 1 to 24 months",
         "badPort": "the port is 1 to 65535",
         "badIface": "there is no {iface} interface on this system",
         "selfOutside": "{ip} is outside the {lan} network",
@@ -373,13 +409,14 @@ def reload_conf():
     changed language or network takes effect without a restart. Only the port
     cannot be picked up this way — the socket is already bound (see restart).
     """
-    global CFG, LANG, T, IFACE, PORT, POLL_SEC, LAN, SELF_IP, PAGE
+    global CFG, LANG, T, IFACE, PORT, POLL_SEC, KEEP_MONTHS, LAN, SELF_IP, PAGE
     CFG = conf()
     LANG = CFG.get("lang") if CFG.get("lang") in STRINGS else "ru"
     T = STRINGS[LANG]
     IFACE = CFG["iface"]
     PORT = int(CFG["port"])
     POLL_SEC = int(CFG["poll_sec"])
+    KEEP_MONTHS = int(CFG["keep_months"])
     LAN = ipaddress.ip_network(CFG["lan"])
     SELF_IP = ipaddress.ip_address(CFG["self_ip"])
     PAGE = render(PAGE_T)
@@ -403,13 +440,16 @@ def check_settings(body, base):
     try:
         poll_sec = int(body.get("poll_sec", c["poll_sec"]))
         port = int(body.get("port", c["port"]))
+        keep = int(body.get("keep_months", c["keep_months"]))
     except (TypeError, ValueError):
         raise ValueError(T["badNumber"])
     if not 5 <= poll_sec <= 3600:
         raise ValueError(T["badPoll"])
     if not 1 <= port <= 65535:
         raise ValueError(T["badPort"])
-    c["poll_sec"], c["port"] = poll_sec, port
+    if not 1 <= keep <= 24:
+        raise ValueError(T["badKeep"])
+    c["poll_sec"], c["port"], c["keep_months"] = poll_sec, port, keep
 
     iface = str(body.get("iface", c["iface"])).strip()
     if iface != base["iface"] and not os.path.isdir(f"/sys/class/net/{iface}"):
@@ -712,22 +752,51 @@ def accrue(prev, cur):
     return cur if cur < prev else cur - prev
 
 
-def _read_history():
+def _load_json(path, empty):
+    """One of our two data files, or `empty` when there is nothing to read.
+
+    A file that is not json used to take the panel down on every start, and
+    systemd would restart it into the same crash for ever. It is written
+    atomically now, so this can only be damage done by a version that did not,
+    or by something outside this program — either way, saying so once and
+    carrying on beats a boot loop nobody can see the reason for.
+    """
     try:
-        with open(TRAFFIC) as f:
-            h = json.load(f)
+        with open(path) as f:
+            return json.load(f)
     except FileNotFoundError:
-        h = {"days": {}}
+        return empty
+    except (ValueError, OSError) as e:
+        print(f"gateway-acl: {path}: {e}", file=sys.stderr)
+        return empty
+
+
+def _read_history():
+    """Both files, joined back into the one dict the rest of this program reads.
+
+    The day in progress is whatever today.json says: it is the file that is
+    kept up to date, and traffic.json holds a copy of that day only until the
+    rollover rewrites it. Upgrading from a single-file version lands here with
+    no today.json at all — traffic.json still has today, `seen` and `last` in
+    it, and the first flush moves them across.
+    """
+    h = _load_json(TRAFFIC, {"days": {}})
     if "days" not in h:  # old format: month keys straight in the root
         h = {"days": h}
     h.setdefault("seen", {})
     h.setdefault("last", {})
+    hot = _load_json(TODAY, {})
+    if hot.get("date"):
+        h["days"][hot["date"]] = hot.get("day", {})
+        h["seen"], h["last"] = hot.get("seen", {}), hot.get("last", {})
     return h
 
 
-_hist = None            # the history itself; the file is a copy taken now and then
+_hist = None            # the history itself; the files are a copy taken now and then
 _flushed = 0.0          # when that copy was last brought up to date
 _dirty = False          # whether it is behind
+_cold = False           # ...and whether the closed days behind it moved too
+_hot_date = None        # the day the hot file is holding
 
 
 def history():
@@ -768,12 +837,24 @@ def flush(force=False):
     it, so the next poll measures the increment from there and lands on the
     same figure. Only losing the kernel's counters at the same moment, which
     means a reboot or a power cut, costs the last FLUSH_EVERY seconds.
+
+    Two files, because only one of them changes. Today's bucket, `seen` and the
+    baseline are a kilobyte or so and have to be written every FLUSH_EVERY
+    seconds; the months behind them are a hundred times that and cannot change
+    until midnight. Writing them together meant rewriting a year of history to
+    record the last five minutes — hundreds of megabytes a day onto the flash
+    of a machine that is never turned off. So traffic.json is written when a
+    day closes or a month is folded, and today.json on the clock.
     """
-    global _flushed, _dirty
+    global _flushed, _dirty, _cold
     if not _dirty or (not force and time.time() - _flushed < FLUSH_EVERY):
         return False
-    with open(TRAFFIC, "w") as f:
-        json.dump(_hist, f)
+    if _cold:
+        write_atomic(TRAFFIC, {"days": {k: v for k, v in _hist["days"].items()
+                                        if k != _hot_date}})
+        _cold = False
+    write_atomic(TODAY, {"date": _hot_date, "day": _hist["days"].get(_hot_date, {}),
+                         "seen": _hist["seen"], "last": _hist["last"]})
     _flushed, _dirty = time.time(), False
     return True
 
@@ -841,8 +922,9 @@ def note_hour(moved, key=None):
     """Keep the last 24 hourly buckets, per device.
 
     ponytail: memory only, so a restart of the service starts the day over.
-    Storing them would multiply traffic.json by twenty-four for a chart whose
-    whole point is the last day — the month is already on disk.
+    Storing them would multiply today.json by twenty-four, and that is the file
+    written every FLUSH_EVERY seconds, for a chart whose whole point is the
+    last day — the month is already on disk.
     """
     bucket = _hours.setdefault(key or time.strftime("%Y-%m-%d %H"), {})
     for ip, (u, d) in moved.items():
@@ -854,7 +936,7 @@ def note_hour(moved, key=None):
     return bucket
 
 
-def roll_up(days, month, keep=KEEP_MONTHS):
+def roll_up(days, month, keep=None):
     """Fold the day buckets of long-past months into one figure per month.
 
     A month key is a shape this program already reads: month_totals counts it,
@@ -862,11 +944,13 @@ def roll_up(days, month, keep=KEEP_MONTHS):
     strip below the chart stay exact to the byte; what is given up is the
     day-by-day chart of a month older than `keep`.
 
-    Without this, days accumulate for ever in a file that is read and rewritten
-    on every poll. Returns how many day buckets were folded — poll() writes the
-    file only when something in it actually changed.
+    Without this, days accumulate for ever in a file every start has to read.
+    Returns how many day buckets were folded. `keep` defaults to the setting at
+    call time, not at import time: it is a number the user can lower, and a
+    default argument would have frozen the one that was there at startup.
     """
     cut = month
+    keep = KEEP_MONTHS if keep is None else keep
     for _ in range(keep):
         cut = prev_month(cut)
     old = [k for k in days if len(k) == 10 and k[:7] <= cut]
@@ -891,7 +975,7 @@ def poll(force=False):
     through: that call exists to read the counters before the rebuild zeroes
     them, and skipping it would lose whatever they hold.
     """
-    global _polled, _dirty
+    global _polled, _dirty, _cold, _hot_date
     with _lock:
         now = time.time()
         if not force and now - _polled < POLL_MIN:
@@ -902,9 +986,17 @@ def poll(force=False):
         except (OSError, subprocess.CalledProcessError, ValueError, KeyError):
             return  # no table yet — first run
         h = history()
-        folded = roll_up(h["days"], time.strftime("%Y-%m"))
+        today = time.strftime("%Y-%m-%d")
+        if _hot_date != today:
+            # Midnight, or the first poll of this process. Yesterday is a closed
+            # day now and closed days live in the cold file — which is also the
+            # only moment a month can have aged past keep_months, so this is
+            # where the fold belongs rather than on every poll of the day.
+            _hot_date, _cold = today, True
+            _dirty = True   # even an idle rollover has to reach the disk
+            roll_up(h["days"], time.strftime("%Y-%m"))
         was = dict(h["last"])
-        day = h["days"].setdefault(time.strftime("%Y-%m-%d"), {})
+        day = h["days"].setdefault(today, {})
         devs = load()
         moved = apply_deltas(cur, h["last"], day, devs)
         for ip in moved:
@@ -916,9 +1008,24 @@ def poll(force=False):
         # Nothing moved means nothing to record: a delta of zero leaves the day,
         # `seen` and the baseline exactly as they were. What did change waits in
         # memory until flush() decides the file has lagged long enough.
-        if moved or folded or h["last"] != was:
+        if moved or h["last"] != was:
             _dirty = True
         flush()
+
+
+def refold():
+    """Apply a lowered keep_months now instead of at the next rollover.
+
+    The fold itself belongs at midnight — nothing can age past the line inside a
+    day. But someone who has just cut the retention did it to get the space
+    back, and telling them to wait until tomorrow for a number they typed
+    themselves is the kind of thing that reads as broken.
+    """
+    global _dirty, _cold
+    with _lock:
+        if roll_up(history()["days"], time.strftime("%Y-%m")):
+            _dirty = _cold = True
+            flush(force=True)
 
 
 def _ver(s):
@@ -1289,6 +1396,7 @@ def render(tpl, t=None):
                .replace("{{LANCIDR}}", str(LAN))
                .replace("{{PORT}}", str(PORT))
                .replace("{{POLL}}", str(POLL_SEC))
+               .replace("{{KEEP}}", str(KEEP_MONTHS))
                .replace("{{SEL_RU}}", " selected" if LANG == "ru" else "")
                .replace("{{SEL_EN}}", " selected" if LANG == "en" else "")
                .replace("{{UPD}}", " checked" if CFG["update_check"] else "")
@@ -1461,6 +1569,8 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
     <label>{{t.sLang}}<select id=s_lang>
      <option value=ru{{SEL_RU}}>Русский<option value=en{{SEL_EN}}>English</select></label>
     <label>{{t.sPoll}}<input id=s_poll type=number min=5 max=3600 value="{{POLL}}"></label>
+    <label title="{{t.sKeepWhat}}"
+     >{{t.sKeep}}<input id=s_keep type=number min=1 max=24 value="{{KEEP}}"></label>
     <label>{{t.sPort}}<input id=s_port type=number min=1 max=65535 value="{{PORT}}"></label>
     <label>{{t.sIface}}<input id=s_iface value="{{IFACE}}"></label>
     <label>{{t.sLan}}<input id=s_lan value="{{LANCIDR}}"></label>
@@ -1851,8 +1961,8 @@ f.onsubmit = e => { e.preventDefault();
 // everything else is already live, the reload is only to redraw the labels.
 const saveCfg = () => fetch('/settings', {method:'POST', body: JSON.stringify({
     lang: s_lang.value, update_check: s_upd.checked, poll_sec: +s_poll.value,
-    port: +s_port.value, iface: s_iface.value, lan: s_lan.value,
-    self_ip: s_self.value, pw: s_pw.value})})
+    keep_months: +s_keep.value, port: +s_port.value, iface: s_iface.value,
+    lan: s_lan.value, self_ip: s_self.value, pw: s_pw.value})})
   .then(r => r.text().then(x => !r.ok ? alert(x)
     : x ? alert(T.sRestart.replace('{url}', x)) : location.reload()));
 // Only the chart depends on the pixel width. Redrawing the table here would
@@ -2006,6 +2116,7 @@ class H(BaseHTTPRequestHandler):
             if pw:
                 set_password(pw)   # re-reads the config just written
             reload_conf()
+            refold()   # keep_months may have just come down
             # Saving the form is the one moment the user is asking about this,
             # so drop the once-a-day timer and let the next tick go and look.
             # Without it a release cut this morning stays invisible until
@@ -2022,7 +2133,7 @@ class H(BaseHTTPRequestHandler):
             return
         host = (self.headers.get("Host") or "").rsplit(":", 1)[0]
         self._send(200, f'http://{host or SELF_IP}:{c["port"]}/', "text/plain")
-        restart()
+        reboot()
 
     def _login(self, raw):
         ip = self.client_address[0]
@@ -2263,49 +2374,90 @@ def selftest():
     assert roll_up({"2026-08-01": {"a": [1, 1]}}, "2026-08") == 0, \
         "a fresh install has nothing to fold"
 
-    # The file lags memory on purpose. A poll that moved nothing has nothing to
+    # The files lag memory on purpose. A poll that moved nothing has nothing to
     # write; a poll that moved bytes waits for the window; and what waits must
     # not be lost, so the same reading has to come back after a restart.
     with tempfile.TemporaryDirectory() as td:
-        global TRAFFIC, counters, load, _hist, _flushed, _dirty
-        keep_io = (TRAFFIC, counters, load)
+        global TRAFFIC, TODAY, counters, load, _hist, _flushed, _dirty
+        global _cold, _hot_date
+        keep_io = (TRAFFIC, TODAY, counters, load)
         TRAFFIC = os.path.join(td, "traffic.json")
+        TODAY = os.path.join(td, "today.json")
         counters = lambda: {"up_10_0_0_5": 500, "down_10_0_0_5": 900}
         load = lambda: [{"ip": "10.0.0.5", "name": "x", "on": True}]
-        _hist, _flushed, _dirty = None, 0.0, False
+        # Everything a fresh process starts with. Not named restart(): that is
+        # already a function in this module, and one that re-execs the panel.
+        reboot = lambda: globals().update(
+            _hist=None, _flushed=0.0, _dirty=False, _cold=False, _hot_date=None)
+        reboot()
         today = time.strftime("%Y-%m-%d")
 
         poll(force=True)                     # first reading, window wide open
-        stamp = os.stat(TRAFFIC).st_mtime_ns
+        stamp = os.stat(TODAY).st_mtime_ns
+        cold_stamp = os.stat(TRAFFIC).st_mtime_ns
         time.sleep(0.01)                     # so any write shows in the mtime
         _flushed = 0.0                       # even with the window wide open
         poll(force=True)
-        assert os.stat(TRAFFIC).st_mtime_ns == stamp, "an idle poll wrote the file"
+        assert os.stat(TODAY).st_mtime_ns == stamp, "an idle poll wrote the file"
 
         _flushed = time.time()               # and now the window is shut
         counters = lambda: {"up_10_0_0_5": 700, "down_10_0_0_5": 900}
         poll(force=True)                     # moved, but inside the window
-        assert os.stat(TRAFFIC).st_mtime_ns == stamp, "the write was not buffered"
+        assert os.stat(TODAY).st_mtime_ns == stamp, "the write was not buffered"
         assert history()["days"][today] == {"10.0.0.5": [700, 900]}, \
             "the increment must be in memory the moment it is measured"
         _flushed = 0.0
         poll(force=True)
-        assert os.stat(TRAFFIC).st_mtime_ns != stamp, "the buffer was never flushed"
-        assert json.load(open(TRAFFIC))["days"][today] == {"10.0.0.5": [700, 900]}
+        assert os.stat(TODAY).st_mtime_ns != stamp, "the buffer was never flushed"
+        assert json.load(open(TODAY))["day"] == {"10.0.0.5": [700, 900]}
+        # And the point of the whole split: recording today did not touch the
+        # months behind it. This is the assertion that keeps the daily write
+        # volume where it is now — delete it and the file quietly grows back.
+        assert os.stat(TRAFFIC).st_mtime_ns == cold_stamp, \
+            "a day in progress must not rewrite the closed days"
+        assert not [f for f in os.listdir(td) if f.endswith(".tmp")], \
+            "an atomic write must not leave its temporary file behind"
 
         # What the buffer still holds is not lost when the process goes: the
         # baseline on disk is exactly as old as the totals beside it, so the
         # next poll measures the increment from there and arrives at the same
-        # figure. Here that process is a fresh _hist read back off the file.
+        # figure. Here that process is a fresh _hist read back off both files.
         counters = lambda: {"up_10_0_0_5": 1500, "down_10_0_0_5": 900}
         poll(force=True)                     # +800, buffered and then dropped
-        _hist, _flushed, _dirty = None, 0.0, False
+        reboot()
         poll(force=True)
         assert history()["days"][today] == {"10.0.0.5": [1500, 900]}, \
             "a reading lost with the buffer must come back from the counters"
 
-        _hist, _flushed, _dirty = None, 0.0, False
-        TRAFFIC, counters, load = keep_io
+        # Midnight. Yesterday moves to the cold file and stops being rewritten;
+        # today stays in the hot one. Neither may lose a byte in the handover.
+        # A real date, not a made-up one: an old key would be folded into its
+        # month by the same rollover and never reach the cold file as a day.
+        y = time.strftime("%Y-%m-%d", time.localtime(time.time() - 86400))
+        _hist["days"][y] = {"10.0.0.5": [11, 22]}
+        _hot_date = y
+        _flushed = 0.0
+        counters = lambda: {"up_10_0_0_5": 1600, "down_10_0_0_5": 900}
+        poll(force=True)
+        cold, hot = json.load(open(TRAFFIC)), json.load(open(TODAY))
+        assert cold["days"][y] == {"10.0.0.5": [11, 22]}, \
+            "the day that closed must be in the cold file"
+        assert today not in cold["days"], "and the day in progress must not be"
+        assert hot["date"] == today and hot["day"] == {"10.0.0.5": [1600, 900]}
+        reboot()
+        assert history()["days"][y] == {"10.0.0.5": [11, 22]} and \
+            history()["days"][today] == {"10.0.0.5": [1600, 900]}, \
+            "both halves have to come back as one history"
+
+        # A file damaged by a version that wrote it without a rename costs its
+        # own contents and nothing more: the panel still starts.
+        open(TRAFFIC, "w").write('{"days": {"2026-01-0')
+        reboot()
+        assert history()["days"][today] == {"10.0.0.5": [1600, 900]}, \
+            "half a cold file must not take the day in progress with it"
+
+        reboot()
+        TRAFFIC, TODAY, counters, load = keep_io
     _rate.clear()
     _pend.clear()
     _hours.clear()
@@ -2325,11 +2477,11 @@ def selftest():
     assert _ver(VERSION), f"VERSION {VERSION!r} does not compare against a tag"
 
     base = dict(DEFAULTS)
-    form = {"lang": "en", "update_check": False, "poll_sec": 30,
+    form = {"lang": "en", "update_check": False, "poll_sec": 30, "keep_months": 6,
             "port": base["port"], "iface": base["iface"],
             "lan": "10.7.0.0/24", "self_ip": "10.7.0.1"}
     c = check_settings(form, base)
-    assert (c["lang"], c["poll_sec"]) == ("en", 30)
+    assert (c["lang"], c["poll_sec"], c["keep_months"]) == ("en", 30, 6)
     assert c["update_check"] is False and c["lan"] == "10.7.0.0/24"
     assert c["pw"] == base["pw"], "a settings save must not drop the password"
     assert check_settings({}, base) == base, "an empty form changes nothing"
@@ -2342,6 +2494,7 @@ def selftest():
                     {"port": 0}, {"port": 70000}, {"port": "abc"},
                     {"port": taken},                    # would not come back up
                     {"poll_sec": 4}, {"poll_sec": 99999},
+                    {"keep_months": 0}, {"keep_months": 25}, {"keep_months": "all"},
                     {"lang": "de"}, {"iface": "no-such-iface0"}):
             try:
                 check_settings(dict(form, **bad), base)
@@ -2355,7 +2508,7 @@ def selftest():
     for el in ("msel", "upd", "updtext", "kt", "kd", "ku", "ka", "kdelta", "chsel",
                "bday", "bhour", "chartbox", "cumlbl", "mstrip", "sysbox", "tb",
                "h_ip", "h_name", "h_traf", "h_now", "h_seen", "unk", "ub",
-               "flt", "off", "kother", "kotherbox", "othlbl", "lanips"):
+               "flt", "off", "kother", "kotherbox", "othlbl", "lanips", "s_keep"):
         assert f"id={el}>" in page or f"id={el} " in page, f"the page has no {el}"
 
     ru = set(STRINGS["ru"])

@@ -75,8 +75,8 @@ own doomed retries, which is arguably useful — you can see it knocking.
 ### Surviving resets
 
 Kernel counters reset whenever the table is rebuilt, and on reboot. So the panel
-polls them every 60 seconds and accumulates deltas into `traffic.json`, bucketed
-by day:
+polls them every 60 seconds and accumulates deltas bucketed by day, into
+`today.json` while the day is running and `traffic.json` once it has closed:
 
 ```python
 def accrue(prev, cur):
@@ -92,19 +92,55 @@ Monthly totals are the sum of every day key starting with `YYYY-MM`. Day keys ar
 ten characters; anything shorter is a leftover from an older month-keyed format
 and is still summed, just not charted.
 
+### Two files, because only one of them changes
+
+Recording the last five minutes used to mean rewriting the entire history: one
+file held today's bucket, the baseline and every month behind them, and `flush()`
+wrote the lot. On ten devices with three months of days that is a 57 KB file
+rewritten every 30 seconds — **161 MB a day** onto the flash of a machine that is
+never turned off, and near a gigabyte on a busy network.
+
+Almost none of it can change. A closed day is closed. So the split is by write
+frequency, not by subject:
+
+| file | holds | written |
+|---|---|---|
+| `today.json` | the day in progress, `seen`, the counter baseline | every `FLUSH_EVERY` |
+| `traffic.json` | days already closed, and folded months | when a day closes |
+
+About a kilobyte per write instead of fifty-odd, and the same ten devices now
+cost **under half a megabyte a day**. In memory the two are one dict — only
+`_read_history` and `flush` know there are two files, so `month_totals`, the
+charts and `snapshot` were not touched.
+
+The day in progress lives in exactly one of them. `traffic.json` keeps a copy of
+it only in the gap between an upgrade from a single-file version and the next
+midnight, and `_read_history` resolves that by letting `today.json` win.
+
+Both are written to `path.tmp` and renamed, with an `fsync` in between: `open(path,
+"w")` truncates before it writes, and a power cut inside that window used to leave
+half a file — which is not json, and took the panel down on every start after,
+`Restart=always` looping it into the same crash. A file damaged by a version that
+wrote it the old way is now reported to the journal and skipped, not fatal.
+
 ### Retention
 
-`traffic.json` is read and rewritten on every poll — and a poll happens on every
-page refresh, from every open tab. A key per day per device would make that file
-grow without end, and with it the cost of every refresh for the rest of the
-gateway's life.
+Even split, the closed days grow without end: a key per day per device is a file
+every start has to read, for the rest of the gateway's life.
 
-So `roll_up` folds the day buckets of months older than `KEEP_MONTHS` into a
-single `"YYYY-MM"` key. That shape is one the program already reads:
+So `roll_up` folds the day buckets of months older than `keep_months` (default 3,
+1–24 in the settings) into a single `"YYYY-MM"` key. That shape is one the
+program already reads:
 `month_totals` counts it, and the per-day chart skips it on key length
 (`len(k) == 10`). The monthly totals and the strip below the chart therefore
 stay exact to the byte — what is given up is the day-by-day chart of an old
 month, and the page says so rather than claiming there is no data.
+
+The fold runs at the rollover, not on every poll: a month can only age past the
+line when the day changes, so checking 120 keys four times a minute bought
+nothing. Saving the settings form is the one exception (`refold`) — somebody who
+just lowered the number did it for the space, and would read "tomorrow" as
+broken.
 
 ### Renames are free
 
@@ -199,24 +235,27 @@ there in this order after measuring:
 - The blocked set is cached for `BLOCK_CACHE`. It was the busiest call the panel
   made — once per request, with no window in front of it — for a set whose
   elements time out after six hours.
-- `traffic.json` is written only when something in it changed. A poll where no
-  device moved a byte leaves the day, `seen` and the baseline exactly as they
-  were read, and rewriting the file identically is the whole cost of that poll.
+- Nothing is written unless something in it changed. A poll where no device
+  moved a byte leaves the day, `seen` and the baseline exactly as they were
+  read, and rewriting a file identically is the whole cost of that poll.
 - What did change waits in memory. `flush()` writes at most every
   `FLUSH_EVERY`, so the interval the page refreshes at and the rate the file is
   rewritten at are no longer the same number.
+- What is written is only the day in progress. The months behind it are a
+  separate file that a poll cannot touch.
 
 Measured on ten devices with three months of history, one tab refreshing every
-five seconds, per minute: fourteen `nft` calls, and **two** writes with traffic
-flowing, none with the network asleep. About 90 MB a day against the 535 MB the
-same interval would have cost writing on every poll — and less than half of what
-the old fifteen-second interval wrote before any of this.
+five seconds, per minute: fourteen `nft` calls, and **one** write of about a
+kilobyte every five minutes with traffic flowing, none with the network asleep.
+Under **0.5 MB a day**, against the 535 MB writing the whole history on every
+poll would have cost — and against 161 MB for the same history at the
+thirty-second `FLUSH_EVERY` this replaced.
 
 ### What the buffer risks
 
-Less than it looks. The history is one object: the day buckets and `last`, the
-baseline every increment is measured from. They go to disk together, so the copy
-on disk is always self-consistent — merely old.
+Less than it looks. What is buffered is one object: today's bucket and `last`,
+the baseline every increment is measured from. They go into `today.json`
+together, so the copy on disk is always self-consistent — merely old.
 
 - A **clean stop** loses nothing: systemd sends SIGTERM, the handler flushes.
   That covers every update, since `install.sh` restarts the service.
@@ -232,8 +271,9 @@ precisely because the rebuild is about to zero them, and a baseline older than
 that sampling would read the drop as a reset and lose what stood between.
 
 The hourly chart is the same deltas in a second bucket, `_hours`, twenty-four
-keys wide and **in memory only**. Storing it would multiply `traffic.json` by
-twenty-four for a view whose whole point is the last day — the month is already
+keys wide and **in memory only**. Storing it would multiply `today.json` — the
+file written on the clock — by twenty-four for a view whose whole point is the
+last day, and the month is already
 on disk. The cost is that a restart of the service starts the day over, which
 the panel says out loud rather than drawing a chart that is quietly missing its
 left half.
