@@ -75,9 +75,84 @@ sing-box rule-set match -f binary ruleset.srs 93.184.216.34
 The `-f binary` flag is required for compiled `.srs` files; without it the
 command fails with `invalid character 'S'`.
 
+## A connection that opens quietly loses its domain
+
+A routing rule that matches on domain needs one, and for a forwarded connection the
+domain comes from sniffing the TLS ClientHello. The sniffer gives up after **300 ms**.
+A client that opens the socket ahead of time and says nothing therefore gets routed
+with no domain at all — only the address is left to match on, and a domain list, however
+correct, is inert for that connection.
+
+The same destination, twice, one second apart:
+
+```
+[3950739284   0ms] inbound connection to 185.206.27.17:443
+[3950739284 301ms] outbound/direct[direct]:  185.206.27.17:443   ← socket held silent
+[1585253673   0ms] inbound connection to 185.206.27.17:443
+[1585253673   0ms] outbound/vless[node]:     185.206.27.17:443   ← ClientHello at once
+```
+
+The duration on the `outbound` line is the tell: a little over 300 ms means the sniffer
+timed out, not that the route was slow.
+
+This is not exotic. Any client that keeps a pool of pre-opened connections behaves this
+way — MEGA raises about ten sockets to its storage nodes before it has even resolved
+them, so a download runs outside the tunnel while the API, opened on demand, runs inside
+it. The service then sees one session arriving from two different addresses and stalls.
+
+Route such a service by address. Raising the global sniff timeout also works and is one
+line, but every silent connection on the host pays it, SSH included.
+
+## A direct outbound with no interface loops UDP against the tun
+
+Symptom: sing-box at 300–400 % CPU on an idle gateway, no warning in the journal, and
+traffic that works normally the whole time. Nothing about it is visible from the outside
+— none of that load reaches the wire.
+
+```
+tun0  tx  355 000 pkt/s   22 MB/s     ← the kernel handing them to sing-box
+eno1  tx       39 pkt/s   14 kB/s     ← nothing leaves the host
+Udp:OutDatagrams  335 471/s           ← all of it generated locally, 66 B per packet
+```
+
+A UDP session routed to a `direct` outbound gets an unbound socket. Its packets match
+the tun's own route table (`0.0.0.0/5 … 224.0.0.0/3 via tun0 table 2022`), so they go
+back into `tun0`, where sing-box reads them and hands them to the same session again.
+No new connection is ever opened, so nothing is logged; the loop is silent. The
+aggregate settles at whatever a single tun reader can manage and stays there until the
+process is restarted.
+
+Two commands separate this from real traffic:
+
+```bash
+grep -c . /proc/net/udp        # ≈ one socket per live direct UDP session
+awk '/tun0|eno1/' /proc/net/dev
+```
+
+A tun transmitting hundreds of thousands of packets a second while the uplink is idle
+is the whole diagnosis. To confirm which outbound is at fault, send one datagram to an
+address that routes `direct` and watch the socket count: it goes up by one and stays.
+The same test against a proxied address adds no socket at all — UDP through `vless`
+never touches a local socket, which is why only `direct` loops.
+
+The fix is to bind the direct outbound to the uplink, so its packets leave by the
+interface instead of by the route table:
+
+```json
+{ "type": "direct", "tag": "direct", "bind_interface": "eno1" }
+```
+
+`"route": { "auto_detect_interface": true }` does the same without naming the
+interface and survives a move to another uplink. Upstream report, closed as stale:
+[#4086](https://github.com/SagerNet/sing-box/issues/4086).
+
 ## Measurement traps
 
 Each of these produced a confidently wrong conclusion at some point:
+
+- **`curl` proves nothing about an application's connections.** It sends the ClientHello
+  immediately, so it is always sniffed and always routed by domain. The application next
+  to it may be taking the opposite route for the same host.
 
 - **`connect()` through a TUN always succeeds in a few milliseconds**, even when
   the upstream is unreachable — the local handshake completes immediately.
