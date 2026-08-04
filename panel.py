@@ -47,7 +47,7 @@ from urllib.parse import urlparse, parse_qs
 # it against the newest tag on GitHub, so a forgotten bump makes every install
 # claim to be older than it is and show a banner that never goes away. CI
 # refuses a tag push where the two disagree.
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 RELEASES_URL = "https://api.github.com/repos/ChasoniCK/gateway-acl/releases/latest"
 RELEASES_PAGE = "https://github.com/ChasoniCK/gateway-acl/releases/latest"
 UPDATE_EVERY = 86400
@@ -215,6 +215,10 @@ STRINGS = {
         "sPw": "новый пароль",
         "sPwKeep": "оставить прежний",
         "sSave": "сохранить",
+        "sReboot": "перезагрузить шлюз",
+        "confirmReboot": "Перезагрузить шлюз? Пока он загружается, интернета не "
+                         "будет ни у одного устройства.",
+        "rebooting": "Шлюз перезагружается. Панель вернётся через минуту-другую.",
         "sNetHint": "Первые три поля — то же, что нашёл установщик. Меняйте их, только "
                     "если сеть действительно переехала: правила nftables пересобираются "
                     "сразу, а устройства вне новой сети добавить будет уже нельзя. "
@@ -345,6 +349,10 @@ STRINGS = {
         "sPw": "new password",
         "sPwKeep": "leave the current one",
         "sSave": "save",
+        "sReboot": "reboot the gateway",
+        "confirmReboot": "Reboot the gateway? Every device is without internet "
+                         "until it comes back up.",
+        "rebooting": "The gateway is rebooting. The panel is back in a minute or two.",
         "sNetHint": "The first three are what the installer found. Change them only if "
                     "the network really moved: the nftables rules are rebuilt at once, "
                     "and devices outside the new network can no longer be added. "
@@ -490,6 +498,16 @@ def restart():
         stop()
         os.execv(sys.executable, [sys.executable] + sys.argv)
     threading.Timer(0.7, go).start()
+
+
+def reboot_host():
+    """Reboot the machine the panel runs on.
+
+    The same delay as restart(), for the same reason. Nothing is flushed here:
+    systemd stops the service on the way down and the SIGTERM handler does it,
+    exactly as it would for a `systemctl reboot` typed at the shell.
+    """
+    threading.Timer(0.7, lambda: subprocess.run(["systemctl", "reboot"])).start()
 
 
 def load():
@@ -1580,6 +1598,7 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
     <label class=chk><input id=s_upd type=checkbox{{UPD}}>{{t.sUpdate}}</label>
    </div>
    <div class=act><span class=ver>gateway-acl {{VERSION}}</span>
+    <button id=s_reboot onclick=rebootHost()>{{t.sReboot}}</button>
     <button onclick=saveCfg()>{{t.sSave}}</button></div>
    <p class=hint>{{t.sNetHint}}</p>
   </div>
@@ -1965,6 +1984,11 @@ const saveCfg = () => fetch('/settings', {method:'POST', body: JSON.stringify({
     lan: s_lan.value, self_ip: s_self.value, pw: s_pw.value})})
   .then(r => r.text().then(x => !r.ok ? alert(x)
     : x ? alert(T.sRestart.replace('{url}', x)) : location.reload()));
+// The one button here that cannot be taken back, so it asks first. Nothing is
+// reloaded afterwards: the answer is the last thing that arrives before the
+// machine goes down, and the page is expected to sit there stale until it is back.
+const rebootHost = () => confirm(T.confirmReboot)
+  && fetch('/reboot', {method:'POST'}).then(r => r.text().then(alert));
 // Only the chart depends on the pixel width. Redrawing the table here would
 // take the cursor out of a name someone is in the middle of typing.
 onresize = () => { if (S) chartbox.innerHTML = chart(rows(), mode === 'day'); };
@@ -2076,6 +2100,10 @@ class H(BaseHTTPRequestHandler):
         if self.path == "/settings":
             self._settings(raw)
             return
+        if self.path == "/reboot":
+            self._send(200, T["rebooting"], "text/plain")
+            reboot_host()
+            return
         try:
             body = json.loads(raw or b"{}")
             ip = validate(body.get("ip", ""))
@@ -2133,7 +2161,7 @@ class H(BaseHTTPRequestHandler):
             return
         host = (self.headers.get("Host") or "").rsplit(":", 1)[0]
         self._send(200, f'http://{host or SELF_IP}:{c["port"]}/', "text/plain")
-        reboot()
+        restart()
 
     def _login(self, raw):
         ip = self.client_address[0]
@@ -2508,7 +2536,8 @@ def selftest():
     for el in ("msel", "upd", "updtext", "kt", "kd", "ku", "ka", "kdelta", "chsel",
                "bday", "bhour", "chartbox", "cumlbl", "mstrip", "sysbox", "tb",
                "h_ip", "h_name", "h_traf", "h_now", "h_seen", "unk", "ub",
-               "flt", "off", "kother", "kotherbox", "othlbl", "lanips", "s_keep"):
+               "flt", "off", "kother", "kotherbox", "othlbl", "lanips", "s_keep",
+               "s_reboot"):
         assert f"id={el}>" in page or f"id={el} " in page, f"the page has no {el}"
 
     ru = set(STRINGS["ru"])

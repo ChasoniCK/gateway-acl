@@ -49,7 +49,8 @@ device ──► this Linux host ──► uplink or tunnel (sing-box / WireGuar
   and shows a banner if yours is older. Off with one checkbox.
 - **Settings in the corner.** Language, update notice, poll interval, LAN
   interface, network, gateway address, port and the password — all of
-  `config.json` behind one form, validated before it is written.
+  `config.json` behind one form, validated before it is written. Next to the
+  save button, a reboot for the gateway itself — it asks first.
 
 Everything is Python standard library and inline SVG. No pip, no npm, no CDN —
 the panel works with no internet at all.
