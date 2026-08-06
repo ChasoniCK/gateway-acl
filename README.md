@@ -51,6 +51,7 @@ device ──► this Linux host ──► uplink or tunnel (sing-box / WireGuar
   interface, network, gateway address, port and the password — all of
   `config.json` behind one form, validated before it is written. Next to the
   save button, a reboot for the gateway itself — it asks first.
+- **A nightly reboot** on a switch — off by default, 05:30 when you turn it on.
 
 Everything is Python standard library and inline SVG. No pip, no npm, no CDN —
 the panel works with no internet at all.

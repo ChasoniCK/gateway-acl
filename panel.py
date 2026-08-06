@@ -47,7 +47,7 @@ from urllib.parse import urlparse, parse_qs
 # it against the newest tag on GitHub, so a forgotten bump makes every install
 # claim to be older than it is and show a banner that never goes away. CI
 # refuses a tag push where the two disagree.
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 RELEASES_URL = "https://api.github.com/repos/ChasoniCK/gateway-acl/releases/latest"
 RELEASES_PAGE = "https://github.com/ChasoniCK/gateway-acl/releases/latest"
 UPDATE_EVERY = 86400
@@ -61,7 +61,8 @@ SESSIONS = f"{ETC}/sessions.json"
 
 DEFAULTS = {"iface": "eno1", "lan": "192.168.1.0/24", "self_ip": "192.168.1.10",
             "port": 8080, "poll_sec": 60, "pw": None, "lang": "ru",
-            "update_check": True, "keep_months": 3}
+            "update_check": True, "keep_months": 3,
+            "reboot": False, "reboot_at": "05:30"}
 SESSION_TTL = 7 * 86400
 FAIL_LIMIT = 5          # misses in a row from one address
 FAIL_BLOCK = 60         # and that is how long it then sits out
@@ -215,6 +216,10 @@ STRINGS = {
         "sPw": "новый пароль",
         "sPwKeep": "оставить прежний",
         "sSave": "сохранить",
+        "sRebootAt": "ребут каждый день в",
+        "sRebootAtWhat": "Перезагружать шлюз каждую ночь в это время. Точность "
+                         "— период опроса: ребут случится в первый опрос после "
+                         "указанного времени.",
         "sReboot": "перезагрузить шлюз",
         "confirmReboot": "Перезагрузить шлюз? Пока он загружается, интернета не "
                          "будет ни у одного устройства.",
@@ -228,6 +233,7 @@ STRINGS = {
         "badNumber": "здесь нужно число",
         "badPoll": "опрос — от 5 до 3600 секунд",
         "badKeep": "хранить по дням — от 1 до 24 месяцев",
+        "badTime": "время ребута — чч:мм",
         "badPort": "порт — от 1 до 65535",
         "badIface": "интерфейса {iface} в системе нет",
         "selfOutside": "{ip} не входит в сеть {lan}",
@@ -349,6 +355,10 @@ STRINGS = {
         "sPw": "new password",
         "sPwKeep": "leave the current one",
         "sSave": "save",
+        "sRebootAt": "reboot every day at",
+        "sRebootAtWhat": "Reboot the gateway every night at this time. It is as "
+                         "precise as the poll interval: the reboot happens on "
+                         "the first poll past that time.",
         "sReboot": "reboot the gateway",
         "confirmReboot": "Reboot the gateway? Every device is without internet "
                          "until it comes back up.",
@@ -362,6 +372,7 @@ STRINGS = {
         "badNumber": "a number is expected here",
         "badPoll": "the poll interval is 5 to 3600 seconds",
         "badKeep": "days are kept for 1 to 24 months",
+        "badTime": "the reboot time is hh:mm",
         "badPort": "the port is 1 to 65535",
         "badIface": "there is no {iface} interface on this system",
         "selfOutside": "{ip} is outside the {lan} network",
@@ -459,6 +470,16 @@ def check_settings(body, base):
         raise ValueError(T["badKeep"])
     c["poll_sec"], c["port"], c["keep_months"] = poll_sec, port, keep
 
+    # The hour is kept whether the reboot is on or off — turning the switch back
+    # on should find the time that was there before, not an empty field. Stored
+    # normalised, because <input type=time> will not show "5:30".
+    try:
+        at = time.strftime("%H:%M", time.strptime(
+            str(body.get("reboot_at", c["reboot_at"])).strip(), "%H:%M"))
+    except ValueError:
+        raise ValueError(T["badTime"])
+    c["reboot"], c["reboot_at"] = bool(body.get("reboot", c["reboot"])), at
+
     iface = str(body.get("iface", c["iface"])).strip()
     if iface != base["iface"] and not os.path.isdir(f"/sys/class/net/{iface}"):
         raise ValueError(T["badIface"].replace("{iface}", iface))
@@ -508,6 +529,43 @@ def reboot_host():
     exactly as it would for a `systemctl reboot` typed at the shell.
     """
     threading.Timer(0.7, lambda: subprocess.run(["systemctl", "reboot"])).start()
+
+
+def uptime():
+    """Seconds since this machine booted, 0 where that cannot be answered."""
+    # ponytail: /proc, not a boot-time constant — on anything that is not Linux
+    # (a Mac running --selftest) 0 means the scheduled reboot never fires, which
+    # is the right answer there anyway.
+    try:
+        with open("/proc/uptime") as f:
+            return float(f.read().split()[0])
+    except (OSError, ValueError):
+        return 0.0
+
+
+def reboot_due(at, now, up, window):
+    """Whether the daily reboot time fell inside the window just polled.
+
+    `at` is the hour to go down at, or anything falsy for a switch that is off.
+
+    No cron, no timer unit: the poller is already awake every POLL_SEC, and a
+    scheduler that lives in config.json is one the settings form can change
+    without touching the host. The window has to be a poll long — the tick
+    lands where it lands, not on the minute — so what stops the machine from
+    going down again the moment it comes back up is `up`: nothing here fires in
+    the first two hours of a boot, and a window is at most one hour and a bit.
+    """
+    if not at:
+        return False
+    try:
+        h, m = str(at).split(":")
+        target = int(h) * 3600 + int(m) * 60
+    except ValueError:
+        # The form cannot write anything but hh:mm, a text editor can. Junk here
+        # means "never" — an exception would take the poller thread with it.
+        return False
+    since_midnight = now.tm_hour * 3600 + now.tm_min * 60 + now.tm_sec
+    return up > 2 * 3600 and 0 <= since_midnight - target < window
 
 
 def load():
@@ -1415,6 +1473,9 @@ def render(tpl, t=None):
                .replace("{{PORT}}", str(PORT))
                .replace("{{POLL}}", str(POLL_SEC))
                .replace("{{KEEP}}", str(KEEP_MONTHS))
+               .replace("{{REBOOT_AT}}", html.escape(CFG["reboot_at"], quote=True))
+               .replace("{{RB}}", " checked" if CFG["reboot"] else "")
+               .replace("{{RB_OFF}}", "" if CFG["reboot"] else " disabled")
                .replace("{{SEL_RU}}", " selected" if LANG == "ru" else "")
                .replace("{{SEL_EN}}", " selected" if LANG == "en" else "")
                .replace("{{UPD}}", " checked" if CFG["update_check"] else "")
@@ -1540,8 +1601,20 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  .set label{display:block;font-size:.75rem;color:var(--dim);letter-spacing:.04em}
  .set input,.set select{width:100%;margin-top:.2rem}
  .set .chk,.chk input{display:flex;align-items:center;width:auto;margin:0}
- .set .chk{gap:.45rem;align-self:end;padding-bottom:.4rem}
- .chk input{accent-color:var(--down)}
+ /* wrap: the reboot row carries a field after its text and the column is
+    narrow — a label that overflowed its cell would sit on top of the next. */
+ .set .chk{gap:.45rem;align-self:end;padding-bottom:.4rem;flex-wrap:wrap}
+ /* A switch, in the panel's own two colours: it is still the checkbox itself,
+    stripped of its native look, and the knob is its ::before sliding across.
+    No wrapper span, so the label, the keyboard and :checked all keep working. */
+ /* .set .sw, not .sw: the width has to outrank the .chk input above it. */
+ .set .sw{appearance:none;-webkit-appearance:none;flex:none;position:relative;
+     width:34px;height:18px;padding:0;border-radius:9px;cursor:pointer;
+     transition:background .15s,border-color .15s}
+ .sw::before{content:"";position:absolute;top:2px;left:2px;width:12px;height:12px;
+     border-radius:50%;background:var(--dim);transition:transform .15s,background .15s}
+ .sw:checked{background:var(--down);border-color:var(--down)}
+ .sw:checked::before{background:var(--fg);transform:translateX(16px)}
  .legend{display:flex;gap:1rem;font-size:.78rem;color:var(--dim);margin-top:.5rem}
  .legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:.35rem}
  .legend i.dash{width:14px;height:0;border-radius:0;border-top:1.5px dashed #6d7686;
@@ -1589,13 +1662,18 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
     <label>{{t.sPoll}}<input id=s_poll type=number min=5 max=3600 value="{{POLL}}"></label>
     <label title="{{t.sKeepWhat}}"
      >{{t.sKeep}}<input id=s_keep type=number min=1 max=24 value="{{KEEP}}"></label>
+    <!-- The switch is the label of the field it turns on, so the two cannot
+         drift apart; the hour stays visible while it is off, only greyed. -->
+    <label class=chk title="{{t.sRebootAtWhat}}"><input id=s_rb class=sw type=checkbox{{RB}}
+      onchange="s_reboot_at.disabled=!this.checked">{{t.sRebootAt}}
+     <input id=s_reboot_at type=time value="{{REBOOT_AT}}"{{RB_OFF}}></label>
     <label>{{t.sPort}}<input id=s_port type=number min=1 max=65535 value="{{PORT}}"></label>
     <label>{{t.sIface}}<input id=s_iface value="{{IFACE}}"></label>
     <label>{{t.sLan}}<input id=s_lan value="{{LANCIDR}}"></label>
     <label>{{t.sSelfIp}}<input id=s_self value="{{GW}}"></label>
     <label>{{t.sPw}}<input id=s_pw type=password autocomplete=new-password
       placeholder="{{t.sPwKeep}}"></label>
-    <label class=chk><input id=s_upd type=checkbox{{UPD}}>{{t.sUpdate}}</label>
+    <label class=chk><input id=s_upd class=sw type=checkbox{{UPD}}>{{t.sUpdate}}</label>
    </div>
    <div class=act><span class=ver>gateway-acl {{VERSION}}</span>
     <button id=s_reboot onclick=rebootHost()>{{t.sReboot}}</button>
@@ -1980,7 +2058,8 @@ f.onsubmit = e => { e.preventDefault();
 // everything else is already live, the reload is only to redraw the labels.
 const saveCfg = () => fetch('/settings', {method:'POST', body: JSON.stringify({
     lang: s_lang.value, update_check: s_upd.checked, poll_sec: +s_poll.value,
-    keep_months: +s_keep.value, port: +s_port.value, iface: s_iface.value,
+    keep_months: +s_keep.value, reboot: s_rb.checked, reboot_at: s_reboot_at.value,
+    port: +s_port.value, iface: s_iface.value,
     lan: s_lan.value, self_ip: s_self.value, pw: s_pw.value})})
   .then(r => r.text().then(x => !r.ok ? alert(x)
     : x ? alert(T.sRestart.replace('{url}', x)) : location.reload()));
@@ -2203,6 +2282,10 @@ def poller():
         time.sleep(POLL_SEC)
         poll()
         check_update()
+        # A minute of slack so two ticks cannot leave a gap between windows.
+        if reboot_due(CFG["reboot"] and CFG["reboot_at"],
+                      time.localtime(), uptime(), POLL_SEC + 60):
+            reboot_host()
 
 
 def selftest():
@@ -2504,12 +2587,33 @@ def selftest():
     assert newer("v1.0.3", "1.1.0") is None, "a minor release outranks a patch"
     assert _ver(VERSION), f"VERSION {VERSION!r} does not compare against a tag"
 
+    # The scheduled reboot. `up` is what keeps a machine that has just rebooted
+    # from rebooting again while the window it woke up in is still open.
+    at = lambda hh, mm, ss, up=9999, w=120: reboot_due(
+        "05:30", time.struct_time((2026, 8, 5, hh, mm, ss, 2, 217, -1)), up, w)
+    assert at(5, 30, 0) and at(5, 31, 59), "the window is a poll long"
+    assert not at(5, 29, 59), "and it does not open early"
+    assert not at(5, 32, 0), "nor stay open after it"
+    assert not at(5, 30, 0, up=600), "a machine that just booted must not go down"
+    assert not at(23, 59, 59) and not at(0, 0, 0)
+    for off in ("", None, False):
+        assert not reboot_due(off, time.localtime(), 9999, 86400), "the switch is off"
+    for junk in ("полшестого", "5", "24:00:00"):
+        assert not reboot_due(junk, time.localtime(), 9999, 86400), \
+            f"{junk!r} must be silence, not a dead poller thread"
+    assert not DEFAULTS["reboot"], "a fresh install must not reboot itself"
+
     base = dict(DEFAULTS)
     form = {"lang": "en", "update_check": False, "poll_sec": 30, "keep_months": 6,
+            "reboot": True, "reboot_at": "5:30",
             "port": base["port"], "iface": base["iface"],
             "lan": "10.7.0.0/24", "self_ip": "10.7.0.1"}
     c = check_settings(form, base)
     assert (c["lang"], c["poll_sec"], c["keep_months"]) == ("en", 30, 6)
+    assert (c["reboot"], c["reboot_at"]) == (True, "05:30"), \
+        "the switch, and a time stored as <input type=time> wants it"
+    assert check_settings(dict(form, reboot=False), base)["reboot_at"] == "05:30", \
+        "turning the reboot off must keep the hour it was set to"
     assert c["update_check"] is False and c["lan"] == "10.7.0.0/24"
     assert c["pw"] == base["pw"], "a settings save must not drop the password"
     assert check_settings({}, base) == base, "an empty form changes nothing"
@@ -2523,6 +2627,8 @@ def selftest():
                     {"port": taken},                    # would not come back up
                     {"poll_sec": 4}, {"poll_sec": 99999},
                     {"keep_months": 0}, {"keep_months": 25}, {"keep_months": "all"},
+                    {"reboot_at": "25:00"}, {"reboot_at": "half past five"},
+                    {"reboot_at": ""},   # the field cannot be emptied, only switched off
                     {"lang": "de"}, {"iface": "no-such-iface0"}):
             try:
                 check_settings(dict(form, **bad), base)
@@ -2537,7 +2643,7 @@ def selftest():
                "bday", "bhour", "chartbox", "cumlbl", "mstrip", "sysbox", "tb",
                "h_ip", "h_name", "h_traf", "h_now", "h_seen", "unk", "ub",
                "flt", "off", "kother", "kotherbox", "othlbl", "lanips", "s_keep",
-               "s_reboot"):
+               "s_reboot", "s_reboot_at", "s_rb"):
         assert f"id={el}>" in page or f"id={el} " in page, f"the page has no {el}"
 
     ru = set(STRINGS["ru"])
