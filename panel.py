@@ -47,7 +47,7 @@ from urllib.parse import urlparse, parse_qs
 # it against the newest tag on GitHub, so a forgotten bump makes every install
 # claim to be older than it is and show a banner that never goes away. CI
 # refuses a tag push where the two disagree.
-VERSION = "1.2.1"
+VERSION = "1.2.2"
 RELEASES_URL = "https://api.github.com/repos/ChasoniCK/gateway-acl/releases/latest"
 RELEASES_PAGE = "https://github.com/ChasoniCK/gateway-acl/releases/latest"
 UPDATE_EVERY = 86400
@@ -1615,6 +1615,11 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
      border-radius:50%;background:var(--dim);transition:transform .15s,background .15s}
  .sw:checked{background:var(--down);border-color:var(--down)}
  .sw:checked::before{background:var(--fg);transform:translateX(16px)}
+ /* A switched-off field must still look like a field. Browsers grey a disabled
+    input down to nearly the card behind it, and WebKit overrides `color` with
+    its own fill — the hour is worth reading while the switch is off. */
+ .set input:disabled{opacity:1;color:var(--dim);-webkit-text-fill-color:var(--dim);
+   background:var(--bg);border-style:dashed;cursor:not-allowed}
  .legend{display:flex;gap:1rem;font-size:.78rem;color:var(--dim);margin-top:.5rem}
  .legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:.35rem}
  .legend i.dash{width:14px;height:0;border-radius:0;border-top:1.5px dashed #6d7686;
@@ -1666,7 +1671,9 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
          drift apart; the hour stays visible while it is off, only greyed. -->
     <label class=chk title="{{t.sRebootAtWhat}}"><input id=s_rb class=sw type=checkbox{{RB}}
       onchange="s_reboot_at.disabled=!this.checked">{{t.sRebootAt}}
-     <input id=s_reboot_at type=time value="{{REBOOT_AT}}"{{RB_OFF}}></label>
+     <!-- lang, not the page's: <input type=time> takes its 12/24-hour face from
+          a locale, and en-GB is the one that is 24-hour in every language. -->
+     <input id=s_reboot_at type=time lang=en-GB value="{{REBOOT_AT}}"{{RB_OFF}}></label>
     <label>{{t.sPort}}<input id=s_port type=number min=1 max=65535 value="{{PORT}}"></label>
     <label>{{t.sIface}}<input id=s_iface value="{{IFACE}}"></label>
     <label>{{t.sLan}}<input id=s_lan value="{{LANCIDR}}"></label>
