@@ -35,6 +35,13 @@ device ──► this Linux host ──► uplink or tunnel (sing-box / WireGuar
   uptime and the interface's throughput, read straight out of `/proc` and
   `/sys`.
 - **Turn a device off** without deleting it — keeps its name and history.
+- **...or off for a while.** Next to the switch, a menu: fifteen minutes, an
+  hour, three, eight, or until seven in the morning. When the time is up the
+  device goes back to the state it was in, by itself. It reads the other way
+  round just as well — a device that is off can be let out for an hour.
+- **Devices follow their hardware address.** DHCP hands a known device another
+  address, and the entry moves there with its name, its switch and all of its
+  traffic history — instead of quietly becoming a rule for nobody.
 - **Unknown devices.** The kernel records who it dropped into a timeout set; the
   panel lists them, with the hostname out of the DHCP leases and the hardware
   address out of the ARP cache when the system knows them, says how long ago
@@ -52,6 +59,8 @@ device ──► this Linux host ──► uplink or tunnel (sing-box / WireGuar
   `config.json` behind one form, validated before it is written. Next to the
   save button, a reboot for the gateway itself — it asks first.
 - **A nightly reboot** on a switch — off by default, 05:30 when you turn it on.
+- **Light and dark**, whichever the machine looking at it is set to. Kept on a
+  phone's home screen it gets its own icon and paints the status bar to match.
 
 Everything is Python standard library and inline SVG. No pip, no npm, no CDN —
 the panel works with no internet at all.
@@ -167,6 +176,12 @@ test a ruleset without touching your host: [docs/design.md](docs/design.md).
 
 - IPv4 only. IPv6 is passed through untouched.
 - Traffic to the host itself (SSH, the panel) is counted too.
+- A timer is as precise as the counter poll — a device set to come back at 07:00
+  comes back at the first poll past it. Same for a device that DHCP has moved:
+  the panel notices at the next poll, not the instant the lease changes, and it
+  can only follow a device the ARP cache has an entry for.
+- A device that moves to another address keeps its history but not its counters:
+  the two named counters belong to the address, and the new ones start at zero.
 - A device that is switched off still accrues a few kilobytes of its own retries.
 - Traffic history is kept per address and outlives the device. Bytes of deleted
   ones stay in the month's totals — the panel shows them as a separate "other"

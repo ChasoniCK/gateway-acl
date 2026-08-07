@@ -24,6 +24,7 @@ Run as root: nft is required.
   --set-password    read a password from stdin and store only its hash
   --version         print the version and exit
 """
+import base64
 import getpass
 import hashlib
 import hmac
@@ -34,11 +35,13 @@ import os
 import secrets
 import signal
 import socket
+import struct
 import subprocess
 import sys
 import threading
 import time
 import urllib.request
+import zlib
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -47,7 +50,7 @@ from urllib.parse import urlparse, parse_qs
 # it against the newest tag on GitHub, so a forgotten bump makes every install
 # claim to be older than it is and show a banner that never goes away. CI
 # refuses a tag push where the two disagree.
-VERSION = "1.2.2"
+VERSION = "1.3.0"
 RELEASES_URL = "https://api.github.com/repos/ChasoniCK/gateway-acl/releases/latest"
 RELEASES_PAGE = "https://github.com/ChasoniCK/gateway-acl/releases/latest"
 UPDATE_EVERY = 86400
@@ -67,7 +70,14 @@ SESSION_TTL = 7 * 86400
 FAIL_LIMIT = 5          # misses in a row from one address
 FAIL_BLOCK = 60         # and that is how long it then sits out
 BLOCK_TTL = 6 * 3600    # how long the kernel remembers whom it dropped
-BLOCK_CACHE = 30        # and how long the panel reuses its own last look
+TIMER_MAX = 7 * 86400   # the longest a device may be switched off "for a while"
+# How long /api reuses its own last answer. Every open tab asks every five
+# seconds, and on a phone plus a laptop that is two full readings — the day
+# buckets copied, the ARP table and the lease file read, /proc walked — for a
+# number that cannot have changed in between. Below POLL_MIN on purpose: the
+# counters are behind that window anyway, so this only removes work nothing
+# was waiting for.
+STATE_CACHE = 1.0
 # How long today.json is allowed to lag behind memory. This is the seconds of
 # accounting a power cut costs — a clean stop or a crash costs nothing, see
 # flush() — and it is what keeps a page refreshing every five seconds from
@@ -84,7 +94,8 @@ POLL_MIN = 2
 KEEP_MONTHS = DEFAULTS["keep_months"]
 
 _lock = threading.Lock()
-_blklock = threading.Lock()
+_statelock = threading.Lock()
+_state = {"at": 0.0, "month": None, "val": None}   # the last answer /api gave
 _sessions = {}          # digest of the token -> when it expires
 _fails = {}             # address -> (misses, blocked until)
 _upd = {"at": 0, "new": None}   # last check, and the tag worth showing
@@ -161,7 +172,9 @@ STRINGS = {
                 "<b>{{MASK}}</b> (Android и Quest спрашивают длину префикса — "
                 "<b>{{PFX}}</b>), DNS <b>1.1.1.1</b>. Кого нет в списке — тот через "
                 "шлюз не ходит вообще. «Выключить» оставляет устройство в списке "
-                "вместе с историей и именем, но закрывает ему выход.",
+                "вместе с историей и именем, но закрывает ему выход. Устройство "
+                "запоминается по MAC: если DHCP выдаст ему другой адрес, запись "
+                "переедет туда вместе со всей своей историей.",
         "blockedTitle": "Стучались, но не пущены",
         "blockedHint": "Ядро запомнило адреса, чьи пакеты дропнуты за последние 6 часов.",
         "noData": "за этот месяц данных ещё нет",
@@ -169,6 +182,19 @@ STRINGS = {
         "turnOff": "выключить",
         "turnOn": "включить",
         "del": "удалить",
+        "tmFor": "на время",
+        "tmWhat": "Выключить или включить на время: когда срок выйдет, устройство "
+                  "само вернётся к тому состоянию, в котором стоит сейчас. "
+                  "Точность — период опроса счётчиков.",
+        "tm15": "15 минут",
+        "tm1h": "1 час",
+        "tm3h": "3 часа",
+        "tm8h": "8 часов",
+        "tmMorning": "до 07:00",
+        "tmLeftM": "ещё {n} мин",
+        "tmLeftH": "ещё {n} ч",
+        "tmCancel": "снять таймер и оставить как есть",
+        "badTimer": "таймер — от минуты до недели",
         "empty": "пусто — сейчас через шлюз не ходит никто",
         "confirmDel": "Удалить {ip}? История трафика останется.",
         "confirmDelMe": "Удалить {ip}? Это ваш собственный адрес — интернет через шлюз "
@@ -298,7 +324,9 @@ STRINGS = {
                 "<b>{{MASK}}</b> (Android and Quest ask for prefix length — "
                 "<b>{{PFX}}</b>), DNS <b>1.1.1.1</b>. Anything not on the list does not "
                 "route through the gateway at all. &ldquo;Turn off&rdquo; keeps a device "
-                "listed with its name and history, but closes its way out.",
+                "listed with its name and history, but closes its way out. A device is "
+                "remembered by its hardware address: if DHCP moves it to another "
+                "address, the entry follows it there with all of its history.",
         "blockedTitle": "Knocked, not allowed",
         "blockedHint": "The kernel recorded the addresses whose packets it dropped "
                        "in the last 6 hours.",
@@ -307,6 +335,19 @@ STRINGS = {
         "turnOff": "turn off",
         "turnOn": "turn on",
         "del": "delete",
+        "tmFor": "for a while",
+        "tmWhat": "Turn off or on for a while: when the time is up the device goes "
+                  "back to the state it stands in now. It is as precise as the "
+                  "counter poll interval.",
+        "tm15": "15 minutes",
+        "tm1h": "1 hour",
+        "tm3h": "3 hours",
+        "tm8h": "8 hours",
+        "tmMorning": "until 07:00",
+        "tmLeftM": "{n} min left",
+        "tmLeftH": "{n} h left",
+        "tmCancel": "drop the timer and leave it as it is",
+        "badTimer": "a timer is a minute to a week",
         "empty": "empty — nobody routes through the gateway right now",
         "confirmDel": "Delete {ip}? Its traffic history stays.",
         "confirmDelMe": "Delete {ip}? That is your own address — you will lose internet "
@@ -568,17 +609,39 @@ def reboot_due(at, now, up, window):
     return up > 2 * 3600 and 0 <= since_midnight - target < window
 
 
+_devs = {"mtime": None, "val": []}
+
+
 def load():
+    """The device list, re-read only when the file has changed underneath us.
+
+    It is asked for on every poll, on every page refresh and on every button —
+    the same few hundred bytes, parsed again each time. What is handed back is a
+    copy of each row: callers mutate what they get and then call save(), so
+    lending out the cached list itself would let a change that was never written
+    take effect anyway, and a failed request would leave it behind.
+    """
     try:
-        with open(DEVICES) as f:
-            return json.load(f)
-    except FileNotFoundError:
+        m = os.stat(DEVICES).st_mtime_ns
+    except OSError:
         return []
+    if m != _devs["mtime"]:
+        with open(DEVICES) as f:
+            _devs["val"] = json.load(f)
+        _devs["mtime"] = m
+    return [dict(d) for d in _devs["val"]]
 
 
 def save(devs):
     with open(DEVICES, "w") as f:
         json.dump(devs, f, indent=1, ensure_ascii=False)
+    # Not "store what we just wrote": mtime_ns is the cheap check, and a write
+    # from anywhere else has to invalidate it just the same.
+    _devs["mtime"] = None
+    # Every change to a device passes through here, and the answer the page is
+    # about to ask for must show it — a button that takes a second to look like
+    # it was pressed reads as a button that did not work.
+    _state["val"] = None
 
 
 def validate(ip):
@@ -586,6 +649,22 @@ def validate(ip):
     if a not in LAN or a == SELF_IP:
         raise ValueError(T["badIp"].replace("{ip}", str(a)).replace("{lan}", str(LAN)))
     return str(a)
+
+
+def check_minutes(v):
+    """The timer off the button, in minutes. 0 means "no timer".
+
+    Minutes and not a moment: the browser knows what "until 07:00" means in the
+    timezone the person is standing in, the gateway knows what time it is. Only
+    one of those two is worth trusting over the wire, and it is the duration.
+    """
+    try:
+        m = int(v)
+    except (TypeError, ValueError):
+        raise ValueError(T["badTimer"])
+    if m and not 1 <= m <= TIMER_MAX // 60:
+        raise ValueError(T["badTimer"])
+    return m
 
 
 def lan_client(ip):
@@ -748,9 +827,20 @@ def nft_json(*args):
     return json.loads(out)["nftables"]
 
 
-def counters():
+def nft_table():
+    """Everything this panel keeps in the kernel, in one call.
+
+    The counters are wanted on every poll and the blocked set on every page
+    refresh; asking for the two separately meant two `nft` processes to read one
+    table. The rules come along with them — parsing a few kilobytes more of json
+    is cheaper than spawning a second process.
+    """
+    return nft_json("table", "inet", "gwacl")
+
+
+def counters(objs):
     return {o["counter"]["name"]: o["counter"]["bytes"]
-            for o in nft_json("counters", "table", "inet", "gwacl") if "counter" in o}
+            for o in objs if "counter" in o}
 
 
 def _secs(v):
@@ -772,7 +862,9 @@ def parse_blocked(objs):
     """
     out = {}
     for o in objs:
-        if "set" not in o:
+        # By name: the table carries `allowed` as well, and its elements are
+        # bare strings that would read as a list of addresses nobody let in.
+        if "set" not in o or o["set"].get("name") != "blocked":
             continue
         for e in o["set"].get("elem", []):
             if not isinstance(e, dict):
@@ -785,27 +877,22 @@ def parse_blocked(objs):
     return out
 
 
-_blk = {"at": 0.0, "set": {}}
+_blk = {"set": {}}
+
+
+def note_blocked(objs):
+    """Keep what the poll just read of the dynamic set."""
+    _blk["set"] = parse_blocked(objs)
 
 
 def blocked():
-    """The dynamic set, cached for BLOCK_CACHE seconds.
+    """The dynamic set as of the last poll.
 
-    Every page refresh asks for this, and unlike the counters it is not covered
-    by the poll window — so it was the busiest nft call the panel made. A set
-    with a six-hour timeout has nothing new to say in the seconds between two
-    refreshes. apply() drops the cache: rebuilding the table empties the set,
-    and the page should not go on showing what the kernel has forgotten.
+    Nothing is read here: every page refresh polls first, and that reading
+    already carried the set with it. A set with a six-hour timeout has nothing
+    new to say in the two seconds the poll window holds anyway.
     """
-    with _blklock:
-        if time.time() - _blk["at"] < BLOCK_CACHE:
-            return _blk["set"]
-        try:
-            _blk["set"] = parse_blocked(nft_json("set", "inet", "gwacl", "blocked"))
-        except (OSError, subprocess.CalledProcessError, ValueError, KeyError):
-            _blk["set"] = {}
-        _blk["at"] = time.time()
-        return _blk["set"]
+    return _blk["set"]
 
 
 def apply(devs):
@@ -816,9 +903,33 @@ def apply(devs):
         # as a reset and lose whatever stood between the two.
         flush(force=True)
     subprocess.run(["nft", "-f", "-"], input=ruleset(devs), text=True, check=True)
-    _blk["at"] = 0.0  # the rebuild emptied the blocked set; the cache is a lie now
+    _blk["set"] = {}  # the rebuild emptied the set; the next poll refills it
     # The baseline is deliberately left alone: after the rebuild a counter is
     # below it, and accrue reads that as a reset and returns zero.
+
+
+def expire(now=None):
+    """Flip back whatever a timer was set on. True if the ruleset changed.
+
+    One field per device carries it: `until` is the moment the state it stands
+    in now runs out. Which way it flips is not stored, because it is not needed
+    — a timer always undoes what set it, so "off until seven" and "on for an
+    hour" are the same field and the same line of code.
+
+    Called from the poller, so it is as precise as poll_sec — same as the
+    nightly reboot, and for the same reason: a thread that wakes on a schedule
+    is the whole mechanism, and a second one would not be worth its own bugs.
+    """
+    now = int(time.time() if now is None else now)
+    devs = load()
+    due = [d for d in devs if 0 < d.get("until", 0) <= now]
+    if not due:
+        return False
+    for d in due:
+        d["on"], d["until"] = not d.get("on", True), 0
+    save(devs)
+    apply(devs)
+    return True
 
 
 # --- traffic accounting -----------------------------------------------------
@@ -1012,6 +1123,37 @@ def note_hour(moved, key=None):
     return bucket
 
 
+def rekey(old, new):
+    """Carry one address's traffic history over to another. Holds _lock.
+
+    Everything the history knows is filed under an address: the day buckets, the
+    hour buckets, when it was last seen. A device that DHCP has moved keeps none
+    of that unless it is carried across — its month would start again from zero
+    and its past would surface as "other", which is exactly the pair of symptoms
+    that reads as the panel having lost the data.
+
+    The baseline is dropped rather than moved: the new address gets new counters
+    and they start at zero.
+    """
+    global _dirty, _cold
+    with _lock:
+        h = history()
+        for bucket in list(h["days"].values()) + list(_hours.values()):
+            row = bucket.pop(old, None)
+            if row:
+                into = bucket.setdefault(new, [0, 0])
+                into[0] += row[0]
+                into[1] += row[1]
+        if old in h["seen"]:
+            h["seen"][new] = max(h["seen"].pop(old), h["seen"].get(new, 0))
+        for w in ("up", "down"):
+            h["last"].pop(cname(w, old), None)
+        _rate.pop(old, None)
+        _pend.pop(old, None)
+        # A closed day may have just changed hands, so the cold file moves too.
+        _dirty = _cold = True
+
+
 def roll_up(days, month, keep=None):
     """Fold the day buckets of long-past months into one figure per month.
 
@@ -1058,9 +1200,11 @@ def poll(force=False):
             return
         _polled = now
         try:
-            cur = counters()
+            objs = nft_table()
         except (OSError, subprocess.CalledProcessError, ValueError, KeyError):
             return  # no table yet — first run
+        cur = counters(objs)
+        note_blocked(objs)   # the same reading carries the dynamic set
         h = history()
         today = time.strftime("%Y-%m-%d")
         if _hot_date != today:
@@ -1150,7 +1294,7 @@ def check_update():
 
 LEASES = ("/var/lib/misc/dnsmasq.leases", "/var/lib/dnsmasq/dnsmasq.leases")
 _syslock = threading.Lock()
-_sys = {"at": 0.0, "cpu": None, "net": None, "pct": None, "bps": [0, 0]}
+_sys = {"at": 0.0, "cpu": None, "net": None, "pct": None, "bps": [0, 0], "out": None}
 
 
 def _read(path):
@@ -1241,21 +1385,27 @@ def sysinfo():
     start reports zero and each later one covers the time since the previous
     one. The readings are kept apart from the traffic counters on purpose: a
     machine that stops answering about itself must not stop the accounting.
+
+    The whole answer is held for that same window rather than only the two
+    rates: inside it there is nothing new to say, and re-reading /proc, statvfs
+    and every thermal zone once per open tab was work whose result was already
+    on the screen.
     """
     with _syslock:
         now = time.time()
         dt = now - _sys["at"]
+        if dt < 2 and _sys["out"]:
+            return _sys["out"]
         cpu = cpu_jiffies(_read("/proc/stat"))
         net = [_num(_read(f"/sys/class/net/{IFACE}/statistics/{w}_bytes"))
                for w in ("rx", "tx")]
-        if dt >= 2:
-            pct = cpu_pct(_sys["cpu"], cpu)
-            if pct is not None:
-                _sys["pct"] = pct
-            if None not in net and _sys["net"] and None not in _sys["net"]:
-                _sys["bps"] = [round(max(0.0, (b - a) / dt))
-                               for a, b in zip(_sys["net"], net)]
-            _sys["at"], _sys["cpu"], _sys["net"] = now, cpu, net
+        pct = cpu_pct(_sys["cpu"], cpu)
+        if pct is not None:
+            _sys["pct"] = pct
+        if None not in net and _sys["net"] and None not in _sys["net"]:
+            _sys["bps"] = [round(max(0.0, (b - a) / dt))
+                           for a, b in zip(_sys["net"], net)]
+        _sys["at"], _sys["cpu"], _sys["net"] = now, cpu, net
         mem = parse_meminfo(_read("/proc/meminfo"))
         try:
             v = os.statvfs("/")
@@ -1266,7 +1416,7 @@ def sysinfo():
             load = list(os.getloadavg())
         except (OSError, AttributeError):
             load = None
-        return {
+        _sys["out"] = {
             "cpu": _sys["pct"],
             "cores": os.cpu_count(),
             "load": load,
@@ -1280,6 +1430,7 @@ def sysinfo():
             "iface": IFACE,
             "bps": _sys["bps"],
         }
+        return _sys["out"]
 
 
 def parse_arp(text):
@@ -1324,6 +1475,54 @@ def lan_names():
     return out
 
 
+def track_macs():
+    """Follow a device that DHCP has moved to another address.
+
+    Everything here hangs off the address: the rule, the two counters, the day
+    buckets. A new lease therefore turns an entry into a rule for nobody — the
+    device is silently outside the gateway, or silently through it, and the
+    panel goes on reporting the old address as quiet. The hardware address is
+    the thing that did not change, and the kernel's own ARP table says where it
+    is now.
+
+    A device that has never been seen has no hardware address to be followed by,
+    so the first sighting records one. Returns True if the ruleset changed.
+    """
+    names = lan_names()
+    at = {mac: ip for ip, (_, mac) in names.items() if mac and lan_client(ip)}
+    devs = load()
+    taken = {d["ip"] for d in devs}
+    moves, learned = [], False
+    for d in devs:
+        mac = d.get("mac") or names.get(d["ip"], ["", ""])[1]
+        if not mac:
+            continue
+        learned = learned or mac != d.get("mac")
+        d["mac"] = mac
+        new = at.get(mac)
+        # `taken`: two entries must never end up on one address, and an entry
+        # whose new address is already somebody else's is left where it is.
+        if not new or new == d["ip"] or new in taken:
+            continue
+        moves.append((d["ip"], new))
+        taken.discard(d["ip"])
+        taken.add(new)
+        d["ip"] = new
+    if moves:
+        # Bank what the old address moved before the list stops mentioning it:
+        # poll() reads the counters against whatever load() says, and the next
+        # one will be reading them against the new address.
+        poll(force=True)
+        for old, new in moves:
+            rekey(old, new)
+    if moves or learned:
+        devs.sort(key=lambda d: ipaddress.ip_address(d["ip"]))
+        save(devs)
+    if moves:
+        apply(devs)
+    return bool(moves)
+
+
 def prev_month(m):
     """The month before "YYYY-MM"."""
     y, mo = int(m[:4]), int(m[5:7])
@@ -1342,10 +1541,24 @@ def month_totals(days, month):
     return tot
 
 
-def state(month=None):
+def month_sums(days):
+    """One total per month, in a single pass over the day buckets.
+
+    Asking month_totals for each month in turn walked the whole history once per
+    month — a year of days re-summed thirteen times over, on every request of
+    every open tab, for the strip under the chart.
+    """
+    out = {}
+    for k, devs in days.items():
+        out[k[:7]] = out.get(k[:7], 0) + sum(sum(v) for v in devs.values())
+    return out
+
+
+def build_state(month=None):
     poll()
     h = snapshot()
-    months = sorted({k[:7] for k in h["days"]} | {time.strftime("%Y-%m")})
+    sums = month_sums(h["days"])
+    months = sorted(set(sums) | {time.strftime("%Y-%m")})
     if month not in months:
         month = time.strftime("%Y-%m")
     tot = month_totals(h["days"], month)
@@ -1356,24 +1569,23 @@ def state(month=None):
     hour_keys = sorted(_hours)
     names = lan_names()
 
-    def total(m):
-        return sum(sum(v) for v in month_totals(h["days"], m).values())
-
     return {
         "month": month,
         # Every month is offered in the picker; the strip below the chart draws
         # the last twelve of them.
-        "months": [[m, total(m)] for m in months],
-        "prev": total(prev_month(month)),
+        "months": [[m, sums.get(m, 0)] for m in months],
+        "prev": sums.get(prev_month(month), 0),
         "now": int(time.time()),
         "poll": POLL_SEC,
         "devices": [dict(d, on=d.get("on", True),
+                         until=int(d.get("until") or 0),
                          up=tot.get(d["ip"], [0, 0])[0],
                          down=tot.get(d["ip"], [0, 0])[1],
                          seen=h["seen"].get(d["ip"], 0),
                          rate=_rate.get(d["ip"], [0, 0]),
                          host=names.get(d["ip"], ["", ""])[0],
-                         mac=names.get(d["ip"], ["", ""])[1],
+                         # What ARP says now, or what the entry was bound to.
+                         mac=names.get(d["ip"], ["", ""])[1] or d.get("mac", ""),
                          series=[h["days"][k].get(d["ip"], [0, 0]) for k in day_keys],
                          # .get: the poller may drop the oldest hour between
                          # the snapshot of the keys and the read.
@@ -1396,18 +1608,53 @@ def state(month=None):
     }
 
 
+def state(month=None):
+    """What the page draws, reused for STATE_CACHE seconds.
+
+    A phone and a laptop left open ask five seconds apart each, and every ask
+    copied the whole history, read the ARP table and the lease file and walked
+    /proc for an answer that cannot have moved since the last one — the counters
+    themselves are behind a wider window than this. The answer is shared, so the
+    caller must not write into it; the handler copies before it adds `you`.
+    """
+    expire()
+    with _statelock:
+        now = time.time()
+        if _state["val"] is None or _state["month"] != month \
+                or now - _state["at"] >= STATE_CACHE:
+            _state.update(val=build_state(month), month=month, at=now)
+        return _state["val"]
+
+
 # --- pages ------------------------------------------------------------------
 
 CSS = """
  :root{--bg:#101216;--card:#171a20;--line:#262a33;--fg:#d8dce3;--dim:#767d8a;
-       --up:#a8763f;--down:#5b9bb5;--warn:#c4756a}
+       --up:#a8763f;--down:#5b9bb5;--warn:#c4756a;
+       /* Everything below is the same palette one step further in: the fields
+          and the popovers, the grey a bar is drawn in, the borders that answer
+          to the pointer. They are variables so that the light theme is a block
+          of values rather than a second copy of the stylesheet. */
+       --in:#1c2027;--edge:#4a505c;--mut:#2f3542;--mut2:#485162;--pick:#1b2029;
+       --track:#22262e;--live:#6f9f6f;--ok:#8fae8f;--okline:#3c4d3c;
+       --link:#8ab6c8;--sh:#000a}
+ /* Whatever the machine on the other side is set to. The panel is looked at
+    from a phone in a dark flat and from a laptop by a window, and a page that
+    ignores that is the one that has to be squinted at. */
+ @media (prefers-color-scheme:light){
+  :root{--bg:#eef0f3;--card:#fff;--line:#dfe2e8;--fg:#1c2027;--dim:#697180;
+        --up:#96662f;--down:#2c7b99;--warn:#b3564a;
+        --in:#f7f8fa;--edge:#9aa3b2;--mut:#ccd2dc;--mut2:#aeb7c5;--pick:#eaf0f6;
+        --track:#e3e6ec;--live:#4a8a52;--ok:#3f7a48;--okline:#b9cdb9;
+        --link:#1f6f8c;--sh:#0002}
+ }
  *{box-sizing:border-box}
  /* The page takes the whole window. Nothing here is prose, so a reading
     measure would only push the numbers apart. */
  body{font:15px/1.55 system-ui,sans-serif;margin:0;
       padding:1.5rem 1.75rem 4rem;background:var(--bg);color:var(--fg)}
  h1{font-size:1.05rem;font-weight:600;margin:0;letter-spacing:.01em}
- select,input,button{font:inherit;background:#1c2027;border:1px solid var(--line);
+ select,input,button{font:inherit;background:var(--in);border:1px solid var(--line);
    color:var(--fg);border-radius:5px;padding:.32rem .55rem}
  button{cursor:pointer}
  .card{background:var(--card);border:1px solid var(--line);border-radius:9px;
@@ -1427,15 +1674,57 @@ ICON = ("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0
         "<rect width='16' height='16' rx='3' fill='%23171a20'/>"
         "<circle cx='8' cy='8' r='3.4' fill='%235b9bb5'/></svg>")
 
-LOGIN_T = """<!doctype html><meta charset=utf-8>
-<meta name=viewport content="width=device-width,initial-scale=1">
+
+def png_icon(size=180, bg=(23, 26, 32), fg=(91, 155, 181)):
+    """The same mark as a PNG, for "add to home screen".
+
+    Safari ignores an SVG in an apple-touch-icon and falls back to a screenshot
+    of the page, which is what a panel on somebody's home screen looks like
+    without this. iOS masks the corners itself, so the image is a flat square
+    with a dot in it — and a PNG of two colours is a header, one zlib stream of
+    rows and a checksum, which is less code than carrying a base64 blob around
+    and no dependency at all.
+    """
+    r = size * .21
+    rows = b""
+    for y in range(size):
+        dy = y - size / 2 + .5
+        half = int((r * r - dy * dy) ** .5) if abs(dy) < r else 0
+        left = size // 2 - half
+        rows += (b"\0" + bytes(bg) * left + bytes(fg) * (half * 2)
+                 + bytes(bg) * (size - left - half * 2))
+
+    def chunk(tag, data):
+        return (struct.pack(">I", len(data)) + tag + data
+                + struct.pack(">I", zlib.crc32(tag + data)))
+
+    png = (b"\x89PNG\r\n\x1a\n"
+           + chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 2, 0, 0, 0))
+           + chunk(b"IDAT", zlib.compress(rows, 9))
+           + chunk(b"IEND", b""))
+    return "data:image/png;base64," + base64.b64encode(png).decode()
+
+
+ICON_PNG = png_icon()
+
+# The head both pages share. theme-color paints the browser's own chrome around
+# the panel — the address bar on Android, the status bar of a page kept on a
+# home screen — and it cannot read a CSS variable, so the two backgrounds are
+# repeated here by hand.
+HEAD = """<meta name=viewport content="width=device-width,initial-scale=1">
+<meta name=theme-color content="#101216" media="(prefers-color-scheme: dark)">
+<meta name=theme-color content="#eef0f3" media="(prefers-color-scheme: light)">
 <link rel=icon href="{{ICON}}">
+<link rel=apple-touch-icon href="{{ICONPNG}}">"""
+
+LOGIN_T = """<!doctype html><meta charset=utf-8>
+{{HEAD}}
 <title>{{t.loginTitle}}</title>
 <style>{{CSS}}
  body{max-width:22rem;margin:0 auto;padding-top:22vh}
  form{display:flex;gap:.5rem;margin-top:.9rem}
  input{flex:1;min-width:0}
- .err{color:#d08a8a;font-size:.85rem;margin-top:.7rem}
+ .err{color:var(--warn);font-size:.85rem;margin-top:.7rem}
 </style>
 <div class=card>
  <h2>{{t.panelTitle}}</h2>
@@ -1460,12 +1749,15 @@ def render(tpl, t=None):
     out = out.replace("{{T_JSON}}", json.dumps(t, ensure_ascii=False))
     for k, v in t.items():
         out = out.replace("{{t.%s}}" % k, v)
-    return (out.replace("{{GW}}", str(SELF_IP))
+    # HEAD before ICON: the head is where the two icons are asked for.
+    return (out.replace("{{HEAD}}", HEAD)
+               .replace("{{GW}}", str(SELF_IP))
                .replace("{{MASK}}", str(LAN.netmask))
                .replace("{{PFX}}", str(LAN.prefixlen))
                .replace("{{VERSION}}", VERSION)
                .replace("{{CFG}}", CONFIG)
                .replace("{{ICON}}", ICON)
+               .replace("{{ICONPNG}}", ICON_PNG)
                .replace("{{RELEASES}}", RELEASES_PAGE)
                # The settings form is filled in from the running config.
                .replace("{{IFACE}}", html.escape(IFACE, quote=True))
@@ -1488,8 +1780,7 @@ def login_page(msg="", t=None):
 
 
 PAGE_T = """<!doctype html><meta charset=utf-8>
-<meta name=viewport content="width=device-width,initial-scale=1">
-<link rel=icon href="{{ICON}}">
+{{HEAD}}
 <title>{{t.title}}</title>
 <style>{{CSS}}
  .bar{display:flex;align-items:baseline;gap:.75rem;flex-wrap:wrap;margin-bottom:1.25rem}
@@ -1515,8 +1806,8 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
      flex-direction:column;justify-content:flex-end;align-items:center;gap:.3rem}
  /* Narrow: at full page width a bar as wide as its cell reads as a tile, and
     the differences in height stop being the thing you notice. */
- .mo i{display:block;width:100%;max-width:1.6rem;background:#2f3542;border-radius:2px}
- .mo:hover i{background:#485162}
+ .mo i{display:block;width:100%;max-width:1.6rem;background:var(--mut);border-radius:2px}
+ .mo:hover i{background:var(--mut2)}
  .mo.cur i{background:var(--down)}
  .mo span{font-size:.68rem;color:var(--dim);font-family:ui-monospace,monospace}
  .mo.cur span{color:var(--fg)}
@@ -1528,10 +1819,10 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
     a tap works too — and shows up in a screenshot. */
  .q{position:relative;margin-left:.3rem;padding:0 .3rem;border:1px solid var(--line);
     border-radius:50%;color:var(--dim);font-size:.62rem;font-style:normal;cursor:help}
- .q:hover,.q:focus{color:var(--fg);border-color:#4a505c;outline:none}
+ .q:hover,.q:focus{color:var(--fg);border-color:var(--edge);outline:none}
  .q>span{display:none;position:absolute;z-index:9;left:-.5rem;top:calc(100% + .5rem);
-    width:min(15rem,62vw);padding:.55rem .65rem;background:#1c2027;
-    border:1px solid #333844;border-radius:6px;box-shadow:0 10px 26px #000b;
+    width:min(15rem,62vw);padding:.55rem .65rem;background:var(--in);
+    border:1px solid var(--edge);border-radius:6px;box-shadow:0 10px 26px var(--sh);
     color:var(--fg);font-size:.76rem;line-height:1.45;white-space:normal}
  .q:hover>span,.q:focus>span{display:block}
  .srow:last-child{border-bottom:0}
@@ -1539,13 +1830,13 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  /* Beats .num's nowrap: the load line carries the core count and an interface
     name can be anything, so a long value wraps instead of leaving the card. */
  .srow b{white-space:normal;overflow-wrap:anywhere}
- .meter{grid-column:2;height:3px;border-radius:2px;background:#22262e}
+ .meter{grid-column:2;height:3px;border-radius:2px;background:var(--track)}
  .meter i{display:block;height:100%;border-radius:2px;background:var(--down)}
  /* Every row carries the dot, so the column keeps its shape and the eye reads
     a colour change rather than something appearing out of nowhere. */
  .dot{display:inline-block;width:6px;height:6px;border-radius:50%;
-      background:#484e5a;margin-right:.45rem;vertical-align:middle}
- .dot.live{background:#6f9f6f}
+      background:var(--mut2);margin-right:.45rem;vertical-align:middle}
+ .dot.live{background:var(--live)}
  table{width:100%;border-collapse:collapse}
  th{font-size:.72rem;font-weight:600;letter-spacing:.08em;text-transform:uppercase;
     color:var(--dim);text-align:left;padding:0 .4rem .5rem;border-bottom:1px solid var(--line)}
@@ -1555,12 +1846,12 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  td{padding:.55rem .4rem;border-bottom:1px solid var(--line);vertical-align:middle}
  tbody tr:last-child td{border-bottom:0}
  td.ip{font-family:ui-monospace,monospace;white-space:nowrap;cursor:pointer}
- td.ip:hover{color:#9cc4d6}
+ td.ip:hover{color:var(--link)}
  tr.pick td.ip{color:var(--down)}
- tr.pick{background:#1b2029}
+ tr.pick{background:var(--pick)}
  td input{width:100%;background:transparent;border:1px solid transparent;padding:.2rem .35rem}
  td input:hover{border-color:var(--line)}
- td input:focus{background:#1c2027;border-color:#3d434f;outline:none}
+ td input:focus{background:var(--in);border-color:var(--edge);outline:none}
  .off td.ip,.off td input{color:var(--dim)}
  .me{color:var(--dim);font-size:.72rem;margin-left:.4rem}
  #flt{max-width:9rem}
@@ -1583,19 +1874,20 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  .blk .mini{flex:0 1 16rem;min-width:7rem;overflow-wrap:anywhere;white-space:normal}
  /* When it last knocked: its own width, so it does not share the name's. */
  .blk .knock{flex:0 0 auto;min-width:6.5rem}
- .act button{padding:.22rem .5rem;font-size:.82rem;color:var(--dim)}
- .act button:hover{color:var(--fg);border-color:#4a505c}
- .act .on{color:#8fae8f;border-color:#3c4d3c}
+ .act button,.act select{padding:.22rem .5rem;font-size:.82rem;color:var(--dim)}
+ .act select{padding-right:.3rem}
+ .act button:hover,.act select:hover{color:var(--fg);border-color:var(--edge)}
+ .act .on{color:var(--ok);border-color:var(--okline)}
  /* The settings live in the corner: a summary that looks like the buttons
     beside it, and a card that drops out of it. details does the opening on
     its own — no script, and it works in whatever browser is at hand. */
  .gear{position:relative}
  .gear>summary{cursor:pointer;list-style:none;padding:.32rem .55rem;
-   border:1px solid var(--line);border-radius:5px;background:#1c2027}
+   border:1px solid var(--line);border-radius:5px;background:var(--in)}
  .gear>summary::-webkit-details-marker{display:none}
- .gear[open]>summary,.gear>summary:hover{border-color:#4a505c}
+ .gear[open]>summary,.gear>summary:hover{border-color:var(--edge)}
  .gear>.card{position:absolute;right:0;top:calc(100% + .4rem);z-index:5;
-   width:min(36rem,88vw);margin:0;box-shadow:0 12px 34px #000a}
+   width:min(36rem,88vw);margin:0;box-shadow:0 12px 34px var(--sh)}
  .set{display:grid;grid-template-columns:repeat(auto-fit,minmax(10rem,1fr));
       gap:.7rem .9rem;margin-bottom:.9rem}
  .set label{display:block;font-size:.75rem;color:var(--dim);letter-spacing:.04em}
@@ -1622,11 +1914,11 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
    background:var(--bg);border-style:dashed;cursor:not-allowed}
  .legend{display:flex;gap:1rem;font-size:.78rem;color:var(--dim);margin-top:.5rem}
  .legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:.35rem}
- .legend i.dash{width:14px;height:0;border-radius:0;border-top:1.5px dashed #6d7686;
+ .legend i.dash{width:14px;height:0;border-radius:0;border-top:1.5px dashed var(--dim);
                 vertical-align:middle}
  /* The legend paints every <i> as a swatch — the question mark is not one. */
  .legend .q{width:auto;height:auto;border-radius:50%;margin:0 0 0 .3rem}
- a{color:#8ab6c8}
+ a{color:var(--link)}
  form{display:flex;gap:.5rem;flex-wrap:wrap}
  form input{flex:1;min-width:8rem}
  @media (max-width:900px){.row{grid-template-columns:1fr}}
@@ -1720,7 +2012,7 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
   <div id=chartbox></div>
   <div class=legend><span><i style="background:var(--down)"></i>{{t.inbound}}</span>
    <span><i style="background:var(--up)"></i>{{t.outbound}}</span>
-   <span id=othlbl hidden><i style="background:#3b414e"></i>{{t.other}}<i class=q
+   <span id=othlbl hidden><i style="background:var(--mut)"></i>{{t.other}}<i class=q
      tabindex=0>?<span>{{t.otherWhat}}</span></i></span>
    <span id=cumlbl><i class=dash></i>{{t.cumul}}</span></div>
   <h3 class=sub>{{t.byMonth}}</h3>
@@ -1779,6 +2071,28 @@ const n = (tpl, v) => tpl.replace('{n}', v);
 const ago = s => s < 90 ? T.now : s < 3600 ? n(T.minAgo, Math.round(s/60))
   : s < 86400 ? n(T.hAgo, Math.round(s/3600)) : n(T.dAgo, Math.round(s/86400));
 
+// A timer is one field: when the state a device stands in now runs out. Which
+// way it flips then is nowhere, because it is not needed — a timer always undoes
+// whatever set it, so "off until seven" and "on for an hour" are the same thing.
+const left = s => s < 5400 ? n(T.tmLeftM, Math.max(1, Math.round(s/60)))
+                           : n(T.tmLeftH, Math.round(s/3600));
+const TIMES = [[15, 'tm15'], [60, 'tm1h'], [180, 'tm3h'], [480, 'tm8h'],
+               ['am', 'tmMorning']];
+// Minutes and not a moment: the browser is the one that knows what "until
+// 07:00" means where the person reading it is standing, and the gateway is the
+// one that knows what time it is. Only the duration survives both.
+const tillMorning = () => {
+  const d = new Date();
+  d.setHours(7, 0, 0, 0);
+  if (d <= Date.now()) d.setDate(d.getDate() + 1);
+  return Math.round((d - Date.now()) / 60000);
+};
+const timer = (ip, on, el) => {
+  const v = el.value;
+  el.value = '';   // a menu of actions, not a state to sit in
+  if (v) post({ip, on, for: v === 'am' ? tillMorning() : +v});
+};
+
 const upfmt = s => {
   const d = Math.floor(s/86400), h = Math.floor(s%86400/3600);
   return (d ? d + T.dShort + ' ' : '') + h + T.hShort;
@@ -1819,7 +2133,7 @@ const chart = (rs, cum) => {
   const y = v => top + plot - (v / max) * plot;
   let g = '';
   for (const f of [0, .5, 1]) g += `<line x1=${L} x2=${W} y1=${y(max*f)} y2=${y(max*f)} `
-    + `stroke="#262a33"/><text x=${L-8} y=${y(max*f)+4} text-anchor=end fill="#767d8a" `
+    + `stroke="var(--line)"/><text x=${L-8} y=${y(max*f)+4} text-anchor=end fill="var(--dim)" `
     + `font-size=10 font-family=ui-monospace>${f ? fmtAx(max*f) : 0}</text>`;
   const bars = rs.map((d, i) => {
     const x = L + i*bw + bw*.18, w = Math.max(1, bw*.64), o = d[4];
@@ -1828,11 +2142,11 @@ const chart = (rs, cum) => {
     return `<g><title>${d[3]}  ↓ ${fmt(d[2])}  ↑ ${fmt(d[1])}`
       + `${o ? `  ${T.other} ${fmt(o)}` : ''}</title>`
       + (o ? `<rect x=${x} y=${y(d[1]+d[2]+o)} width=${w} height=${(o/max)*plot} `
-           + `fill="#3b414e"/>` : '')
+           + `fill="var(--mut)"/>` : '')
       + `<rect x=${x} y=${y(d[1]+d[2])} width=${w} height=${hu} fill="var(--up)"/>`
       + `<rect x=${x} y=${y(d[2])} width=${w} height=${hd} fill="var(--down)"/>`
       + `<rect x=${L+i*bw} y=${top} width=${bw} height=${plot} fill="none" pointer-events="all"/></g>`
-      + (lbl ? `<text x=${x+w/2} y=${H-5} text-anchor=middle fill="#767d8a" font-size=10 font-family=ui-monospace>${d[0]}</text>` : '');
+      + (lbl ? `<text x=${x+w/2} y=${H-5} text-anchor=middle fill="var(--dim)" font-size=10 font-family=ui-monospace>${d[0]}</text>` : '');
   }).join('');
   // The running total, scaled so the end of the line is the top of the plot:
   // the shape answers "are we going faster than last time", the tooltip the
@@ -1844,7 +2158,7 @@ const chart = (rs, cum) => {
     const pts = rs.map((d, i) => { run += d[1] + d[2] + d[4];
       return `${(L + i*bw + bw/2).toFixed(1)},${(top + plot - run/tot*plot).toFixed(1)}`;
     }).join(' ');
-    line = `<polyline fill=none stroke="#6d7686" stroke-width=1.4 stroke-dasharray="3 3"`
+    line = `<polyline fill=none stroke="var(--dim)" stroke-width=1.4 stroke-dasharray="3 3"`
       + ` points="${pts}"><title>${T.cumul}  ${fmt(tot)}</title></polyline>`;
   }
   return `<svg viewBox="0 0 ${W} ${H}">${g}${bars}${line}</svg>`;
@@ -2019,6 +2333,14 @@ const draw = () => {
      + `<td class="r mini">${x.seen ? ago(S.now - x.seen) : '—'}</td>`
      + `<td><div class=act><button class="${x.on ? '' : 'on'}" `
      + `onclick="post({ip:'${esc(x.ip)}',on:${!x.on}})">${x.on ? T.turnOff : T.turnOn}</button>`
+     // Whichever way it stands, the menu offers the other one for a while.
+     + (x.until > S.now
+        ? `<button title="${T.tmCancel}" onclick="post({ip:'${esc(x.ip)}',for:0})">`
+          + `${left(x.until - S.now)} ×</button>`
+        : `<select title="${T.tmWhat}" onchange="timer('${esc(x.ip)}',${!x.on},this)">`
+          + `<option value="">${T.tmFor}</option>`
+          + TIMES.map(([v, k]) => `<option value="${v}">${T[k]}</option>`).join('')
+          + `</select>`)
      + `<button onclick="del('${esc(x.ip)}',${me})">${T.del}</button></div></td></tr>`;
   }).join('') || `<tr><td colspan=6 class=hint>${fq ? T.noMatch : T.empty}</td></tr>`;
 
@@ -2115,8 +2437,10 @@ document.onvisibilitychange = () => document.hidden || load();
 // this window, so the interval is how alive the page is allowed to look. What
 // it costs the gateway is two comparisons and, on a quiet network, no write at
 // all — the counters are behind the poll window and the blocked set is cached.
+// SELECT as well as INPUT: redrawing the table under an open menu closes it,
+// and the timer is chosen from one.
 setInterval(() => document.hidden
-  || document.activeElement.tagName === 'INPUT' || load(), 5000);
+  || /^(INPUT|SELECT)$/.test(document.activeElement.tagName) || load(), 5000);
 </script>
 """
 
@@ -2168,7 +2492,9 @@ class H(BaseHTTPRequestHandler):
             self._send(200, PAGE)
         elif self.path.startswith("/api"):
             month = parse_qs(urlparse(self.path).query).get("month", [None])[0]
-            s = state(month)
+            # A copy: the answer is shared between everyone asking at once, and
+            # only this one key is the asker's own.
+            s = dict(state(month))
             s["you"] = self.client_address[0]
             self._send(200, json.dumps(s), "application/json")
         else:
@@ -2204,6 +2530,15 @@ class H(BaseHTTPRequestHandler):
                 cur["name"] = str(body.get("name") or "").strip()[:40]
             if "on" in body:
                 cur["on"] = bool(body["on"])
+            # A timer says when the state just set runs out. Setting a state
+            # without one is a decision, so it drops whatever was pending —
+            # otherwise the switch would flip back by itself hours later and
+            # nothing on the page would say why.
+            mins = check_minutes(body["for"]) if "for" in body else None
+            if mins is not None:
+                cur["until"] = int(time.time()) + mins * 60 if mins else 0
+            elif "on" in body:
+                cur["until"] = 0
             save(devs)
             # A rename leaves the ruleset identical — nft untouched, counters intact.
             if ruleset(devs) != before:
@@ -2288,6 +2623,8 @@ def poller():
     while True:
         time.sleep(POLL_SEC)
         poll()
+        expire()        # a timer that has run out
+        track_macs()    # a device DHCP has moved to another address
         check_update()
         # A minute of slack so two ticks cannot leave a gap between windows.
         if reboot_due(CFG["reboot"] and CFG["reboot_at"],
@@ -2326,6 +2663,17 @@ def selftest():
         except ValueError:
             continue
         raise AssertionError(f"junk accepted: {bad!r}")
+
+    # The timer arrives as minutes, and only the gateway turns them into a
+    # moment: a browser whose clock is wrong must not be able to name one.
+    assert check_minutes(0) == 0 and check_minutes("15") == 15
+    assert check_minutes(TIMER_MAX // 60) == TIMER_MAX // 60
+    for bad in (-1, TIMER_MAX // 60 + 1, "soon", None, [60]):
+        try:
+            check_minutes(bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"the timer accepted {bad!r}")
 
     import tempfile
     with tempfile.TemporaryDirectory() as td:
@@ -2455,24 +2803,23 @@ def selftest():
     assert parse_blocked([{"set": {"name": "blocked"}}]) == {}
     # Some builds write a duration as a string, and give the element a timeout
     # of its own rather than leaving it to the table's.
-    assert parse_blocked([{"set": {"elem": [
+    assert parse_blocked([{"set": {"name": "blocked", "elem": [
         {"elem": {"val": "10.0.0.1", "expires": "1200s", "timeout": "1800s"}},
         {"elem": {"val": "10.0.0.2"}}, "10.0.0.3"]}}]) \
         == {"10.0.0.1": 600, "10.0.0.2": None, "10.0.0.3": None}, \
         "an element that says nothing about time must not invent a number"
 
-    # The set is asked for once per BLOCK_CACHE, not once per page refresh:
-    # this is the one nft call the poll window does not cover.
-    global nft_json
-    real_nft, asked = nft_json, []
-    nft_json = lambda *a: (asked.append(a), [{"set": {"elem": []}}])[1]
-    _blk["at"] = 0.0
-    blocked(), blocked(), blocked()
-    assert len(asked) == 1, f"the blocked set was asked for {len(asked)} times"
-    _blk["at"] = 0.0
-    blocked()
-    assert len(asked) == 2, "and once more when the cache is out"
-    nft_json = real_nft
+    # The set costs no call of its own: the poll reads the whole table and
+    # note_blocked keeps what came with it. The table carries `allowed` too,
+    # and its elements are addresses that must not turn up as intruders.
+    note_blocked([{"set": {"name": "allowed", "elem": ["10.0.0.7"]}},
+                  {"counter": {"name": "up_10_0_0_5", "bytes": 7}},
+                  {"set": {"name": "blocked",
+                           "elem": [{"elem": {"val": "10.0.0.9", "expires": 21599}}]}}])
+    assert blocked() == {"10.0.0.9": 1}, "the allowed set is not a list of intruders"
+    assert counters([{"set": {"name": "allowed", "elem": ["10.0.0.7"]}},
+                     {"counter": {"name": "up_10_0_0_5", "bytes": 7}}]) \
+        == {"up_10_0_0_5": 7}, "one reading of the table answers both questions"
 
     assert lan_client(str(LAN.network_address + 9))
     assert not lan_client(str(SELF_IP)), "the gateway is not a client of itself"
@@ -2496,12 +2843,16 @@ def selftest():
     # write; a poll that moved bytes waits for the window; and what waits must
     # not be lost, so the same reading has to come back after a restart.
     with tempfile.TemporaryDirectory() as td:
-        global TRAFFIC, TODAY, counters, load, _hist, _flushed, _dirty
+        global TRAFFIC, TODAY, nft_table, load, _hist, _flushed, _dirty
         global _cold, _hot_date
-        keep_io = (TRAFFIC, TODAY, counters, load)
+        keep_io = (TRAFFIC, TODAY, nft_table, load)
         TRAFFIC = os.path.join(td, "traffic.json")
         TODAY = os.path.join(td, "today.json")
-        counters = lambda: {"up_10_0_0_5": 500, "down_10_0_0_5": 900}
+        # The table as nft prints it, so counters() is exercised rather than
+        # replaced — it is the half of the reading the accounting hangs on.
+        table = lambda up, down: [{"counter": {"name": "up_10_0_0_5", "bytes": up}},
+                                  {"counter": {"name": "down_10_0_0_5", "bytes": down}}]
+        nft_table = lambda: table(500, 900)
         load = lambda: [{"ip": "10.0.0.5", "name": "x", "on": True}]
         # Everything a fresh process starts with. Not named restart(): that is
         # already a function in this module, and one that re-execs the panel.
@@ -2519,7 +2870,7 @@ def selftest():
         assert os.stat(TODAY).st_mtime_ns == stamp, "an idle poll wrote the file"
 
         _flushed = time.time()               # and now the window is shut
-        counters = lambda: {"up_10_0_0_5": 700, "down_10_0_0_5": 900}
+        nft_table = lambda: table(700, 900)
         poll(force=True)                     # moved, but inside the window
         assert os.stat(TODAY).st_mtime_ns == stamp, "the write was not buffered"
         assert history()["days"][today] == {"10.0.0.5": [700, 900]}, \
@@ -2540,7 +2891,7 @@ def selftest():
         # baseline on disk is exactly as old as the totals beside it, so the
         # next poll measures the increment from there and arrives at the same
         # figure. Here that process is a fresh _hist read back off both files.
-        counters = lambda: {"up_10_0_0_5": 1500, "down_10_0_0_5": 900}
+        nft_table = lambda: table(1500, 900)
         poll(force=True)                     # +800, buffered and then dropped
         reboot()
         poll(force=True)
@@ -2555,7 +2906,7 @@ def selftest():
         _hist["days"][y] = {"10.0.0.5": [11, 22]}
         _hot_date = y
         _flushed = 0.0
-        counters = lambda: {"up_10_0_0_5": 1600, "down_10_0_0_5": 900}
+        nft_table = lambda: table(1600, 900)
         poll(force=True)
         cold, hot = json.load(open(TRAFFIC)), json.load(open(TODAY))
         assert cold["days"][y] == {"10.0.0.5": [11, 22]}, \
@@ -2575,7 +2926,7 @@ def selftest():
             "half a cold file must not take the day in progress with it"
 
         reboot()
-        TRAFFIC, TODAY, counters, load = keep_io
+        TRAFFIC, TODAY, nft_table, load = keep_io
     _rate.clear()
     _pend.clear()
     _hours.clear()
@@ -2583,6 +2934,81 @@ def selftest():
     days = {"2026-07": {"1.1.1.1": [5, 5]}, "2026-07-30": {"1.1.1.1": [10, 20]},
             "2026-08-01": {"1.1.1.1": [99, 99]}}
     assert month_totals(days, "2026-07") == {"1.1.1.1": [15, 25]}, "the old format is lost"
+    # One pass for every month there is, rather than one pass per month: this is
+    # the figure under the chart and in the strip, on every request.
+    assert month_sums(days) == {"2026-07": 40, "2026-08": 198}, \
+        "a month's total counts a folded figure and the days alike"
+    assert month_sums({}) == {}
+
+    # Devices: the file is read again only when it changes, a timer runs the
+    # state back the other way once, and an entry follows its hardware address.
+    with tempfile.TemporaryDirectory() as td:
+        global DEVICES, apply, lan_names
+        keep_dev = (DEVICES, TRAFFIC, TODAY, apply, lan_names, nft_table)
+        DEVICES = os.path.join(td, "devices.json")
+        TRAFFIC = os.path.join(td, "traffic.json")
+        TODAY = os.path.join(td, "today.json")
+        applied = []
+        apply = lambda devs: applied.append([d["ip"] for d in devs])
+        nft_table = lambda: []
+        _devs["mtime"] = None
+        globals().update(_hist=None, _flushed=0.0, _dirty=False, _cold=False,
+                         _hot_date=None)
+        a, b = str(LAN.network_address + 51), str(LAN.network_address + 55)
+        today = time.strftime("%Y-%m-%d")
+
+        save([{"ip": a, "name": "x", "on": True}])
+        mine = load()
+        mine[0]["name"] = "not saved"
+        assert load()[0]["name"] == "x", "the cache lent out its own list"
+        save([{"ip": a, "name": "y", "on": True}])
+        assert load()[0]["name"] == "y", "a written file must be read again"
+
+        save([{"ip": a, "on": True, "until": 100}])
+        assert not expire(50), "a timer that has not run out must not fire"
+        assert expire(100), "and one that has, must"
+        assert load()[0] == {"ip": a, "on": False, "until": 0}, \
+            "the state flips back and the timer is spent"
+        assert not expire(200), "a spent timer must not fire twice"
+        assert applied == [[a]], "the ruleset is rebuilt once, by the flip"
+
+        # A device that has never been seen records the address it answers from.
+        save([{"ip": b, "name": "quest", "on": True}])
+        lan_names = lambda: {b: ["quest", "aa:bb:cc:dd:ee:ff"]}
+        assert not track_macs(), "a device that is where it belongs has not moved"
+        assert load()[0]["mac"] == "aa:bb:cc:dd:ee:ff", "the first sighting binds it"
+
+        # ...and then DHCP moves it. The entry follows, history and all.
+        save([{"ip": a, "name": "quest", "on": True, "mac": "aa:bb:cc:dd:ee:ff"}])
+        with _lock:
+            history()["days"][today] = {a: [1, 2]}
+            history()["seen"][a] = 111
+        applied.clear()
+        assert track_macs(), "the address changed under a known device"
+        assert load()[0]["ip"] == b and applied == [[b]], \
+            "the entry and the ruleset both have to follow it"
+        assert history()["days"][today] == {b: [1, 2]}, "its history moved with it"
+        assert history()["seen"] == {b: 111}, "and so did when it was last seen"
+        assert not track_macs(), "nothing moves the second time"
+
+        # An address that already belongs to another entry is not taken.
+        save([{"ip": a, "on": True, "mac": "11:22:33:44:55:66"},
+              {"ip": b, "on": True, "mac": "aa:bb:cc:dd:ee:ff"}])
+        lan_names = lambda: {b: ["", "11:22:33:44:55:66"]}
+        assert not track_macs(), "two entries must never land on one address"
+        assert [d["ip"] for d in load()] == [a, b]
+
+        DEVICES, TRAFFIC, TODAY, apply, lan_names, nft_table = keep_dev
+        _devs["mtime"] = None
+        globals().update(_hist=None, _flushed=0.0, _dirty=False, _cold=False,
+                         _hot_date=None)
+
+    # The icon iOS puts on a home screen. Safari ignores the SVG one and takes a
+    # screenshot of the page instead.
+    png = base64.b64decode(ICON_PNG.split(",", 1)[1])
+    assert png.startswith(b"\x89PNG\r\n\x1a\n") and b"IEND" in png
+    assert zlib.decompress(png[png.index(b"IDAT") + 4:-12]).__len__() == 180 * (180 * 3 + 1), \
+        "every row of the icon has to be there, filter byte and all"
 
     assert newer("v1.0.1", "1.0.0") == "v1.0.1"
     assert newer("v1.0.0", "1.0.0") is None, "the running version is not an update"

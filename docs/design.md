@@ -156,7 +156,39 @@ if ruleset(devs) != before:
 
 Comparing generated text is exact and needs no reasoning about which fields
 matter. Renaming produces identical text, so nftables is never touched and the
-counters keep running.
+counters keep running. A timer that is set or dropped without changing the
+switch is free for exactly the same reason.
+
+### Timers, and one field for both directions
+
+A device may carry `until`: the moment the state it stands in now runs out.
+Which way it flips then is not stored, because it cannot be anything else — a
+timer always undoes whatever set it. "Off until seven" and "on for an hour" are
+therefore the same field, the same validation and the same line in `expire()`,
+which the poller calls on every tick. Precision is `poll_sec`, like the nightly
+reboot: a thread that already wakes on a schedule is the whole mechanism, and a
+second one would not be worth its own bugs.
+
+The browser sends **minutes**, never a moment. It is the side that knows what
+"until 07:00" means in the timezone the person is standing in; the gateway is
+the side that knows what time it is. A clock skew on either would otherwise turn
+into a device let out for a day.
+
+### Following a device that DHCP moved
+
+Everything hangs off the address: the rule, the two counters, the day buckets.
+A new lease therefore turns an entry into a rule for nobody — the device is
+silently outside the gateway, or silently through it, and the panel goes on
+reporting the old address as quiet. `track_macs()` runs on the poller's tick,
+takes the hardware address out of the ARP cache the panel already reads for
+names, and moves the entry to wherever that address answers from now. A device
+first seen records its MAC; two entries never land on one address.
+
+`rekey()` carries the history across — day buckets, hour buckets, `seen` —
+because leaving it behind would file the device's past under "other" and start
+its month from zero, which is the pair of symptoms that reads as lost data. The
+baseline is dropped rather than moved: the new address gets new counters and
+they start at zero.
 
 ## Sessions
 
@@ -187,7 +219,10 @@ The kernel re-arms the timeout on every packet it drops, so what is left of it
 is how long ago that address last knocked — `BLOCK_TTL` minus the `expires` nft
 reports for the element. That is the difference between something hammering the
 gateway right now and something that gave up hours ago, and it costs nothing:
-the number is already in the answer the panel parses.
+the number is already in the answer the panel parses — the same one the counters
+come in, since `poll()` lists the whole table in one call. `parse_blocked()`
+therefore picks the set out **by name**: `allowed` is in that answer too, and its
+elements are bare addresses that would otherwise read as a list of intruders.
 
 This is strictly better than scanning ARP for this purpose: it lists exactly the
 devices that tried to route through the host and were refused, rather than
@@ -232,9 +267,18 @@ allowed to look. Three things keep the price of that down, and they were put
 there in this order after measuring:
 
 - The counters are behind `POLL_MIN`, so several tabs collapse into one `nft`.
-- The blocked set is cached for `BLOCK_CACHE`. It was the busiest call the panel
-  made — once per request, with no window in front of it — for a set whose
-  elements time out after six hours.
+- That one `nft` reads the whole table — `nft -j list table inet gwacl` — and the
+  blocked set comes back with it. The set used to be a call of its own, once per
+  request with no window in front of it, and it was the busiest call the panel
+  made; now `note_blocked()` keeps whatever the poll saw and `blocked()` spawns
+  nothing at all.
+- The whole answer is cached for `STATE_CACHE`. Below `POLL_MIN` on purpose, so
+  it only collapses the work the poll window was already declining to redo: the
+  copy of the history, the ARP table, the lease file, the walk through `/proc`.
+  A phone and a laptop left open on the same page stop costing twice.
+- The device list is re-read only when `devices.json` changes (`st_mtime_ns`),
+  and `sysinfo()` holds its whole answer for two seconds — the same window its
+  two rates already needed.
 - Nothing is written unless something in it changed. A poll where no device
   moved a byte leaves the day, `seen` and the baseline exactly as they were
   read, and rewriting a file identically is the whole cost of that poll.
@@ -349,7 +393,7 @@ and the ruleset applies to nothing. Interface names in the rules are just
 strings, so they need not exist. You can go further and inspect the result:
 
 ```bash
-unshare -rn bash -c 'nft -f /tmp/gwacl.nft && nft -j list counters table inet gwacl'
+unshare -rn bash -c 'nft -f /tmp/gwacl.nft && nft -j list table inet gwacl'
 ```
 
 `install.sh` runs the privileged `nft -c -f -` variant before enabling anything.
