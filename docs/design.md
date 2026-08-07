@@ -356,6 +356,49 @@ absent files simply mean the list looks the way it always did. A lease name
 never reaches the page through an `onclick`; it goes through a `data-`
 attribute, because this program does not own that file.
 
+A third answer is the first three bytes of the hardware address, which say who
+made the thing. The IEEE list is what answers it, and a distribution that ships
+one puts it at a handful of known paths (`ieee-data`, wireshark's `manuf`); a
+gateway installed from a minimal image has none of them, hence the short
+built-in table of what actually turns up on a home network. One pass answers
+every prefix on the page at once and the answers are kept, empty ones included,
+so the file is opened again only when something with an unseen prefix turns up.
+Nothing is printed when nothing knows: a wrong manufacturer is worse than none.
+
+An address with the locally-administered bit set was made up by the device
+rather than assigned to its maker, which is what a modern phone does per
+network. Saying so is more useful than the blank a lookup would leave.
+
+## When the entry and the wire disagree
+
+`track_macs()` follows a device that moved. What is left over is the other
+case: the entry stays where it is and something *else* answers on its address.
+Then the rule written for the tablet is the rule for whoever took its place —
+the one failure of an allowlist that looks like nothing at all from the panel,
+because the address in the table is exactly the address that was allowed.
+`clashes()` compares the hardware address the entry is bound to against the one
+ARP reports there now, and the page says so in a card of its own. It cannot be
+fixed automatically: which of the two is supposed to have the address is not a
+question this program can answer.
+
+## Letting everyone in for a while
+
+Guests, or a device that will not connect and has to be watched connecting.
+`CFG["bypass"]` is the moment the gateway stops being open, and while it is in
+the future `ruleset()` leaves out one line — the final `drop`. Everything else
+stays: the counters still run, and `update @blocked { ip saddr }` still records
+every address that came in past the list, so when the window shuts, whoever
+used it is in the panel's own list of strangers and one click from being
+allowed for good. That is the whole feature — one line of the ruleset and one
+number.
+
+The number lives in `config.json` rather than in memory. The table is rebuilt
+from disk on every start, and an open gateway that evaporated on restart would
+shut on a room full of guests the moment the service is updated. It is capped at
+`BYPASS_MAX`, well under a device's own timer: this one suspends the entire
+point of the program, and nobody means "until tomorrow" by *let the guests in*.
+`expire()` closes it on the same tick that flips back device timers.
+
 ## The version constant
 
 `VERSION` is what every install compares against the newest tag on GitHub. It

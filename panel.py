@@ -50,7 +50,7 @@ from urllib.parse import urlparse, parse_qs
 # it against the newest tag on GitHub, so a forgotten bump makes every install
 # claim to be older than it is and show a banner that never goes away. CI
 # refuses a tag push where the two disagree.
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 RELEASES_URL = "https://api.github.com/repos/ChasoniCK/gateway-acl/releases/latest"
 RELEASES_PAGE = "https://github.com/ChasoniCK/gateway-acl/releases/latest"
 UPDATE_EVERY = 86400
@@ -65,12 +65,22 @@ SESSIONS = f"{ETC}/sessions.json"
 DEFAULTS = {"iface": "eno1", "lan": "192.168.1.0/24", "self_ip": "192.168.1.10",
             "port": 8080, "poll_sec": 60, "pw": None, "lang": "ru",
             "update_check": True, "keep_months": 3,
-            "reboot": False, "reboot_at": "05:30"}
+            "reboot": False, "reboot_at": "05:30",
+            # Not a setting and not on the form: the moment the gateway stops
+            # letting everyone through again. It lives in the config because it
+            # has to survive a restart — the table is rebuilt from disk on every
+            # start, and a bypass that evaporated there would lock out a room
+            # full of guests the moment the service is updated.
+            "bypass": 0}
 SESSION_TTL = 7 * 86400
 FAIL_LIMIT = 5          # misses in a row from one address
 FAIL_BLOCK = 60         # and that is how long it then sits out
 BLOCK_TTL = 6 * 3600    # how long the kernel remembers whom it dropped
 TIMER_MAX = 7 * 86400   # the longest a device may be switched off "for a while"
+# ...and the longest the whole gateway may stand open. Shorter than a device's
+# timer on purpose: this one suspends the entire point of the program, and
+# "until tomorrow" is not a thing anybody means by "let the guests in".
+BYPASS_MAX = 6 * 3600
 # How long /api reuses its own last answer. Every open tab asks every five
 # seconds, and on a phone plus a laptop that is two full readings — the day
 # buckets copied, the ARP table and the lease file read, /proc walked — for a
@@ -149,6 +159,7 @@ def write_atomic(path, obj):
 
 def save_conf(c):
     write_private(CONFIG, c)
+    _state["val"] = None   # the page asks again in a moment; it must see this
 
 
 STRINGS = {
@@ -195,6 +206,29 @@ STRINGS = {
         "tmLeftH": "ещё {n} ч",
         "tmCancel": "снять таймер и оставить как есть",
         "badTimer": "таймер — от минуты до недели",
+        "badBypass": "открытым шлюз можно держать не дольше {n} ч",
+        "tm5": "5 минут",
+        "byp": "пустить всех",
+        "bypOn": "открыто для всех",
+        "bypWhat": "На это время шлюз пропускает всех подряд, включая тех, кого "
+                   "нет в списке. Учёт трафика не прерывается, и ядро всё так же "
+                   "запоминает, кто приходил, — когда время выйдет, они окажутся "
+                   "в списке внизу, и любого можно будет добавить в один клик.",
+        "confirmByp": "Пустить через шлюз всех подряд? На это время список не "
+                      "действует — выход получит любое устройство в сети.",
+        "allOff": "выключить всех",
+        "allOn": "включить всех",
+        "allWhat": "Кроме вашего собственного адреса",
+        "confirmAllOff": "Закрыть выход всем устройствам? Ваш адрес останется "
+                         "включённым, вернуть остальных можно той же кнопкой.",
+        "useHost": "назвать так, как устройство представляется сети: {n}",
+        "clashTitle": "На адресе не то устройство",
+        "clashLine": "в списке {a}, отвечает {b}",
+        "clashHint": "Правило разрешает адрес, а отвечает с него сейчас другое "
+                     "железо — значит, через шлюз ходит не то, что вы разрешали. "
+                     "Обычно это статический адрес, который DHCP успел выдать "
+                     "кому-то ещё. Проще всего сменить адрес одному из двоих.",
+        "macRandom": "случайный адрес",
         "empty": "пусто — сейчас через шлюз не ходит никто",
         "confirmDel": "Удалить {ip}? История трафика останется.",
         "confirmDelMe": "Удалить {ip}? Это ваш собственный адрес — интернет через шлюз "
@@ -348,6 +382,31 @@ STRINGS = {
         "tmLeftH": "{n} h left",
         "tmCancel": "drop the timer and leave it as it is",
         "badTimer": "a timer is a minute to a week",
+        "badBypass": "the gateway may stand open for {n} h at most",
+        "tm5": "5 minutes",
+        "byp": "let everyone in",
+        "bypOn": "open to everyone",
+        "bypWhat": "For that long the gateway lets everything through, the "
+                   "devices that are not on the list included. The accounting "
+                   "carries on, and the kernel goes on recording who came — when "
+                   "the time is up they are in the list at the bottom, and any of "
+                   "them is one click from being allowed for good.",
+        "confirmByp": "Let everything through the gateway? For that long the list "
+                      "does not apply — any device on the network gets out.",
+        "allOff": "turn everyone off",
+        "allOn": "turn everyone on",
+        "allWhat": "Except your own address",
+        "confirmAllOff": "Close the way out for every device? Your own address "
+                         "stays on, and the same button brings the rest back.",
+        "useHost": "name it the way it introduces itself to the network: {n}",
+        "clashTitle": "Another device is on that address",
+        "clashLine": "listed as {a}, answers as {b}",
+        "clashHint": "The rule allows an address, and different hardware is "
+                     "answering from it — so what routes through the gateway is "
+                     "not what you allowed. Usually a static address that DHCP "
+                     "has handed out to somebody else as well. The simplest fix "
+                     "is to move one of the two.",
+        "macRandom": "randomised address",
         "empty": "empty — nobody routes through the gateway right now",
         "confirmDel": "Delete {ip}? Its traffic history stays.",
         "confirmDelMe": "Delete {ip}? That is your own address — you will lose internet "
@@ -651,19 +710,21 @@ def validate(ip):
     return str(a)
 
 
-def check_minutes(v):
+def check_minutes(v, cap=None, bad=None):
     """The timer off the button, in minutes. 0 means "no timer".
 
     Minutes and not a moment: the browser knows what "until 07:00" means in the
     timezone the person is standing in, the gateway knows what time it is. Only
     one of those two is worth trusting over the wire, and it is the duration.
     """
+    cap = TIMER_MAX // 60 if cap is None else cap
+    bad = bad or T["badTimer"]
     try:
         m = int(v)
     except (TypeError, ValueError):
-        raise ValueError(T["badTimer"])
-    if m and not 1 <= m <= TIMER_MAX // 60:
-        raise ValueError(T["badTimer"])
+        raise ValueError(bad)
+    if m and not 1 <= m <= cap:
+        raise ValueError(bad)
     return m
 
 
@@ -768,7 +829,17 @@ def fail_blocked(ip):
 
 # --- nftables ---------------------------------------------------------------
 
-def ruleset(devs):
+def ruleset(devs, bypass=None):
+    """The whole table as one string. `bypass` is the moment the gateway stops
+    letting everyone through — resolved from the config when it is not given,
+    because a reload_conf()-managed value must never be frozen into a default.
+    """
+    # While that moment is in the future the chain keeps everything it does
+    # except the verdict: the counters still run, and `update @blocked` still
+    # records every address that came in past the list — so when the window
+    # shuts, who used it is on the page rather than lost.
+    open_now = (CFG["bypass"] if bypass is None else bypass) > time.time()
+    verdict = "" if open_now else "\n    drop"
     on = [d for d in devs if d.get("on", True)]
     ips = ", ".join(d["ip"] for d in on)
     elems = f"\n    elements = {{ {ips} }}" if ips else ""
@@ -807,8 +878,7 @@ table inet gwacl {{
 {up}
     ip saddr @allowed accept
     fib daddr type != unicast accept
-    update @blocked {{ ip saddr }}
-    drop
+    update @blocked {{ ip saddr }}{verdict}
   }}
   chain postrouting {{
     type filter hook postrouting priority 0; policy accept;
@@ -908,6 +978,29 @@ def apply(devs):
     # below it, and accrue reads that as a reset and returns zero.
 
 
+def bypass_until(when):
+    """Hold the gateway open until then, or shut it again with 0.
+
+    CFG itself, not a copy: it is what ruleset() reads, and the two must not be
+    able to disagree. The caller rebuilds the table.
+    """
+    CFG["bypass"] = int(when)
+    save_conf(CFG)
+
+
+def flip_all(devs, on, mine=""):
+    """Switch every device at once, except the address that asked.
+
+    The panel offers this as one button, and a button that can take the
+    internet away from the person pressing it, on a page that then has to be
+    used to give it back, is a button that will be pressed exactly once.
+    """
+    for d in devs:
+        if d["ip"] != mine:
+            d["on"], d["until"] = on, 0
+    return devs
+
+
 def expire(now=None):
     """Flip back whatever a timer was set on. True if the ruleset changed.
 
@@ -923,11 +1016,15 @@ def expire(now=None):
     now = int(time.time() if now is None else now)
     devs = load()
     due = [d for d in devs if 0 < d.get("until", 0) <= now]
-    if not due:
+    over = 0 < CFG["bypass"] <= now      # the open gateway, shutting again
+    if not due and not over:
         return False
     for d in due:
         d["on"], d["until"] = not d.get("on", True), 0
-    save(devs)
+    if due:
+        save(devs)
+    if over:
+        bypass_until(0)
     apply(devs)
     return True
 
@@ -1475,6 +1572,111 @@ def lan_names():
     return out
 
 
+# Where a distribution keeps the IEEE list, if it has it at all. A gateway
+# installed from a minimal image usually does not, hence the short table below:
+# what actually turns up on a home network, and nothing at all for the rest —
+# a wrong manufacturer is worse than none.
+OUI_FILES = ("/usr/share/ieee-data/oui.txt", "/var/lib/ieee-data/oui.txt",
+             "/usr/share/hwdata/oui.txt", "/usr/share/misc/oui.txt",
+             "/usr/share/wireshark/manuf")
+OUI = {
+    "525400": "QEMU/KVM", "080027": "VirtualBox", "000c29": "VMware",
+    "005056": "VMware", "000569": "VMware", "00155d": "Hyper-V", "00163e": "Xen",
+    "b827eb": "Raspberry Pi", "dca632": "Raspberry Pi", "e45f01": "Raspberry Pi",
+    "240ac4": "Espressif", "a4cf12": "Espressif", "30aea4": "Espressif",
+    "84f3eb": "Espressif", "00e04c": "Realtek", "001b63": "Apple",
+    "a483e7": "Apple", "f01898": "Apple", "d89695": "Apple", "3c0754": "Apple",
+    "001632": "Samsung", "781fdb": "Samsung", "ac5f3e": "Samsung",
+    "640980": "Xiaomi", "f8a45f": "Xiaomi", "7811dc": "Xiaomi",
+    "001b21": "Intel", "3c970e": "Intel", "a4c3f0": "Intel", "94659c": "Intel",
+    "50c7bf": "TP-Link", "a42bb0": "TP-Link", "ec086b": "TP-Link",
+    "4c5e0c": "MikroTik", "488f5a": "MikroTik", "e48d8c": "MikroTik",
+    "24a43c": "Ubiquiti", "788a20": "Ubiquiti", "fcecda": "Ubiquiti",
+    "f4f5d8": "Google", "44650d": "Amazon", "f0272d": "Amazon",
+}
+_oui = {}   # prefix -> who makes it, "" for one nobody here can name
+
+
+def _oui_key(mac):
+    return mac[:8].replace(":", "").replace("-", "").lower()
+
+
+def scan_oui(path, want, into):
+    """One pass of an IEEE list for a set of prefixes.
+
+    Both formats a distribution ships look the same at the front — three bytes,
+    a separator, then the name. `oui.txt` puts "(hex)" in between and gives the
+    long name; wireshark's `manuf` gives a short name first, which is the one
+    worth showing in a table cell. Lines carrying a "/" are the 28- and 36-bit
+    assignments: their prefix is longer than three bytes, and taking one would
+    name a whole block after one small company inside it.
+    """
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                p = _oui_key(line)
+                if p not in want or "/" in line[:24]:
+                    continue
+                rest = line[8:].replace("(hex)", "")
+                name = next((s.strip() for s in rest.split("\t") if s.strip()), "")
+                if name:
+                    into[p] = name[:24]
+    except OSError:
+        pass
+    return into
+
+
+def vendors(macs):
+    """{hardware address: who made it}, for whatever can be answered.
+
+    The IEEE list is thirty thousand lines, so it is read once for every prefix
+    asked about at once, and the answers — the empty ones too — are kept. After
+    the first page there is nothing left to look up until something with a
+    prefix nobody has seen before turns up.
+
+    An address with the locally-administered bit set was made up by the device
+    itself. Modern phones do that per network, which is why a perfectly ordinary
+    handset has no manufacturer — saying so is more useful than a blank.
+    """
+    want = {_oui_key(m) for m in macs if len(m) >= 8}
+    miss = want - set(_oui)
+    if miss:
+        for p in miss:
+            _oui[p] = OUI.get(p, "")
+        path = next((p for p in OUI_FILES if os.path.exists(p)), None)
+        if path:
+            scan_oui(path, miss, _oui)   # the system's list outranks the table
+    out = {}
+    for m in macs:
+        p = _oui_key(m)
+        name = _oui.get(p, "")
+        if not name:
+            try:
+                name = T["macRandom"] if int(p[:2], 16) & 2 else ""
+            except ValueError:
+                name = ""
+        out[m] = name
+    return out
+
+
+def clashes(devs, names):
+    """Listed addresses that are answering with different hardware.
+
+    The entry says one address, the wire says another device is on it — so the
+    rule that was written for the tablet is now the rule for whatever took its
+    address, and nothing on the page would otherwise say so. track_macs() moves
+    an entry whose device merely went somewhere else; what is left here is the
+    case where its address was taken and there is nowhere to move it to.
+    """
+    out = []
+    for d in devs:
+        mac = d.get("mac")
+        now = names.get(d["ip"], ["", ""])[1]
+        if mac and now and now != mac:
+            out.append([d["ip"], mac, now])
+    return out
+
+
 def track_macs():
     """Follow a device that DHCP has moved to another address.
 
@@ -1562,12 +1764,19 @@ def build_state(month=None):
     if month not in months:
         month = time.strftime("%Y-%m")
     tot = month_totals(h["days"], month)
-    known = {d["ip"] for d in load()}
+    devs = load()
+    known = {d["ip"] for d in devs}
     # len == 10 filters out old-format keys ("2026-07"): they still count
     # towards the month total, but never into the per-day chart.
     day_keys = sorted(k for k in h["days"] if k.startswith(month) and len(k) == 10)
     hour_keys = sorted(_hours)
     names = lan_names()
+    clash = clashes(devs, names)
+    blk = [[ip] + names.get(ip, ["", ""]) + [ago]
+           for ip, ago in sorted(blocked().items()) if ip not in known]
+    # One lookup for the whole page: both lists ask about hardware nobody on
+    # this network has named.
+    ven = vendors([r[2] for r in blk] + [c[2] for c in clash])
 
     return {
         "month": month,
@@ -1591,14 +1800,19 @@ def build_state(month=None):
                          # the snapshot of the keys and the read.
                          hseries=[_hours.get(k, {}).get(d["ip"], [0, 0])
                                   for k in hour_keys])
-                    for d in load()],
+                    for d in devs],
         "days": [[k, sum(v[0] for v in h["days"][k].values()),
                   sum(v[1] for v in h["days"][k].values())] for k in day_keys],
         "hours": [[k[-2:], sum(v[0] for v in _hours.get(k, {}).values()),
                    sum(v[1] for v in _hours.get(k, {}).values())] for k in hour_keys],
-        # Address, whatever the network calls it, and how long ago it knocked.
-        "blocked": [[ip] + names.get(ip, ["", ""]) + [ago]
-                    for ip, ago in sorted(blocked().items()) if ip not in known],
+        # Address, whatever the network calls it, how long ago it knocked, and
+        # who made the thing.
+        "blocked": [r + [ven.get(r[2], "")] for r in blk],
+        # A listed address that is answering as somebody else.
+        "clash": [c + [ven.get(c[2], "")] for c in clash],
+        # While this is in the future the list is suspended and everyone is let
+        # through; the page says so rather than looking merely broken.
+        "bypass": int(CFG["bypass"]),
         # Everything the system knows of on this network and the list does not:
         # the add form offers them rather than asking anyone to remember one.
         "lan": [[ip, names[ip][0]] for ip in sorted(names)
@@ -1871,9 +2085,28 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  .blk .num{min-width:9rem}
  /* A basis, not flex:1 — the button belongs next to the address it acts on,
     not pushed to the far edge of a full-width card. */
- .blk .mini{flex:0 1 16rem;min-width:7rem;overflow-wrap:anywhere;white-space:normal}
+ .blk .mini{flex:0 1 21rem;min-width:7rem;overflow-wrap:anywhere;white-space:normal}
  /* When it last knocked: its own width, so it does not share the name's. */
  .blk .knock{flex:0 0 auto;min-width:6.5rem}
+ /* The one control that suspends the whole point of the program says so in the
+    panel's warning colour, wherever it sits. */
+ button.warn{color:var(--warn);border-color:var(--warn)}
+ /* The name a device gives the network, offered as a name to keep. It sits at
+    the end of the field rather than beside it: a button of its own at the far
+    edge of the column reads as belonging to the next column along. The field
+    is empty whenever it exists, and the padding keeps it that way while
+    somebody is typing over it. */
+ .nm{position:relative;display:flex;align-items:center}
+ .nm input{padding-right:1.5rem}
+ .ghost{position:absolute;right:.15rem;padding:0 .3rem;font-size:.82rem;
+        color:var(--dim);background:none;border-color:var(--line)}
+ .ghost:hover{color:var(--fg);border-color:var(--edge)}
+ /* At rest it would be a mark floating in the middle of a row: the field it
+    belongs to has no border until the pointer is on it. So it appears with
+    that border — but only where there is a pointer at all, or a phone would
+    hide it for good. */
+ @media (hover:hover){.nm .ghost{opacity:0;transition:opacity .1s}
+  tr:hover .ghost,.ghost:focus{opacity:1}}
  .act button,.act select{padding:.22rem .5rem;font-size:.82rem;color:var(--dim)}
  .act select{padding-right:.3rem}
  .act button:hover,.act select:hover{color:var(--fg);border-color:var(--edge)}
@@ -1949,6 +2182,7 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
 <div class=bar>
  <h1>{{t.h1}}</h1><span id=off hidden></span><span class=sp></span>
  <select id=msel onchange="load(this.value)"></select>
+ <span id=bypbox></span>
  <button onclick=csv() title="{{t.csvWhat}}">CSV</button>
  <details class=gear>
   <summary>{{t.settingsTitle}}</summary>
@@ -2027,6 +2261,7 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
 
 <div class=card>
  <div class=ch><h2>{{t.devicesTitle}}</h2><span class=sp></span>
+  <button id=allsw onclick=toggleAll() title="{{t.allWhat}}"></button>
   <input id=flt placeholder="{{t.filter}}" aria-label="{{t.filter}}" oninput=draw()>
  </div>
  <table><thead><tr>
@@ -2046,6 +2281,12 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
   <button>{{t.add}}</button>
  </form>
  <p class=hint>{{t.hint}}</p>
+</div>
+
+<div class=card id=clash hidden>
+ <h2>{{t.clashTitle}}</h2>
+ <div id=clashb></div>
+ <p class=hint>{{t.clashHint}}</p>
 </div>
 
 <div class=card id=unk hidden>
@@ -2091,6 +2332,24 @@ const timer = (ip, on, el) => {
   const v = el.value;
   el.value = '';   // a menu of actions, not a state to sit in
   if (v) post({ip, on, for: v === 'am' ? tillMorning() : +v});
+};
+
+// The same idea one level up: the list itself, suspended for a while. Shorter
+// options than a device's, because this one lets in everything on the network.
+const BYP = [[5, 'tm5'], [15, 'tm15'], [60, 'tm1h']];
+const bypass = (v, el) => {
+  if (el) el.value = '';
+  if (v === '') return;
+  if (+v && !confirm(T.confirmByp)) return;
+  fetch('/bypass', {method:'POST', body: JSON.stringify({for: +v})})
+    .then(r => r.ok ? load() : r.text().then(alert));
+};
+// Everyone at once, except whoever is looking: the button offers whichever of
+// the two states the others are not already in.
+const toggleAll = () => {
+  const on = !S.devices.filter(x => x.ip !== S.you).some(x => x.on);
+  if (!on && !confirm(T.confirmAllOff)) return;
+  post({all: on, except: S.you});
 };
 
 const upfmt = s => {
@@ -2276,6 +2535,17 @@ const draw = () => {
     // The arrow says it to the eye, aria-sort to everything else.
     th.setAttribute('aria-sort', on ? (sortd > 0 ? 'ascending' : 'descending') : 'none');
   }
+  // Open, and how much longer — or the menu that opens it.
+  bypbox.innerHTML = S.bypass > S.now
+    ? `<button class=warn title="${T.bypWhat}" onclick="bypass(0)">${T.bypOn} `
+      + `${left(S.bypass - S.now)} ×</button>`
+    : `<select title="${T.bypWhat}" onchange="bypass(this.value,this)">`
+      + `<option value="">${T.byp}</option>`
+      + BYP.map(([v, k]) => `<option value="${v}">${T[k]}</option>`).join('')
+      + `</select>`;
+  const others = S.devices.filter(x => x.ip !== S.you);
+  allsw.hidden = !others.length;
+  allsw.textContent = others.some(x => x.on) ? T.allOff : T.allOn;
   bday.className = mode === 'day' ? 'on' : '';
   bhour.className = mode === 'hour' ? 'on' : '';
   chsel.innerHTML = one ? `<button onclick="pickDev(null)" title="${T.showAll}">`
@@ -2325,8 +2595,15 @@ const draw = () => {
      // The dot carries its meaning in colour alone; the title is the rest of it.
      + `<i class="dot${live ? ' live' : ''}" title="${live ? T.dotLive : T.dotQuiet}"></i>`
      + `${esc(x.ip)}${me ? `<span class=me>${T.youAre}</span>` : ''}</td>`
-     + `<td><input value="${esc(x.name)}" placeholder="${esc(x.host || T.phName)}" `
-     + `onchange="setName('${esc(x.ip)}',this.value)"></td>`
+     + `<td><div class=nm><input value="${esc(x.name)}" `
+     + `placeholder="${esc(x.host || T.phName)}" `
+     + `onchange="setName('${esc(x.ip)}',this.value)">`
+     // Through data-, not into the onclick: the hostname comes out of a lease
+     // file this program does not own. addKnown already posts exactly this.
+     + (!x.name && x.host ? `<button class=ghost data-ip="${esc(x.ip)}" `
+        + `data-nm="${esc(x.host)}" onclick="addKnown(this)" `
+        + `title="${esc(n(T.useHost, x.host))}">+</button>` : '')
+     + `</div></td>`
      + `<td class="r num">${fmt(t)}${spark(x.series, peak, x.on)}</td>`
      + `<td class="r num mini">${r > 0 ? `↓ ${fmt(x.rate[1])}${T.perSec}`
         + `  ↑ ${fmt(x.rate[0])}${T.perSec}` : '—'}</td>`
@@ -2347,12 +2624,21 @@ const draw = () => {
   upd.hidden = !S.update;
   // textContent, not innerHTML: the tag comes off the network.
   if (S.update) updtext.textContent = T.updateNew.replace('{v}', S.update);
+  // A listed address that answers as somebody else — the rule is now written
+  // for whoever took it.
+  clash.hidden = !S.clash.length;
+  clashb.innerHTML = S.clash.map(([ip, was, now, ven]) =>
+    `<div class=blk><span class=num>${esc(ip)}</span>`
+    + `<span class=mini>${esc(T.clashLine.replace('{a}', was).replace('{b}', now))}`
+    + `${ven ? ' · ' + esc(ven) : ''}</span></div>`).join('');
+
   unk.hidden = !S.blocked.length;
   // The name and the hardware address go through data-, not into the onclick:
   // both come out of a lease file this program does not own.
-  ub.innerHTML = S.blocked.map(([ip, host, mac, knocked]) =>
+  ub.innerHTML = S.blocked.map(([ip, host, mac, knocked, ven]) =>
     `<div class=blk><span class=num>${esc(ip)}</span>`
-    + `<span class=mini>${esc(host)}${host && mac ? ' · ' : ''}${esc(mac)}</span>`
+    + `<span class=mini>${esc(host)}${host && mac ? ' · ' : ''}${esc(mac)}`
+    + `${ven ? ' · ' + esc(ven) : ''}</span>`
     + `<span class="mini knock">${knocked === null ? '' : ago(knocked)}</span>`
     + `<button data-ip="${esc(ip)}" data-nm="${esc(host)}" onclick="addKnown(this)">`
     + `${T.add}</button></div>`).join('');
@@ -2516,11 +2802,21 @@ class H(BaseHTTPRequestHandler):
             self._send(200, T["rebooting"], "text/plain")
             reboot_host()
             return
+        if self.path == "/bypass":
+            self._bypass(raw)
+            return
         try:
             body = json.loads(raw or b"{}")
-            ip = validate(body.get("ip", ""))
             devs = load()
             before = ruleset(devs)
+            if "all" in body:
+                flip_all(devs, bool(body["all"]), str(body.get("except") or ""))
+                save(devs)
+                if ruleset(devs) != before:
+                    apply(devs)
+                self._send(200, "ok", "text/plain")
+                return
+            ip = validate(body.get("ip", ""))
             cur = next((d for d in devs if d["ip"] == ip), None)
             if cur is None:
                 cur = {"ip": ip, "name": "", "on": True}
@@ -2546,6 +2842,25 @@ class H(BaseHTTPRequestHandler):
             self._send(200, "ok", "text/plain")
         except ValueError as e:
             self._send(400, str(e), "text/plain")
+
+    def _bypass(self, raw):
+        """Hold the gateway open for a while, or shut it again now.
+
+        The window is written to the config before the table is rebuilt: a
+        crash between the two leaves a gateway that is merely still closed,
+        where the other order would leave one that is open with nothing on disk
+        saying until when.
+        """
+        try:
+            mins = check_minutes(
+                json.loads(raw or b"{}").get("for"), BYPASS_MAX // 60,
+                T["badBypass"].replace("{n}", str(BYPASS_MAX // 3600)))
+        except ValueError as e:
+            self._send(400, str(e), "text/plain")
+            return
+        bypass_until(int(time.time()) + mins * 60 if mins else 0)
+        apply(load())
+        self._send(200, "ok", "text/plain")
 
     def _settings(self, raw):
         """Save the settings form. The answer is the new address, or empty.
@@ -2655,6 +2970,26 @@ def selftest():
     # Renaming must not touch nftables.
     assert ruleset(d) == ruleset([dict(d[0], name="Mac"), d[1]])
 
+    # The gateway held open: the verdict goes, nothing else does.
+    soon = time.time() + 60
+    assert "drop" not in ruleset(d, bypass=soon), "the list must be suspended"
+    assert "update @blocked { ip saddr }" in ruleset(d, bypass=soon), \
+        "but who came in past the list still has to be recorded"
+    assert f"counter {cname('up', b)} {{ }}" in ruleset(d, bypass=soon), \
+        "and the accounting does not pause with it"
+    assert "drop" in ruleset(d, bypass=time.time() - 1), "a window that has closed"
+
+    devs = [{"ip": "10.0.0.1", "on": True, "until": 5}, {"ip": "10.0.0.2", "on": True}]
+    flip_all(devs, False, "10.0.0.1")
+    assert devs[0] == {"ip": "10.0.0.1", "on": True, "until": 5}, \
+        "the address that pressed the button must be left alone"
+    assert devs[1] == {"ip": "10.0.0.2", "on": False, "until": 0}
+    flip_all(devs, True)
+    assert [d["on"] for d in devs] == [True, True] and devs[0]["until"] == 0, \
+        "with nobody excepted it switches everyone and spends their timers"
+
+    d = [{"ip": a, "name": "MacBook"}, {"ip": b, "name": "Quest", "on": False}]
+
     assert validate(f" {a} ") == a
     # 203.0.113.0/24 is TEST-NET-3, never a home network.
     for bad in (str(SELF_IP), "203.0.113.7", "8.8.8.8", "nope", ""):
@@ -2674,6 +3009,13 @@ def selftest():
         except ValueError:
             continue
         raise AssertionError(f"the timer accepted {bad!r}")
+    # The whole gateway standing open gets a shorter leash than one device.
+    assert check_minutes(BYPASS_MAX // 60, BYPASS_MAX // 60)
+    try:
+        check_minutes(BYPASS_MAX // 60 + 1, BYPASS_MAX // 60)
+        raise AssertionError("the gateway was held open past its own limit")
+    except ValueError:
+        pass
 
     import tempfile
     with tempfile.TemporaryDirectory() as td:
@@ -2758,6 +3100,36 @@ def selftest():
            "192.168.1.99     0x1      0x2    aa:bb:cc:dd:ee:ff  *     eno1\n"
            "192.168.1.98     0x1      0x0    00:00:00:00:00:00  *     eno1\n")
     assert parse_arp(arp) == {"192.168.1.99": "aa:bb:cc:dd:ee:ff"}, "an empty entry is not a device"
+    # Who is on a listed address, when it is not the device the entry means.
+    who = {"10.0.0.5": ["tv", "aa:bb:cc:dd:ee:ff"],
+           "10.0.0.6": ["", "11:22:33:44:55:66"],
+           "10.0.0.7": ["", ""]}
+    assert clashes([{"ip": "10.0.0.5", "mac": "11:22:33:44:55:66"}], who) \
+        == [["10.0.0.5", "11:22:33:44:55:66", "aa:bb:cc:dd:ee:ff"]], \
+        "a listed address answering as somebody else has to be said out loud"
+    assert clashes([{"ip": "10.0.0.6", "mac": "11:22:33:44:55:66"},
+                    {"ip": "10.0.0.7", "mac": "11:22:33:44:55:66"},
+                    {"ip": "10.0.0.5"}], who) == [], \
+        "the device itself, an address nothing answers on, and an unbound entry"
+
+    with tempfile.TemporaryDirectory() as td:
+        f = os.path.join(td, "oui.txt")
+        with open(f, "w") as fh:
+            fh.write("00-0C-29   (hex)\t\tVMware, Inc.\n3C-5A-B4   (hex)\t\tGoogle\n")
+        assert scan_oui(f, {"000c29"}, {}) == {"000c29": "VMware, Inc."}
+        m = os.path.join(td, "manuf")
+        with open(m, "w") as fh:
+            fh.write("00:0C:29\tVMware\tVMware, Inc.\n00:1B:C5:00:00:0/36\tOpenMoko\n")
+        assert scan_oui(m, {"000c29", "001bc5"}, {}) == {"000c29": "VMware"}, \
+            "the short name, and never a 36-bit block's owner for the whole prefix"
+    assert scan_oui("/no/such/list", {"000c29"}, {}) == {}, "a list nobody ships"
+
+    assert vendors(["52:54:00:12:34:56"]) == {"52:54:00:12:34:56": "QEMU/KVM"}
+    assert vendors(["aa:bb:cc:dd:ee:ff"]) == {"aa:bb:cc:dd:ee:ff": T["macRandom"]}, \
+        "an address the device made up itself is not an unknown manufacturer"
+    if not any(os.path.exists(p) for p in OUI_FILES):
+        assert vendors(["00:11:22:33:44:55"]) == {"00:11:22:33:44:55": ""}, \
+            "a prefix nothing on this machine knows must not be guessed at"
     assert parse_arp("") == {}
     leases = ("1786000000 aa:bb:cc:dd:ee:ff 192.168.1.99 quest-2 01:aa\n"
               "1786000000 11:22:33:44:55:66 192.168.1.97 * *\n")
@@ -2991,6 +3363,22 @@ def selftest():
         assert history()["seen"] == {b: 111}, "and so did when it was last seen"
         assert not track_macs(), "nothing moves the second time"
 
+        # The gateway held open, and shutting itself again afterwards. The
+        # config goes to the scratch directory: --selftest must not write to
+        # /etc, and as a plain user it could not anyway.
+        global CONFIG
+        keep_cfg, CONFIG = CONFIG, os.path.join(td, "config.json")
+        save([{"ip": a, "on": True}])
+        applied.clear()
+        bypass_until(1000)
+        assert CFG["bypass"] == 1000 and json.load(open(CONFIG))["bypass"] == 1000, \
+            "an open gateway has to survive a restart of the panel"
+        assert not expire(999), "the window is still open"
+        assert expire(1000), "and now it is not"
+        assert CFG["bypass"] == 0 and applied == [[a]], \
+            "shutting it again means rebuilding the table"
+        CONFIG = keep_cfg
+
         # An address that already belongs to another entry is not taken.
         save([{"ip": a, "on": True, "mac": "11:22:33:44:55:66"},
               {"ip": b, "on": True, "mac": "aa:bb:cc:dd:ee:ff"}])
@@ -3076,7 +3464,8 @@ def selftest():
                "bday", "bhour", "chartbox", "cumlbl", "mstrip", "sysbox", "tb",
                "h_ip", "h_name", "h_traf", "h_now", "h_seen", "unk", "ub",
                "flt", "off", "kother", "kotherbox", "othlbl", "lanips", "s_keep",
-               "s_reboot", "s_reboot_at", "s_rb"):
+               "s_reboot", "s_reboot_at", "s_rb", "bypbox", "allsw", "clash",
+               "clashb"):
         assert f"id={el}>" in page or f"id={el} " in page, f"the page has no {el}"
 
     ru = set(STRINGS["ru"])

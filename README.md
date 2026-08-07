@@ -42,16 +42,29 @@ device ──► this Linux host ──► uplink or tunnel (sing-box / WireGuar
 - **Devices follow their hardware address.** DHCP hands a known device another
   address, and the entry moves there with its name, its switch and all of its
   traffic history — instead of quietly becoming a rule for nobody.
+- **Let everyone in for a while.** One menu in the corner suspends the list
+  itself for five minutes, fifteen or an hour — for guests, or for working out
+  why something will not connect. The accounting carries on and the kernel goes
+  on recording who came, so when the window shuts, everything that used it is
+  listed below and one click from being allowed for good.
+- **Turn everyone off at once**, except the address that pressed the button.
+  The same button brings them back.
+- **A warning when an address is answering as somebody else** — the entry is
+  bound to one piece of hardware and a different one is on that address now, so
+  the rule written for your tablet is currently the rule for whatever took its
+  place.
 - **Unknown devices.** The kernel records who it dropped into a timeout set; the
-  panel lists them, with the hostname out of the DHCP leases and the hardware
-  address out of the ARP cache when the system knows them, says how long ago
-  each one last knocked, and allows one in a click. The field for a new address
-  offers everything the system knows about the network, so nothing has to be
-  typed from memory.
-- **Rename devices** inline. Renaming never touches nftables, so counters
-  survive. Sort the table by any column — with the mouse or the keyboard —
-  filter it by address, name or hostname, and download the selected month
-  as CSV.
+  panel lists them, with the hostname out of the DHCP leases, the hardware
+  address out of the ARP cache and who made the thing — the system's IEEE list
+  if it ships one, a short built-in table if not — says how long ago each one
+  last knocked, and allows one in a click. The field for a new address offers
+  everything the system knows about the network, so nothing has to be typed
+  from memory.
+- **Rename devices** inline, or take the name the device gives the network: it
+  is offered at the end of the field while that is still empty. Renaming never
+  touches nftables, so counters survive. Sort the table by any column — with the
+  mouse or the keyboard — filter it by address, name or hostname, and download
+  the selected month as CSV.
 - **Update notice.** Once a day the panel asks GitHub for the latest release tag
   and shows a banner if yours is older. Off with one checkbox.
 - **Settings in the corner.** Language, update notice, poll interval, LAN
@@ -182,6 +195,15 @@ test a ruleset without touching your host: [docs/design.md](docs/design.md).
   can only follow a device the ARP cache has an entry for.
 - A device that moves to another address keeps its history but not its counters:
   the two named counters belong to the address, and the new ones start at zero.
+- An open gateway is written to the config, so it survives a restart of the
+  service — that is the point, but it also means closing the tab does not close
+  the gateway. It shuts itself at the end of the window, six hours at the very
+  most.
+- Manufacturer names are a hint: the full IEEE list if this system ships one
+  (`ieee-data`, wireshark), otherwise a short built-in table that knows the
+  usual suspects and nothing else. Phones that randomise their address per
+  network are named as exactly that, since there is no manufacturer in a made-up
+  address.
 - A device that is switched off still accrues a few kilobytes of its own retries.
 - Traffic history is kept per address and outlives the device. Bytes of deleted
   ones stay in the month's totals — the panel shows them as a separate "other"
