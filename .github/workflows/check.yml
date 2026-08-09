@@ -38,6 +38,7 @@ jobs:
           JSON
           cat > etc/devices.json <<'JSON'
           [{"ip":"192.168.1.51","name":"a","on":true},
-           {"ip":"192.168.1.52","name":"b","on":false}]
+           {"ip":"192.168.1.52","name":"b","on":false},
+           {"ip":"192.168.1.53","name":"c","on":true,"vpn":false}]
           JSON
           GWACL_DIR=etc python3 panel.py --dump | sudo nft -c -f -
