@@ -39,6 +39,12 @@ device ──► this Linux host ──► uplink or tunnel (sing-box / WireGuar
   hour, three, eight, or until seven in the morning. When the time is up the
   device goes back to the state it was in, by itself. It reads the other way
   round just as well — a device that is off can be let out for an hour.
+- **...or past the VPN instead of off.** A second button sends one device around
+  the tunnel: it keeps its internet, straight out through the gateway, while
+  everything else stays inside. Its packets are stamped with an fwmark the
+  tunnel treats as none of its business — `"vpn_mark"` in `config.json`, `0x2023`
+  for sing-box, `51820` for a stock wg-quick, `0` to hide the button. See
+  [docs/singbox.md](docs/singbox.md).
 - **Devices follow their hardware address.** DHCP hands a known device another
   address, and the entry moves there with its name, its switch and all of its
   traffic history — instead of quietly becoming a rule for nobody.
@@ -205,6 +211,10 @@ test a ruleset without touching your host: [docs/design.md](docs/design.md).
   network are named as exactly that, since there is no manufacturer in a made-up
   address.
 - A device that is switched off still accrues a few kilobytes of its own retries.
+- Sending a device past the VPN is a mark and nothing more. Whether the tunnel
+  honours it belongs to the tunnel, which this program does not configure and
+  cannot ask — a wrong `vpn_mark` shows a button that changes nothing. Check it
+  once from the device: the address it reports should be your own.
 - Traffic history is kept per address and outlives the device. Bytes of deleted
   ones stay in the month's totals — the panel shows them as a separate "other"
   share, because there is nobody left to attribute them to.

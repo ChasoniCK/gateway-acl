@@ -167,6 +167,44 @@ Each of these produced a confidently wrong conclusion at some point:
   service restart. Use
   `systemctl show sing-box -p ActiveEnterTimestamp --value`.
 
+## Sending one device past the tunnel
+
+A device can be let through the gateway without being let into the VPN — the
+`no VPN` button on its row. gateway-acl stamps its packets with an fwmark in
+`prerouting` and stops there; everything after that is sing-box's own doing.
+
+`auto_route` installs a policy rule that sends everything to the tun's table and
+one exception above it for the mark it uses for its own packets — without that
+exception the tunnel's output would be routed back into the tunnel. The same
+mark makes `auto_redirect`'s chain return instead of redirecting. So a packet
+carrying it is routed by `main` and leaves by the uplink, and the router NATs it
+like traffic from any other machine on the LAN.
+
+**Read the mark off the host rather than trusting a number in a document.**
+It has moved between versions, and a wrong one is a button that changes nothing:
+
+```bash
+ip rule | grep -i fwmark
+nft list ruleset | grep -i 'meta mark'
+```
+
+The rule to look for is the one pointing at `lookup main` (wg-quick writes it
+inverted — `not fwmark 51820 lookup 51820` — which comes to the same thing). Put
+that number in `config.json` as `"vpn_mark"`; `0x2023` is what this setup found,
+and `0` removes the button.
+
+Verify from the device itself, not from the gateway — the panel cannot tell
+whether the tunnel honoured the mark, only that it set one:
+
+```bash
+curl -s https://api.ipify.org      # your own address, or the VPN is still on
+```
+
+Note what this does **not** do: sniffing, DNS hijacking and routing rules inside
+sing-box are untouched. A device sent past the tunnel resolves and connects on
+its own, so a domain rule-set that was doing the deciding for it no longer
+applies to anything it does.
+
 ## Where gateway-acl fits
 
 It does not care which tunnel you use. sing-box, WireGuard, plain NAT — as long

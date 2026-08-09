@@ -399,6 +399,43 @@ shut on a room full of guests the moment the service is updated. It is capped at
 point of the program, and nobody means "until tomorrow" by *let the guests in*.
 `expire()` closes it on the same tick that flips back device timers.
 
+## Letting one device out past the tunnel
+
+The switch is binary — routed or not — and the thing people actually want in
+between is a device that has internet but is not inside the VPN: a TV that
+refuses to play from a foreign address, a work laptop, a console. That is not a
+verdict this program can make, because it does not own the tunnel. What it can
+do is say *this packet is not yours*:
+
+```
+ip saddr 192.168.1.55 meta mark set 0x2023
+```
+
+Every tunnel that installs policy routing already has such a mark, because it
+needs one for its own packets — otherwise they would be routed back into
+itself. sing-box's `auto_route` writes `ip rule ... fwmark 0x2023 lookup main`
+and its `auto_redirect` chain returns on the same mark; wg-quick writes
+`ip rule add not fwmark 51820 lookup 51820`, which is the same statement in the
+other direction. Setting the mark therefore puts the packet on the main routing
+table and past any redirect chain, and it leaves by the uplink like traffic from
+any other machine on the LAN.
+
+It is one rule per marked device in the same `prerouting` chain, above
+`ip saddr @allowed accept` — the mark has to be stamped before the packet is
+accepted away, and `raw` is early enough for both readers of it: the routing
+decision that follows `prerouting`, and the redirect chain at a later priority.
+
+The mark is `vpn_mark` in `config.json` and not on the settings form, for the
+same reason `bypass` is not: it is a number that belongs to the *other* program,
+and whoever needs to change it is already editing that program's config. `0`
+means there is no such mark on this host, and then the panel does not draw the
+button at all rather than offering one that does nothing.
+
+What this cannot do is verify any of it. If the mark is wrong the ruleset is
+still valid, the button still lights, and the traffic still goes through the
+tunnel — the failure is entirely on the other side of a contract nftables cannot
+check. One look at the address the device reports for itself settles it.
+
 ## The version constant
 
 `VERSION` is what every install compares against the newest tag on GitHub. It

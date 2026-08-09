@@ -50,7 +50,7 @@ from urllib.parse import urlparse, parse_qs
 # it against the newest tag on GitHub, so a forgotten bump makes every install
 # claim to be older than it is and show a banner that never goes away. CI
 # refuses a tag push where the two disagree.
-VERSION = "1.3.2"
+VERSION = "1.3.3"
 RELEASES_URL = "https://api.github.com/repos/ChasoniCK/gateway-acl/releases/latest"
 RELEASES_PAGE = "https://github.com/ChasoniCK/gateway-acl/releases/latest"
 UPDATE_EVERY = 86400
@@ -71,7 +71,14 @@ DEFAULTS = {"iface": "eno1", "lan": "192.168.1.0/24", "self_ip": "192.168.1.10",
             # has to survive a restart — the table is rebuilt from disk on every
             # start, and a bypass that evaporated there would lock out a room
             # full of guests the moment the service is updated.
-            "bypass": 0}
+            "bypass": 0,
+            # The fwmark a device sent past the tunnel is stamped with. Not on
+            # the form either: it belongs to the tunnel, not to this program,
+            # and whoever has to change it is already editing that tunnel's
+            # config. 0x2023 is what sing-box's auto_route/auto_redirect treats
+            # as "not mine"; wg-quick uses its own port number (51820). 0 turns
+            # the whole feature off. See docs/singbox.md.
+            "vpn_mark": 0x2023}
 SESSION_TTL = 7 * 86400
 FAIL_LIMIT = 5          # misses in a row from one address
 FAIL_BLOCK = 60         # and that is how long it then sits out
@@ -192,6 +199,12 @@ STRINGS = {
         "youAre": "Вы",
         "turnOff": "выключить",
         "turnOn": "включить",
+        "vpnOff": "мимо VPN",
+        "vpnOn": "через VPN",
+        "vpnWhat": "Выпустить устройство мимо туннеля: интернет у него остаётся, "
+                   "но идёт напрямую через шлюз, а не через VPN. Пакеты "
+                   "помечаются fwmark, по которой туннель их не забирает — "
+                   "метка задаётся в config.json как \"vpn_mark\".",
         "del": "удалить",
         "tmFor": "на время",
         "tmWhat": "Выключить или включить на время: когда срок выйдет, устройство "
@@ -368,6 +381,12 @@ STRINGS = {
         "youAre": "You",
         "turnOff": "turn off",
         "turnOn": "turn on",
+        "vpnOff": "no VPN",
+        "vpnOn": "via VPN",
+        "vpnWhat": "Let the device past the tunnel: it keeps its internet, but "
+                   "goes straight out through the gateway instead of through "
+                   "the VPN. Its packets are stamped with an fwmark the tunnel "
+                   "leaves alone — the mark is \"vpn_mark\" in config.json.",
         "del": "delete",
         "tmFor": "for a while",
         "tmWhat": "Turn off or on for a while: when the time is up the device goes "
@@ -849,6 +868,16 @@ def ruleset(devs, bypass=None):
                    for d in devs)
     down = "\n".join(f"    ip daddr {d['ip']} counter name {cname('down', d['ip'])}"
                      for d in devs)
+    # "vpn": false — allowed through the gateway, but not through the tunnel.
+    # A mark is the only handle this program has on something it does not own:
+    # sing-box's auto_route installs `ip rule fwmark 0x2023 lookup main` and its
+    # auto_redirect chain returns on the same mark, wg-quick writes `ip rule not
+    # fwmark 51820`, and both then route the packet by the main table and out of
+    # the uplink. Which is why this is set at raw — before the routing decision
+    # and before any redirect chain, the two places that read it.
+    mark = int(CFG.get("vpn_mark") or 0)
+    novpn = "".join(f"\n    ip saddr {d['ip']} meta mark set 0x{mark:x}"
+                    for d in devs if not d.get("vpn", True)) if mark else ""
     # `table` before `delete` — so delete never fails on a first run.
     # priority raw (-300) — ahead of any redirect chains (auto_redirect, in the
     # case of sing-box), otherwise the verdict comes after the interception.
@@ -875,7 +904,7 @@ table inet gwacl {{
     type filter hook prerouting priority raw; policy accept;
     iifname != "{IFACE}" accept
     meta nfproto != ipv4 accept
-{up}
+{up}{novpn}
     ip saddr @allowed accept
     fib daddr type != unicast accept
     update @blocked {{ ip saddr }}{verdict}
@@ -1787,6 +1816,7 @@ def build_state(month=None):
         "now": int(time.time()),
         "poll": POLL_SEC,
         "devices": [dict(d, on=d.get("on", True),
+                         vpn=d.get("vpn", True),
                          until=int(d.get("until") or 0),
                          up=tot.get(d["ip"], [0, 0])[0],
                          down=tot.get(d["ip"], [0, 0])[1],
@@ -1813,6 +1843,9 @@ def build_state(month=None):
         # While this is in the future the list is suspended and everyone is let
         # through; the page says so rather than looking merely broken.
         "bypass": int(CFG["bypass"]),
+        # No mark, no way to send anyone past the tunnel — then the button that
+        # offers it is a button that does nothing, so it is not drawn at all.
+        "vpnable": bool(int(CFG.get("vpn_mark") or 0)),
         # Everything the system knows of on this network and the list does not:
         # the add form offers them rather than asking anyone to remember one.
         "lan": [[ip, names[ip][0]] for ip in sorted(names)
@@ -2078,7 +2111,10 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
     against each other and not only against themselves. */
  .spark{display:block;margin:.25rem 0 0 auto}
  .mini{font-size:.78rem;color:var(--dim);white-space:nowrap}
- .act{display:flex;gap:.35rem;justify-content:flex-end}
+ /* wrap: four controls in a cell, and one of them appears only when a tunnel
+    mark is configured — on a narrow screen they go to a second line rather
+    than pushing the table sideways. */
+ .act{display:flex;gap:.35rem;justify-content:flex-end;flex-wrap:wrap}
  /* Address, whatever the network knows it as, and the button. It wraps: on a
     phone the three of them do not fit on one line. */
  .blk{display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;margin:.35rem 0}
@@ -2610,6 +2646,12 @@ const draw = () => {
      + `<td class="r mini">${x.seen ? ago(S.now - x.seen) : '—'}</td>`
      + `<td><div class=act><button class="${x.on ? '' : 'on'}" `
      + `onclick="post({ip:'${esc(x.ip)}',on:${!x.on}})">${x.on ? T.turnOff : T.turnOn}</button>`
+     // Same shape as the switch above it: the label is what pressing it does,
+     // and the green is the way back — a device standing outside the tunnel is
+     // the state one eventually wants undone.
+     + (S.vpnable ? `<button class="${x.vpn ? '' : 'on'}" title="${T.vpnWhat}" `
+        + `onclick="post({ip:'${esc(x.ip)}',vpn:${!x.vpn}})">`
+        + `${x.vpn ? T.vpnOff : T.vpnOn}</button>` : '')
      // Whichever way it stands, the menu offers the other one for a while.
      + (x.until > S.now
         ? `<button title="${T.tmCancel}" onclick="post({ip:'${esc(x.ip)}',for:0})">`
@@ -2826,6 +2868,8 @@ class H(BaseHTTPRequestHandler):
                 cur["name"] = str(body.get("name") or "").strip()[:40]
             if "on" in body:
                 cur["on"] = bool(body["on"])
+            if "vpn" in body:
+                cur["vpn"] = bool(body["vpn"])
             # A timer says when the state just set runs out. Setting a state
             # without one is a decision, so it drops whatever was pending —
             # otherwise the switch would flip back by itself hours later and
@@ -2978,6 +3022,21 @@ def selftest():
     assert f"counter {cname('up', b)} {{ }}" in ruleset(d, bypass=soon), \
         "and the accounting does not pause with it"
     assert "drop" in ruleset(d, bypass=time.time() - 1), "a window that has closed"
+
+    # Past the tunnel is not off the network: the device keeps its place in the
+    # allowed set, and the mark is stamped before the rule that accepts it away.
+    old, CFG["vpn_mark"] = CFG.get("vpn_mark"), 0x2023
+    v = ruleset([dict(d[0], vpn=False), d[1]])
+    assert f"ip saddr {a} meta mark set 0x2023" in v
+    assert f"elements = {{ {a} }}" in v, "sent past the vpn, still allowed through"
+    assert v.index("meta mark set") < v.index("ip saddr @allowed accept"), \
+        "a mark stamped after the accept would never be read"
+    assert ruleset(d) != v, "and unlike a rename, this one has to reach nftables"
+    assert "meta mark" not in ruleset(d), "nobody sent past it, nothing stamped"
+    CFG["vpn_mark"] = 0
+    assert "meta mark" not in ruleset([dict(d[0], vpn=False), d[1]]), \
+        "no mark configured is the feature switched off, not a mark of zero"
+    CFG["vpn_mark"] = old
 
     devs = [{"ip": "10.0.0.1", "on": True, "until": 5}, {"ip": "10.0.0.2", "on": True}]
     flip_all(devs, False, "10.0.0.1")
