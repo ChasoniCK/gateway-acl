@@ -408,7 +408,7 @@ verdict this program can make, because it does not own the tunnel. What it can
 do is say *this packet is not yours*:
 
 ```
-ip saddr 192.168.1.55 meta mark set 0x2023
+ether saddr 3c:22:fb:aa:bb:cc meta mark set 0x2023
 ```
 
 Every tunnel that installs policy routing already has such a mark, because it
@@ -420,10 +420,37 @@ other direction. Setting the mark therefore puts the packet on the main routing
 table and past any redirect chain, and it leaves by the uplink like traffic from
 any other machine on the LAN.
 
-It is one rule per marked device in the same `prerouting` chain, above
-`ip saddr @allowed accept` — the mark has to be stamped before the packet is
-accepted away, and `raw` is early enough for both readers of it: the routing
-decision that follows `prerouting`, and the redirect chain at a later priority.
+It is one rule per marked device in the same `prerouting` chain, and `raw` is
+early enough for both readers of the mark: the routing decision that follows
+`prerouting`, and the redirect chain at a later priority.
+
+**By the hardware address, and above `meta nfproto != ipv4 accept`.** Both of
+those are the same lesson, learned the hard way. v1.3.3 wrote `ip saddr` and put
+the rule where every other device rule lives — below the line that lets IPv6
+out of the chain. So a device sent past the tunnel went direct over v4 and
+straight on through the tunnel over v6, and every site that asked it where it
+was answered with the exit node, because a site with an AAAA record prefers v6.
+The panel said the device was out. It was half out, in the half nobody looks at.
+
+A device's IPv6 address cannot go in `devices.json` — the network hands it out,
+there are several at once and they rotate. The MAC does not change between the
+two protocols, and the panel already keeps one for every device, because
+`track_macs()` needs it to follow a lease. One `ether saddr` rule therefore
+covers both, and it has to stand above the `nfproto` line or the v6 packet is
+long gone before it is read.
+
+The fallback is `ip saddr` — v4 only, for a device the ARP cache has not
+answered for yet. And what goes into the rule is checked first (`is_mac`):
+`/proc/net/arp` and dnsmasq's lease file are written by other programs, and one
+junk field there would make `nft -f` reject the table. Atomically, which is the
+bad part — the old rules stay live, the panel goes on answering, and nothing
+anyone does to a device takes effect again.
+
+What a marked v6 packet then does depends on the network: with native IPv6 from
+the ISP it is routed by `main` and goes direct like the v4. With no v6 outside
+the tunnel there is no route for it, so it fails at once and the device falls
+back to v4 — which is also the honest answer, and the one thing that must not
+happen is what happened before: a device quietly still in the tunnel.
 
 The mark is `vpn_mark` in `config.json` and not on the settings form, for the
 same reason `bypass` is not: it is a number that belongs to the *other* program,
@@ -494,9 +521,11 @@ user as a stray Russian word in an English panel.
 
 ## Deliberately not done
 
-- **IPv6.** Passed through with `meta nfproto != ipv4 accept`. A typical gateway
-  has v6 forwarding off. Supporting it means a second set and a second pair of
-  rules per device.
+- **IPv6.** Neither counted nor filtered — `meta nfproto != ipv4 accept`, and a
+  typical gateway has v6 forwarding off. Supporting it means a second set and a
+  second pair of rules per device. It *is* marked, above that line: a device let
+  past the tunnel over v4 while its v6 still went through it reads, to every
+  site that asks, as a device still in the tunnel.
 - **No NAT.** This project never adds masquerade rules. Routing is somebody
   else's job — usually a tunnel.
 - **No per-port or per-time rules.** An address is allowed or it is not.

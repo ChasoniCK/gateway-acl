@@ -194,11 +194,19 @@ that number in `config.json` as `"vpn_mark"`; `0x2023` is what this setup found,
 and `0` removes the button.
 
 Verify from the device itself, not from the gateway — the panel cannot tell
-whether the tunnel honoured the mark, only that it set one:
+whether the tunnel honoured the mark, only that it set one. **Both protocols,
+separately**, and this is not a formality: a browser on a dual-stack network
+prefers IPv6, so a v6 leak is what every site will report, whatever v4 does.
 
 ```bash
-curl -s https://api.ipify.org      # your own address, or the VPN is still on
+curl -4 -s https://api.ipify.org; curl -6 -s https://api6.ipify.org
 ```
+
+The gateway marks by hardware address exactly so that one rule covers both. If
+`-6` still answers with the exit node while `-4` is your own address, the mark
+is not reaching the v6 packets — check that the rule sits above
+`meta nfproto != ipv4 accept` in `nft list table inet gwacl`, and that
+`ip -6 rule` has the same fwmark exception as `ip rule` does.
 
 Note what this does **not** do: sniffing, DNS hijacking and routing rules inside
 sing-box are untouched. A device sent past the tunnel resolves and connects on

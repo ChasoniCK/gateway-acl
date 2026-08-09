@@ -50,7 +50,7 @@ from urllib.parse import urlparse, parse_qs
 # it against the newest tag on GitHub, so a forgotten bump makes every install
 # claim to be older than it is and show a banner that never goes away. CI
 # refuses a tag push where the two disagree.
-VERSION = "1.3.3"
+VERSION = "1.3.4"
 RELEASES_URL = "https://api.github.com/repos/ChasoniCK/gateway-acl/releases/latest"
 RELEASES_PAGE = "https://github.com/ChasoniCK/gateway-acl/releases/latest"
 UPDATE_EVERY = 86400
@@ -759,6 +759,21 @@ def lan_client(ip):
     return a in LAN and a != SELF_IP
 
 
+def is_mac(s):
+    """A hardware address fit to be written into a rule.
+
+    Everywhere else a MAC is a label on a page; in the ruleset it is syntax.
+    Both places one comes from — the ARP cache and dnsmasq's lease file — are
+    written by other programs, and a single junk field would make `nft -f`
+    reject the table. Atomically, which is the bad part: the old rules stay,
+    the panel goes on answering, and nothing anyone does to a device takes
+    effect again.
+    """
+    p = str(s).split(":")
+    return len(p) == 6 and all(
+        len(x) == 2 and all(c in "0123456789abcdefABCDEF" for c in x) for x in p)
+
+
 def cname(direction, ip):
     return f"{direction}_{ip.replace('.', '_')}"
 
@@ -875,9 +890,19 @@ def ruleset(devs, bypass=None):
     # fwmark 51820`, and both then route the packet by the main table and out of
     # the uplink. Which is why this is set at raw — before the routing decision
     # and before any redirect chain, the two places that read it.
+    #
+    # By the hardware address wherever one is known, because a device's IPv6 is
+    # not in devices.json and cannot be — it is handed out by the network, there
+    # are several of them and they rotate. The frame carries the same MAC either
+    # way, so one rule covers both protocols. Marking only the v4 address is how
+    # this first shipped, and it left every such device still leaving by the
+    # tunnel over v6 while the panel said it was out.
     mark = int(CFG.get("vpn_mark") or 0)
-    novpn = "".join(f"\n    ip saddr {d['ip']} meta mark set 0x{mark:x}"
-                    for d in devs if not d.get("vpn", True)) if mark else ""
+    novpn = "".join(
+        f"\n    ether saddr {d['mac']} meta mark set 0x{mark:x}"
+        if is_mac(d.get("mac")) else
+        f"\n    ip saddr {d['ip']} meta mark set 0x{mark:x}"
+        for d in devs if not d.get("vpn", True)) if mark else ""
     # `table` before `delete` — so delete never fails on a first run.
     # priority raw (-300) — ahead of any redirect chains (auto_redirect, in the
     # case of sing-box), otherwise the verdict comes after the interception.
@@ -887,6 +912,9 @@ def ruleset(devs, bypass=None):
     # the way out (replies go through forward, NAT does not rewrite them).
     # ponytail: a switched-off device still accrues its own doomed retries as
     # upload. A few kilobytes, and it makes the knocking visible.
+    # The mark is the one thing above `meta nfproto != ipv4 accept`, because it
+    # is the one thing that has to happen to an IPv6 packet too; everything
+    # below that line is v4 by construction.
     return f"""\
 table inet gwacl
 delete table inet gwacl
@@ -902,9 +930,9 @@ table inet gwacl {{
   }}
   chain prerouting {{
     type filter hook prerouting priority raw; policy accept;
-    iifname != "{IFACE}" accept
+    iifname != "{IFACE}" accept{novpn}
     meta nfproto != ipv4 accept
-{up}{novpn}
+{up}
     ip saddr @allowed accept
     fib daddr type != unicast accept
     update @blocked {{ ip saddr }}{verdict}
@@ -916,8 +944,11 @@ table inet gwacl {{
   }}
 }}
 """
-# ponytail: IPv6 passes through untouched — a typical gateway has v6
+# ponytail: IPv6 is neither counted nor filtered — a typical gateway has v6
 # forwarding off. When it is needed: a second set and rules on ip6 saddr/daddr.
+# It is *marked*, though, and that is not symmetry for its own sake: a device
+# let past the tunnel over v4 while its v6 still went through it read, to every
+# site that asked, as a device still sitting in the tunnel.
 
 
 def nft_json(*args):
@@ -3027,12 +3058,30 @@ def selftest():
     # allowed set, and the mark is stamped before the rule that accepts it away.
     old, CFG["vpn_mark"] = CFG.get("vpn_mark"), 0x2023
     v = ruleset([dict(d[0], vpn=False), d[1]])
-    assert f"ip saddr {a} meta mark set 0x2023" in v
+    assert f"ip saddr {a} meta mark set 0x2023" in v, "no MAC known, the address it is"
     assert f"elements = {{ {a} }}" in v, "sent past the vpn, still allowed through"
     assert v.index("meta mark set") < v.index("ip saddr @allowed accept"), \
         "a mark stamped after the accept would never be read"
     assert ruleset(d) != v, "and unlike a rename, this one has to reach nftables"
     assert "meta mark" not in ruleset(d), "nobody sent past it, nothing stamped"
+
+    # With a hardware address the rule is written against that instead, and it
+    # has to stand above the line that lets IPv6 out of the chain — that line is
+    # why the first release of this marked v4 and left v6 in the tunnel.
+    m = ruleset([dict(d[0], vpn=False, mac="aa:bb:cc:dd:ee:ff"), d[1]])
+    assert "ether saddr aa:bb:cc:dd:ee:ff meta mark set 0x2023" in m
+    assert f"ip saddr {a} meta mark set" not in m, "one rule for the device, not two"
+    assert m.index("meta mark set") < m.index("meta nfproto != ipv4 accept"), \
+        "below that line an IPv6 packet has already left the chain"
+    # /proc/net/arp and the lease file are written by other programs, and a
+    # ruleset nft refuses is a panel whose every button silently stops working.
+    for junk in ("", None, "nope", "aa:bb:cc:dd:ee", "aa:bb:cc:dd:ee:zz",
+                 "aa:bb:cc:dd:ee:ff; drop"):
+        assert not is_mac(junk), junk
+        assert f"ip saddr {a} meta mark set" in ruleset(
+            [dict(d[0], vpn=False, mac=junk), d[1]]), "junk falls back to the address"
+    assert is_mac("AA:BB:CC:DD:EE:FF"), "the ARP cache is lowercase, a lease file need not be"
+
     CFG["vpn_mark"] = 0
     assert "meta mark" not in ruleset([dict(d[0], vpn=False), d[1]]), \
         "no mark configured is the feature switched off, not a mark of zero"
