@@ -42,10 +42,11 @@ device ──► this Linux host ──► uplink or tunnel (sing-box / WireGuar
 - **...or past the VPN instead of off.** A second button sends one device around
   the tunnel: it keeps its internet, straight out through the gateway, while
   everything else stays inside. Its packets are stamped with an fwmark the
-  tunnel treats as none of its business — `"vpn_mark"` in `config.json`, `0x2023`
-  for sing-box, `51820` for a stock wg-quick, `0` to hide the button. Marked by
-  hardware address, so IPv4 and IPv6 leave together — half a device out of the
-  tunnel is a device every site still places at the exit node. See
+  tunnel treats as none of its business — `"vpn_mark"` in `config.json`, `8228`
+  (`0x2024`) for sing-box, `51820` for a stock wg-quick, `0` to hide the button.
+  Read that number off your own host — the neighbouring mark does the opposite.
+  Marked by hardware address, so IPv4 and IPv6 leave together: half a device out
+  of the tunnel is a device every site still places at the exit node. See
   [docs/singbox.md](docs/singbox.md).
 - **Devices follow their hardware address.** DHCP hands a known device another
   address, and the entry moves there with its name, its switch and all of its
@@ -215,7 +216,9 @@ test a ruleset without touching your host: [docs/design.md](docs/design.md).
 - A device that is switched off still accrues a few kilobytes of its own retries.
 - Sending a device past the VPN is a mark and nothing more. Whether the tunnel
   honours it belongs to the tunnel, which this program does not configure and
-  cannot ask — a wrong `vpn_mark` shows a button that changes nothing. Check it
+  cannot ask. A wrong `vpn_mark` does not fail loudly, and need not even fail in
+  the harmless direction: sing-box's `0x2023` sits next to the one you want and
+  forces the device *into* the tunnel instead. Check it
   once from the device, and check **both** protocols: `curl -4 https://api.ipify.org`
   and `curl -6 https://api6.ipify.org` should both be your own address, or
   IPv6 should not answer at all. A network with no IPv6 outside the tunnel

@@ -408,17 +408,26 @@ verdict this program can make, because it does not own the tunnel. What it can
 do is say *this packet is not yours*:
 
 ```
-ether saddr 3c:22:fb:aa:bb:cc meta mark set 0x2023
+ether saddr 3c:22:fb:aa:bb:cc meta mark set 0x2024
 ```
 
 Every tunnel that installs policy routing already has such a mark, because it
 needs one for its own packets — otherwise they would be routed back into
-itself. sing-box's `auto_route` writes `ip rule ... fwmark 0x2023 lookup main`
-and its `auto_redirect` chain returns on the same mark; wg-quick writes
+itself. sing-box's `auto_route` writes `ip rule ... fwmark 0x2024 goto` past the
+tun's own lookup and its chain returns on the same mark; wg-quick writes
 `ip rule add not fwmark 51820 lookup 51820`, which is the same statement in the
 other direction. Setting the mark therefore puts the packet on the main routing
 table and past any redirect chain, and it leaves by the uplink like traffic from
 any other machine on the LAN.
+
+**Which number it is, is read off the host — never assumed.** sing-box keeps a
+block of adjacent marks and `0x2023`, one below the one wanted, does the
+opposite: `ip rule ... fwmark 0x2023 lookup 2022` puts the packet *into* the
+tun. Set as `vpn_mark` it fails silently and backwards — the device is forced
+through the tunnel, past whatever routing rules would have sent part of its
+traffic direct, while the panel says it is out. That is not a hypothetical; it
+is what v1.3.3 and v1.3.4 shipped as the default. See [singbox.md](singbox.md)
+for the three marks and how to read them.
 
 It is one rule per marked device in the same `prerouting` chain, and `raw` is
 early enough for both readers of the mark: the routing decision that follows

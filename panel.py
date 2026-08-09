@@ -50,7 +50,7 @@ from urllib.parse import urlparse, parse_qs
 # it against the newest tag on GitHub, so a forgotten bump makes every install
 # claim to be older than it is and show a banner that never goes away. CI
 # refuses a tag push where the two disagree.
-VERSION = "1.3.4"
+VERSION = "1.3.5"
 RELEASES_URL = "https://api.github.com/repos/ChasoniCK/gateway-acl/releases/latest"
 RELEASES_PAGE = "https://github.com/ChasoniCK/gateway-acl/releases/latest"
 UPDATE_EVERY = 86400
@@ -75,10 +75,16 @@ DEFAULTS = {"iface": "eno1", "lan": "192.168.1.0/24", "self_ip": "192.168.1.10",
             # The fwmark a device sent past the tunnel is stamped with. Not on
             # the form either: it belongs to the tunnel, not to this program,
             # and whoever has to change it is already editing that tunnel's
-            # config. 0x2023 is what sing-box's auto_route/auto_redirect treats
-            # as "not mine"; wg-quick uses its own port number (51820). 0 turns
-            # the whole feature off. See docs/singbox.md.
-            "vpn_mark": 0x2023}
+            # config. 0 turns the whole feature off.
+            #
+            # 0x2024 is sing-box's AutoRedirectOutputMark — what it puts on its
+            # own packets so they are not swallowed again, and therefore the one
+            # thing its rules step aside for. Its neighbour 0x2023 is the
+            # *input* mark and does the exact opposite: `ip rule ... fwmark
+            # 0x2023 lookup 2022` sends the packet into the tun. Reading it off
+            # the host beats trusting either number — see docs/singbox.md.
+            # wg-quick's is its own port, 51820.
+            "vpn_mark": 0x2024}
 SESSION_TTL = 7 * 86400
 FAIL_LIMIT = 5          # misses in a row from one address
 FAIL_BLOCK = 60         # and that is how long it then sits out
@@ -885,11 +891,15 @@ def ruleset(devs, bypass=None):
                      for d in devs)
     # "vpn": false — allowed through the gateway, but not through the tunnel.
     # A mark is the only handle this program has on something it does not own:
-    # sing-box's auto_route installs `ip rule fwmark 0x2023 lookup main` and its
-    # auto_redirect chain returns on the same mark, wg-quick writes `ip rule not
-    # fwmark 51820`, and both then route the packet by the main table and out of
-    # the uplink. Which is why this is set at raw — before the routing decision
-    # and before any redirect chain, the two places that read it.
+    # every one of them keeps a mark for its own packets, so that what it sends
+    # is not swallowed by itself again — and that mark is the one thing its
+    # rules step aside for. sing-box: `ip rule fwmark 0x2024 goto` past the tun
+    # lookup, and `meta mark 0x2024 ... return` above its queue. wg-quick: `ip
+    # rule not fwmark 51820`. Both then route the packet by the main table and
+    # out of the uplink. Which is why this is set at raw — before the routing
+    # decision and before any redirect chain, the two places that read it.
+    # Getting the number wrong is not a no-op: sing-box's neighbouring 0x2023
+    # forces the packet *into* the tun instead. Read it off the host.
     #
     # By the hardware address wherever one is known, because a device's IPv6 is
     # not in devices.json and cannot be — it is handed out by the network, there
@@ -3056,9 +3066,9 @@ def selftest():
 
     # Past the tunnel is not off the network: the device keeps its place in the
     # allowed set, and the mark is stamped before the rule that accepts it away.
-    old, CFG["vpn_mark"] = CFG.get("vpn_mark"), 0x2023
+    old, CFG["vpn_mark"] = CFG.get("vpn_mark"), 0x2024
     v = ruleset([dict(d[0], vpn=False), d[1]])
-    assert f"ip saddr {a} meta mark set 0x2023" in v, "no MAC known, the address it is"
+    assert f"ip saddr {a} meta mark set 0x2024" in v, "no MAC known, the address it is"
     assert f"elements = {{ {a} }}" in v, "sent past the vpn, still allowed through"
     assert v.index("meta mark set") < v.index("ip saddr @allowed accept"), \
         "a mark stamped after the accept would never be read"
@@ -3069,7 +3079,7 @@ def selftest():
     # has to stand above the line that lets IPv6 out of the chain — that line is
     # why the first release of this marked v4 and left v6 in the tunnel.
     m = ruleset([dict(d[0], vpn=False, mac="aa:bb:cc:dd:ee:ff"), d[1]])
-    assert "ether saddr aa:bb:cc:dd:ee:ff meta mark set 0x2023" in m
+    assert "ether saddr aa:bb:cc:dd:ee:ff meta mark set 0x2024" in m
     assert f"ip saddr {a} meta mark set" not in m, "one rule for the device, not two"
     assert m.index("meta mark set") < m.index("meta nfproto != ipv4 accept"), \
         "below that line an IPv6 packet has already left the chain"

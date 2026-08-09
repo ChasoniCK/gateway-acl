@@ -176,22 +176,42 @@ A device can be let through the gateway without being let into the VPN — the
 `auto_route` installs a policy rule that sends everything to the tun's table and
 one exception above it for the mark it uses for its own packets — without that
 exception the tunnel's output would be routed back into the tunnel. The same
-mark makes `auto_redirect`'s chain return instead of redirecting. So a packet
+mark makes its `prerouting` chain return instead of queueing. So a packet
 carrying it is routed by `main` and leaves by the uplink, and the router NATs it
 like traffic from any other machine on the LAN.
 
-**Read the mark off the host rather than trusting a number in a document.**
-It has moved between versions, and a wrong one is a button that changes nothing:
+### There are three marks, and two of them are not the one you want
+
+This cost a release to learn. sing-box uses a small block of adjacent numbers,
+and the neighbour of the one you want does the exact opposite:
+
+| mark | `ip rule` | in the chain | means |
+|---|---|---|---|
+| `0x2023` | `fwmark 0x2023 lookup 2022` | — | **into** the tun |
+| `0x2024` | `fwmark 0x2024 goto` → `nop` → `main` | `meta mark 0x2024 … return` | **past** the tun |
+| `0x2025` | — | `reject with tcp reset` | refused |
+
+`0x2023` is `AutoRedirectInputMark`, `0x2024` is `AutoRedirectOutputMark` — the
+one sing-box puts on its own output. Setting `0x2023` as `vpn_mark` does not
+fail loudly: the device is forced *into* the tunnel, past whatever routing rules
+would have sent some of its traffic direct, and the panel goes on saying it is
+out. The symptom is a device that looks more tunnelled than before.
+
+**So read the mark off the host rather than trusting a number in a document**,
+this one included — the block has moved between versions:
 
 ```bash
-ip rule | grep -i fwmark
-nft list ruleset | grep -i 'meta mark'
+ip rule
 ```
 
-The rule to look for is the one pointing at `lookup main` (wg-quick writes it
-inverted — `not fwmark 51820 lookup 51820` — which comes to the same thing). Put
-that number in `config.json` as `"vpn_mark"`; `0x2023` is what this setup found,
-and `0` removes the button.
+```bash
+nft list table inet sing-box | grep -i 'meta mark'
+```
+
+Look for the rule that leads to `main` (wg-quick writes it inverted — `not
+fwmark 51820 lookup 51820` — which comes to the same thing), *not* for the one
+naming the tun's own table. Put that number in `config.json` as `"vpn_mark"` —
+JSON has no hex, so `0x2024` is written `8228`. `0` removes the button.
 
 Verify from the device itself, not from the gateway — the panel cannot tell
 whether the tunnel honoured the mark, only that it set one. **Both protocols,
