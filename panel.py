@@ -177,10 +177,10 @@ STRINGS = {
         "colName": "имя",
         "colTraffic": "трафик",
         "colSeen": "активность",
-        "phName": "чьё устройство",
+        "phName": "название устройства",
         "add": "добавить",
         "hint": "На устройстве прописать вручную: шлюз <b>{{GW}}</b>, маска "
-                "<b>{{MASK}}</b> (Android и Quest спрашивают длину префикса — "
+                "<b>{{MASK}}</b> (Android спрашивает длину префикса — "
                 "<b>{{PFX}}</b>), DNS <b>1.1.1.1</b>. Кого нет в списке — тот через "
                 "шлюз не ходит вообще. «Выключить» оставляет устройство в списке "
                 "вместе с историей и именем, но закрывает ему выход. Устройство "
@@ -352,7 +352,7 @@ STRINGS = {
         "colName": "name",
         "colTraffic": "traffic",
         "colSeen": "activity",
-        "phName": "whose device",
+        "phName": "name device",
         "add": "add",
         "hint": "Set manually on the device: gateway <b>{{GW}}</b>, netmask "
                 "<b>{{MASK}}</b> (Android and Quest ask for prefix length — "
