@@ -74,8 +74,10 @@ device ──► this Linux host ──► uplink or tunnel (sing-box / WireGuar
   touches nftables, so counters survive. Sort the table by any column — with the
   mouse or the keyboard — filter it by address, name or hostname, and download
   the selected month as CSV.
-- **Update notice.** Once a day the panel asks GitHub for the latest release tag
-  and shows a banner if yours is older. Off with one checkbox.
+- **Update notice, and the button under it.** Once a day the panel asks GitHub
+  for the latest release tag and shows a banner if yours is older. *Install now*
+  fetches that release and runs the installer with the answers you already gave,
+  so an upgrade needs no terminal. Off with one checkbox.
 - **Settings in the corner.** Language, update notice, poll interval, LAN
   interface, network, gateway address, port and the password — all of
   `config.json` behind one form, validated before it is written. Next to the
@@ -116,8 +118,24 @@ devices currently visible in the ARP table so you can allow them before the rule
 takes effect. It refuses to enable anything until `panel.py --selftest` passes
 and the kernel accepts the generated ruleset.
 
+Give it a subscription link and it sets up the tunnel as well. The link is kept
+in `/etc/gateway-acl/sub.url` (mode 0600) and offered back on the next run, so an
+upgrade is one Enter. Leave the answer empty and sing-box is not touched at all.
+
+What it writes is deliberately narrow: outbounds tagged `sub-*` and the member
+list of the `proxy` group. Routing rules, DNS, inbounds and any outbound you
+wrote by hand survive a refresh unchanged, and the config it replaces is kept
+beside the new one. A node this sing-box cannot use — an `xhttp` transport, say —
+is reported and skipped, never written. On a host with no config at all a working
+one is generated: `tun` with `auto_route` and `auto_redirect`, DNS hijacked into
+the tunnel, private destinations going out `direct`. A subscription server that
+is down cannot fail an install: the step warns and the panel goes on being
+installed. See [docs/singbox.md](docs/singbox.md).
+
 Re-running it upgrades the code in place; your device list and statistics are
-left alone.
+left alone. It re-uses every answer already in `config.json` rather than
+detecting the host again, which is what makes `--yes` safe on a machine you
+configured by hand.
 
 ```bash
 sudo ./install.sh --uninstall   # remove service and rules, keep data
@@ -161,6 +179,17 @@ ssh -L 8080:127.0.0.1:8080 you@gateway
 Anyone who knows the password can change the allowlist. There are no roles and
 no audit log — it is built for a network small enough that everyone with the
 password is meant to have it.
+
+**The update button runs code as root.** When the banner says a newer release is
+tagged, *Install now* downloads that release from `codeload.github.com` and runs
+`install.sh --yes` with the answers already on disk. The address is built from
+constants — only the tag comes off the network, and it has to look like a version
+or nothing is fetched at all. The archive has to declare the version that was
+announced and pass its own selftest before anything on the host is replaced, and
+what happened is in `/etc/gateway-acl/update.log`. It is still one more thing the
+panel password buys: whoever knows it can make the gateway install a release. The
+reboot button has always been the same kind of power, but say it plainly rather
+than discover it.
 
 **The panel reaches out exactly once a day** — a GET to
 `api.github.com/repos/ChasoniCK/gateway-acl/releases/latest` for the latest

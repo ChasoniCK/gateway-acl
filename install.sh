@@ -47,14 +47,23 @@ PURGE="${PURGE:-0}"
 [ "$(uname -s)" = Linux ] || { echo "только Linux / Linux only" >&2; exit 1; }
 command -v systemctl >/dev/null || { echo "нужен systemd / systemd required" >&2; exit 1; }
 
+# --- what the installed panel already knows ---------------------------------
+
+# Every answer of the previous run is in config.json. Re-reading it is what makes
+# a second run — and the upgrade button, which runs this with --yes — keep the
+# network it was configured with instead of detecting the host all over again.
+cfg() { # cfg key -> the value, or empty
+  [ -f "$ETC/config.json" ] || return 0
+  python3 -c 'import json,sys
+try: v = json.load(open(sys.argv[1])).get(sys.argv[2])
+except Exception: v = None
+print("" if v is None else v)' "$ETC/config.json" "$1" 2>/dev/null || true
+}
+
 # --- language ---------------------------------------------------------------
 
 # An installed panel already knows its language — do not ask again on upgrade.
-if [ -z "$UILANG" ] && [ -f "$ETC/config.json" ]; then
-  UILANG=$(python3 -c 'import json,sys
-try: print(json.load(open(sys.argv[1])).get("lang") or "")
-except Exception: print("")' "$ETC/config.json" 2>/dev/null || true)
-fi
+[ -n "$UILANG" ] || UILANG=$(cfg lang)
 if [ -z "$UILANG" ] && [ "$YES" = 0 ]; then
   read -r -p "  Язык / Language [ru/en]: " UILANG </dev/tty || true
 fi
@@ -82,6 +91,14 @@ if [ "$UILANG" = en ]; then
   M_PWKEPT="already set, left unchanged"
   M_PWNEW="    new password (8+ chars): "; M_PWAGAIN="    again: "
   M_PWMISMATCH="did not match, try again"; M_PWTOOSHORT="too short, try again"
+  M_SUB="Tunnel";                M_SUBASK="subscription link"
+  M_SUBHINT="Pasted here it is stored in $ETC/sub.url (0600) and reused on the next run."
+  M_SUBHINT2="Empty means sing-box is not touched at all."
+  M_SUBNOSB="sing-box is not installed — the link is remembered, the config is not written"
+  M_SUBFETCH="reading the subscription"
+  M_SUBFAIL="the subscription was not applied, the previous config is back"
+  M_SUBSAME="unchanged, sing-box was not restarted"
+  M_SUBOK="nodes written:"
   M_ONLYLIST="After this, ONLY the devices on the list will route through this host."
   M_SEEN="Currently visible on the network:"
   M_NOARP="ARP table is empty — add devices from the panel later."
@@ -127,6 +144,14 @@ else
   M_PWKEPT="уже задан, оставлен без изменений"
   M_PWNEW="    новый пароль (от 8 символов): "; M_PWAGAIN="    ещё раз: "
   M_PWMISMATCH="не совпали, ещё раз";  M_PWTOOSHORT="слишком короткий, ещё раз"
+  M_SUB="Туннель";               M_SUBASK="ссылка подписки"
+  M_SUBHINT="Введённая здесь ложится в $ETC/sub.url (0600) и подставится при следующем запуске."
+  M_SUBHINT2="Пусто — sing-box не трогается вовсе."
+  M_SUBNOSB="sing-box не установлен — ссылка запомнена, конфиг не пишется"
+  M_SUBFETCH="читаю подписку"
+  M_SUBFAIL="подписка не применена, прежний конфиг возвращён"
+  M_SUBSAME="без изменений, sing-box не перезапускался"
+  M_SUBOK="узлов записано:"
   M_ONLYLIST="После установки через этот хост пойдут ТОЛЬКО те, кто в списке."
   M_SEEN="Сейчас в сети видно:"
   M_NOARP="ARP-таблица пуста — добавите устройства через панель."
@@ -239,6 +264,10 @@ fi
 
 DEF_IFACE=$(ip -o -4 route show default 2>/dev/null | awk '{print $5; exit}' || true)
 [ -n "${DEF_IFACE:-}" ] || DEF_IFACE=$(ip -o -4 addr show scope global | awk '{print $2; exit}')
+# The configured interface wins over the detected one, but only while it exists:
+# a card renamed between reboots must not turn an upgrade into a dead end.
+OLD_IFACE=$(cfg iface)
+[ -z "$OLD_IFACE" ] || [ ! -d "/sys/class/net/$OLD_IFACE" ] || DEF_IFACE="$OLD_IFACE"
 
 step "$M_PARAMS"
 IFACE=$(ask "$M_IFACE" "$DEF_IFACE")
@@ -248,9 +277,13 @@ CIDR=$(ip -o -4 addr show dev "$IFACE" | awk '{print $4; exit}')
 [ -n "$CIDR" ] || die "$IFACE $M_NOIP"
 DEF_LAN=$(python3 -c 'import ipaddress,sys;print(ipaddress.ip_interface(sys.argv[1]).network)' "$CIDR")
 
-SELF_IP=$(ask "$M_ADDR" "${CIDR%/*}")
-LAN=$(ask "$M_NET" "$DEF_LAN")
-PORT=$(ask "$M_PORT" "8080")
+DEF_SELF=$(cfg self_ip); [ -n "$DEF_SELF" ] || DEF_SELF="${CIDR%/*}"
+DEF_NET=$(cfg lan);       [ -n "$DEF_NET" ]  || DEF_NET="$DEF_LAN"
+DEF_PORT=$(cfg port);     [ -n "$DEF_PORT" ] || DEF_PORT=8080
+
+SELF_IP=$(ask "$M_ADDR" "$DEF_SELF")
+LAN=$(ask "$M_NET" "$DEF_NET")
+PORT=$(ask "$M_PORT" "$DEF_PORT")
 python3 -c 'import ipaddress,sys;ipaddress.ip_address(sys.argv[1]);ipaddress.ip_network(sys.argv[2])' \
   "$SELF_IP" "$LAN" || die "$M_BADNET"
 
@@ -273,6 +306,82 @@ else
     [ ${#PW} -ge 8 ] || { say "$M_PWTOOSHORT"; continue; }
     break
   done
+fi
+
+# --- sing-box subscription --------------------------------------------------
+
+# The one place this repository knows anything about a tunnel. The panel does
+# not: it neither reads nor writes a sing-box config, and the link never reaches
+# panel.py or any page it serves. Nothing here can abort the install — a
+# subscription server that is down must not stop a panel upgrade.
+
+SUBFILE="$ETC/sub.url"
+SB=/etc/sing-box/config.json
+OLDSUB=""
+if [ -f "$SUBFILE" ]; then OLDSUB=$(cat "$SUBFILE"); fi
+
+step "$M_SUB"
+say "$M_SUBHINT"
+say "$M_SUBHINT2"
+if [ "$YES" = 1 ]; then
+  SUB="$OLDSUB"
+else
+  # The stored link is shown cut short, never whole: this scrolls back in a
+  # terminal and over somebody's shoulder. Enter keeps it.
+  MASK=$(printf '%s' "$OLDSUB" | sed -E 's#^(https?://[^/]{1,40}/.{0,3}).*#\1…#')
+  read -r -p "    $M_SUBASK [$MASK] " SUB </dev/tty || true
+  SUB="${SUB:-$OLDSUB}"
+fi
+
+if [ -n "$SUB" ]; then
+  install -d -m 755 "$ETC"
+  ( umask 077; printf '%s\n' "$SUB" > "$SUBFILE" )
+  chmod 600 "$SUBFILE"
+
+  if ! command -v sing-box >/dev/null; then
+    SBPKG=""
+    if   command -v pacman  >/dev/null; then SBPKG="pacman -S --needed --noconfirm sing-box"
+    elif command -v apt-get >/dev/null; then SBPKG="apt-get install -y sing-box"; fi
+    if [ -n "$SBPKG" ] && yesno "$M_INSTALLNFT $SBPKG ?"; then
+      # shellcheck disable=SC2086
+      $SBPKG >/dev/null 2>&1 || true
+    fi
+  fi
+
+  if ! command -v sing-box >/dev/null; then
+    ok "sing-box" "$M_SUBNOSB"
+  else
+    ok "sing-box" "$M_SUBFETCH"
+    NEWCFG=$(mktemp)
+    SBARGS=(--iface "$IFACE")
+    if [ -f "$SB" ]; then SBARGS=(--base "$SB"); fi
+    if python3 "$SRC/singbox_sub.py" --url "$SUB" "${SBARGS[@]}" > "$NEWCFG"; then
+      if [ -f "$SB" ] && cmp -s "$NEWCFG" "$SB"; then
+        ok "$SB" "$M_SUBSAME"
+      else
+        install -d -m 755 /etc/sing-box
+        BAK=""
+        if [ -f "$SB" ]; then BAK="$SB.bak.$(date +%s)"; cp -a "$SB" "$BAK"; fi
+        install -m 600 "$NEWCFG" "$SB"
+        if sing-box check -c "$SB" >/dev/null 2>&1; then
+          systemctl enable sing-box >/dev/null 2>&1 || true
+          systemctl restart sing-box >/dev/null 2>&1 || true
+          ok "$SB" "$M_SUBOK $(python3 -c 'import json,sys
+print(sum(1 for o in json.load(open(sys.argv[1]))["outbounds"]
+          if str(o.get("tag","")).startswith("sub-")))' "$SB")"
+        else
+          # Only a config this script wrote is rolled back, and only onto the
+          # backup it took four lines above — never onto whatever backup happens
+          # to be newest in the directory.
+          if [ -n "$BAK" ]; then cp -a "$BAK" "$SB"; else rm -f "$SB"; fi
+          say "$M_SUBFAIL"
+        fi
+      fi
+    else
+      say "$M_SUBFAIL"
+    fi
+    rm -f "$NEWCFG"
+  fi
 fi
 
 # --- device list ------------------------------------------------------------
@@ -322,6 +431,8 @@ fi
 install -m 755 "$SRC/panel.py" "$ETC/panel.py"
 TOUCHED=1
 ok "panel.py" "ok"
+install -m 755 "$SRC/singbox_sub.py" "$ETC/singbox_sub.py"
+ok "singbox_sub.py" "ok"
 
 python3 - "$ETC/config.json" "$IFACE" "$LAN" "$SELF_IP" "$PORT" "$UILANG" <<'PY'
 import json, os, sys

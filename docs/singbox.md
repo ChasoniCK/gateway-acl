@@ -6,7 +6,8 @@ things that actually bite when the two run on the same host — learned from a
 working setup, not from documentation.
 
 No credentials, server addresses or subscription links belong in this repository,
-and none are here.
+and none are here. The installer can be *given* a link — see below — and keeps it
+in `/etc/gateway-acl/sub.url`, mode 0600, on your host and nowhere else.
 
 ## The shape of the setup
 
@@ -232,6 +233,63 @@ Note what this does **not** do: sniffing, DNS hijacking and routing rules inside
 sing-box are untouched. A device sent past the tunnel resolves and connects on
 its own, so a domain rule-set that was doing the deciding for it no longer
 applies to anything it does.
+
+## The subscription the installer asks for
+
+`install.sh` asks for a subscription link, and `singbox_sub.py` turns it into
+outbounds. This is the installer's doing, not the panel's: `panel.py` neither
+imports that file nor reads a sing-box config, and the link never reaches the
+panel or any page it serves.
+
+The tool owns exactly two things in an existing config: outbounds whose tag
+starts with `sub-`, and the member list of the `proxy` group. Everything else —
+`route`, `dns`, `inbounds`, `experimental`, and any outbound you wrote yourself —
+is copied through unchanged, which is the only reason a config tuned by hand over
+months can survive a subscription refresh. Hand-written outbounds are dropped
+from the group but never deleted from the file: a route rule may still name one,
+and sing-box would refuse to start if it disappeared.
+
+The prefix is the whole basis of that ownership. Rename a `sub-` outbound and the
+next refresh will treat it as yours and leave it alone; that is the supported way
+to keep a node the subscription has stopped listing.
+
+### xhttp is not implemented
+
+```
+FATAL decode config: outbounds[1].transport: unknown transport type: xhttp
+```
+
+xhttp is Xray's transport and sing-box does not have it — not in 1.13, and not in
+the 1.14 betas either: `constant/v2ray.go` lists five transports (`http`, `ws`,
+`quic`, `grpc`, `httpupgrade`) and nothing else, and the two pull requests that
+added XHTTP were both closed without being merged. Upgrading sing-box is
+therefore not the way to get those nodes. Subscriptions that
+offer it usually offer the same servers over Reality or Shadowsocks as well, so
+the tool reports each skipped node by protocol and host and converts the rest. It
+never writes a node this sing-box would refuse to load — a config that will not
+parse is a gateway that does not come up.
+
+### What a 1.13 refuses to start on
+
+Each of these was found by running `sing-box check` against a generated config,
+one FATAL at a time, and each is asserted in `singbox_sub.py --selftest` so the
+template cannot quietly regress to the older shape:
+
+- The pre-1.12 DNS format (`{"address": "https://1.1.1.1/dns-query"}`) —
+  *legacy DNS servers is deprecated ... set ENABLE_DEPRECATED_LEGACY_DNS_SERVERS*.
+  The shape that works is `{"type": "https", "server": "1.1.1.1"}`.
+- No `route.default_domain_resolver` — *missing `route.default_domain_resolver`
+  or `domain_resolver` in dial fields*. It names the server that resolves an
+  outbound's domain when a connection is dialled.
+- `sniff` as an inbound field. Since 1.12 it is a route action, and it is the
+  first rule: `{"action": "sniff", "timeout": "300ms"}`. The timeout is not
+  decoration — see "A connection that opens quietly loses its domain" above.
+
+A generated fresh config is otherwise the shape at the top of this page: `tun`
+with `auto_route`, `auto_redirect` and `strict_route`, DNS hijacked into the
+tunnel, `ip_is_private` sent out `direct`, and `direct` bound to the interface
+the installer was given — the `bind_interface` whose absence loops UDP against
+the tun.
 
 ## Where gateway-acl fits
 

@@ -32,12 +32,16 @@ import html
 import ipaddress
 import json
 import os
+import re
 import secrets
 import signal
+import shutil
 import socket
 import struct
 import subprocess
 import sys
+import tarfile
+import tempfile
 import threading
 import time
 import urllib.request
@@ -53,7 +57,11 @@ from urllib.parse import urlparse, parse_qs
 VERSION = "1.3.5"
 RELEASES_URL = "https://api.github.com/repos/ChasoniCK/gateway-acl/releases/latest"
 RELEASES_PAGE = "https://github.com/ChasoniCK/gateway-acl/releases/latest"
+# The one address the update button may ever download from. The repository is
+# part of the constant on purpose: only the tag comes off the network.
+TARBALL = "https://codeload.github.com/ChasoniCK/gateway-acl/tar.gz/refs/tags/"
 UPDATE_EVERY = 86400
+TAR_MAX = 20 << 20
 
 ETC = os.environ.get("GWACL_DIR", "/etc/gateway-acl")
 CONFIG = f"{ETC}/config.json"
@@ -61,6 +69,7 @@ DEVICES = f"{ETC}/devices.json"
 TRAFFIC = f"{ETC}/traffic.json"
 TODAY = f"{ETC}/today.json"
 SESSIONS = f"{ETC}/sessions.json"
+UPDATE_LOG = f"{ETC}/update.log"
 
 DEFAULTS = {"iface": "eno1", "lan": "192.168.1.0/24", "self_ip": "192.168.1.10",
             "port": 8080, "poll_sec": 60, "pw": None, "lang": "ru",
@@ -275,10 +284,18 @@ STRINGS = {
         "pwShort": "пароль короче 8 символов",
         "updateTitle": "Есть обновление",
         "updateNew": "Вышла версия {v}, установлена {{VERSION}}.",
-        "updateHint": "Обновить: <code>git pull</code> в каталоге с исходниками, "
-                      "затем <code>sudo ./install.sh</code>. Список устройств и "
-                      "статистика не тронутся. Проверку можно выключить "
+        "updateHint": "Кнопка скачивает релиз с GitHub и запускает тот же "
+                      "<code>install.sh</code>, отвечая за вас теми значениями, "
+                      "что уже настроены. Список устройств и статистика не "
+                      "тронутся. Руками: <code>git pull</code> и "
+                      "<code>sudo ./install.sh</code>. Проверку можно выключить "
                       "в настройках.",
+        "updateNow": "Установить сейчас",
+        "updateConfirm": "Скачать {v} и установить? Панель перезапустится сама.",
+        "updating": "Обновление пошло. Панель перезапустится — обновите страницу "
+                    "через минуту-другую.",
+        "updateNone": "Обновления нет.",
+        "updateLog": "Как всё прошло: {{UPDLOG}}",
         "settingsTitle": "Настройки",
         "sLang": "язык панели",
         "sUpdate": "сообщать о новых версиях",
@@ -460,10 +477,18 @@ STRINGS = {
         "pwShort": "password shorter than 8 characters",
         "updateTitle": "Update available",
         "updateNew": "Version {v} is out, you have {{VERSION}}.",
-        "updateHint": "To upgrade: <code>git pull</code> in the source directory, then "
-                      "<code>sudo ./install.sh</code>. Your device list and statistics "
-                      "are left alone. The check can be turned off in the "
-                      "settings.",
+        "updateHint": "The button downloads the release from GitHub and runs the "
+                      "same <code>install.sh</code>, answering it with the "
+                      "settings you already have. Your device list and "
+                      "statistics are left alone. By hand: <code>git pull</code> "
+                      "then <code>sudo ./install.sh</code>. The check can be "
+                      "turned off in the settings.",
+        "updateNow": "Install now",
+        "updateConfirm": "Download {v} and install it? The panel restarts itself.",
+        "updating": "The update has started. The panel will restart — reload the "
+                    "page in a minute or two.",
+        "updateNone": "There is no update.",
+        "updateLog": "How it went: {{UPDLOG}}",
         "settingsTitle": "Settings",
         "sLang": "panel language",
         "sUpdate": "tell me about new versions",
@@ -1457,6 +1482,119 @@ def check_update():
         pass
 
 
+# --- installing an update ---------------------------------------------------
+
+# One at a time: a second click while the first download runs is not a second
+# install. Held for the whole of install_update(), released when the installer
+# has been handed off — by which point this process is about to be replaced.
+_updating = threading.Lock()
+
+
+def tar_url(tag):
+    """The address of a release tarball, or ValueError.
+
+    Everything but the tag is a constant, and the tag has to look like a version
+    and nothing else. This is the whole of what keeps GitHub's answer from
+    choosing what a root process downloads and runs: a path, a query or another
+    host arriving in `tag_name` must not survive this function.
+    """
+    if not re.fullmatch(r"v?[0-9]+(\.[0-9]+){0,3}", str(tag or "")):
+        raise ValueError(f"tag {tag!r} is not a version")
+    return TARBALL + tag
+
+
+def _safe_members(tf):
+    """The regular files of an archive, with nothing that writes outside it.
+
+    Not tarfile's `filter=`: that arrived in 3.12 and the gateway runs whatever
+    python it has. Absolute paths, paths climbing out with `..`, symlinks and
+    devices are dropped rather than repaired — a release tarball has no business
+    containing any of them.
+    """
+    for m in tf.getmembers():
+        if not m.isfile():
+            continue
+        name = os.path.normpath(m.name)
+        if os.path.isabs(name) or name.startswith(".."):
+            continue
+        yield m
+
+
+def fetch_release(tag, dest):
+    """Download and unpack a release into `dest`, returning its directory."""
+    req = urllib.request.Request(tar_url(tag), headers={
+        "User-Agent": f"gateway-acl/{VERSION}"})
+    with urllib.request.urlopen(req, timeout=60) as r:
+        # urllib follows redirects on its own; the answer must still come from
+        # the host asked for, or the constant above guarantees nothing.
+        if urlparse(r.url).hostname != urlparse(TARBALL).hostname:
+            raise ValueError(f"redirected to {urlparse(r.url).hostname}")
+        data = r.read(TAR_MAX + 1)
+    if len(data) > TAR_MAX:
+        raise ValueError("the tarball is larger than a release has any right to be")
+    path = os.path.join(dest, "release.tar.gz")
+    with open(path, "wb") as f:
+        f.write(data)
+    with tarfile.open(path) as tf:
+        tf.extractall(dest, list(_safe_members(tf)))
+    os.remove(path)
+    roots = [d for d in os.listdir(dest) if os.path.isdir(os.path.join(dest, d))]
+    if len(roots) != 1:
+        raise ValueError(f"expected one directory in the archive, got {len(roots)}")
+    return os.path.join(dest, roots[0])
+
+
+def install_update(tag):
+    """Fetch the announced release and hand it to install.sh.
+
+    Two checks stand between the download and root running it: the code has to
+    say it is the version that was announced, and its own selftest has to pass.
+    Neither is a signature — what they buy is that a truncated or mislabelled
+    tarball is refused before anything on the host is replaced.
+
+    The installer is started detached and outlives this process on purpose: its
+    last steps restart the service, which kills the panel that asked for it.
+    Progress and failure go to UPDATE_LOG, because after the restart there is
+    nobody left to tell.
+    """
+    if not _updating.acquire(blocking=False):
+        return
+    tmp = tempfile.mkdtemp(prefix="gwacl-update-")
+    try:
+        with open(UPDATE_LOG, "a") as log:
+            log.write(f"\n=== {time.strftime('%Y-%m-%d %H:%M:%S')} "
+                      f"{VERSION} -> {tag}\n")
+            log.flush()
+            try:
+                src = fetch_release(tag, tmp)
+                said = subprocess.run(
+                    [sys.executable, os.path.join(src, "panel.py"), "--version"],
+                    capture_output=True, text=True, timeout=30).stdout.strip()
+                if _ver(said) != _ver(tag):
+                    raise ValueError(f"the archive is {said!r}, the tag is {tag!r}")
+                subprocess.run(
+                    [sys.executable, os.path.join(src, "panel.py"), "--selftest"],
+                    check=True, stdout=log, stderr=log, timeout=300)
+                log.write("selftest ok, running install.sh\n")
+                log.flush()
+                # Not removed on success: the installer is still reading it.
+                # /tmp, so a reboot clears what a failed run left behind.
+                subprocess.Popen(
+                    ["bash", os.path.join(src, "install.sh"), "--yes",
+                     "--lang", LANG],
+                    cwd=src, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                    start_new_session=True)
+                tmp = None
+            except Exception as e:
+                log.write(f"не установлено / not installed: {e}\n")
+    except OSError:
+        pass                                  # a log that cannot be written is
+    finally:                                  # not a reason to keep the lock
+        if tmp:
+            shutil.rmtree(tmp, ignore_errors=True)
+        _updating.release()
+
+
 # --- the machine itself -----------------------------------------------------
 
 LEASES = ("/var/lib/misc/dnsmasq.leases", "/var/lib/dnsmasq/dnsmasq.leases")
@@ -2047,6 +2185,7 @@ def render(tpl, t=None):
                .replace("{{ICON}}", ICON)
                .replace("{{ICONPNG}}", ICON_PNG)
                .replace("{{RELEASES}}", RELEASES_PAGE)
+               .replace("{{UPDLOG}}", UPDATE_LOG)
                # The settings form is filled in from the running config.
                .replace("{{IFACE}}", html.escape(IFACE, quote=True))
                .replace("{{LANCIDR}}", str(LAN))
@@ -2301,7 +2440,9 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
       network, the link must not. -->
  <p style="margin:.35rem 0 0"><a href="{{RELEASES}}" target=_blank
     rel="noopener noreferrer">{{t.updateWhat}}</a></p>
+ <div class=act><button onclick=doUpdate()>{{t.updateNow}}</button></div>
  <p class=hint>{{t.updateHint}}</p>
+ <p class=hint>{{t.updateLog}}</p>
 </div>
 
 <div class=row>
@@ -2766,6 +2907,11 @@ const saveCfg = () => fetch('/settings', {method:'POST', body: JSON.stringify({
 // machine goes down, and the page is expected to sit there stale until it is back.
 const rebootHost = () => confirm(T.confirmReboot)
   && fetch('/reboot', {method:'POST'}).then(r => r.text().then(alert));
+
+// The tag goes into the question through replace, not into any address: what
+// gets downloaded is decided on the gateway, off a constant.
+const doUpdate = () => confirm(T.updateConfirm.replace('{v}', S && S.update || ''))
+  && fetch('/update', {method:'POST'}).then(r => r.text().then(alert));
 // Only the chart depends on the pixel width. Redrawing the table here would
 // take the cursor out of a name someone is in the middle of typing.
 onresize = () => { if (S) chartbox.innerHTML = chart(rows(), mode === 'day'); };
@@ -2884,6 +3030,21 @@ class H(BaseHTTPRequestHandler):
         if self.path == "/reboot":
             self._send(200, T["rebooting"], "text/plain")
             reboot_host()
+            return
+        if self.path == "/update":
+            # Only the tag the poller itself read from GitHub, and only while it
+            # is still newer than what is running: the browser sends nothing
+            # here, so there is nothing in the request to disagree with.
+            tag = _upd["new"]
+            try:
+                tar_url(tag)
+            except ValueError:
+                tag = None
+            if not tag:
+                self._send(409, T["updateNone"], "text/plain")
+                return
+            self._send(200, T["updating"], "text/plain")
+            threading.Timer(0.7, install_update, (tag,)).start()
             return
         if self.path == "/bypass":
             self._bypass(raw)
@@ -3524,6 +3685,37 @@ def selftest():
     assert newer("nightly", "1.0.0") is None, "an odd tag is silence, not a banner"
     assert newer("v1.0.3", "1.0.2") == "v1.0.3", "a patch release is an update"
     assert newer("v1.0.3", "1.1.0") is None, "a minor release outranks a patch"
+
+    # What the update button is allowed to fetch. The tag is the only part of
+    # the address that does not come from a constant, so it is the only part
+    # that has to be refused — this runs as root and unpacks what it gets.
+    assert tar_url("v1.4.0") == TARBALL + "v1.4.0"
+    for bad in ("", None, "nightly", "1.4.0 ; reboot", "../../etc/passwd",
+                "https://evil.example/x", "1.4.0?x=1", "1.4.0/..", "v1.4.0\n"):
+        try:
+            tar_url(bad)
+            raise AssertionError(f"{bad!r} must not become an address")
+        except ValueError:
+            pass
+
+    # And what it is allowed to write out of the archive it fetched.
+    with tempfile.TemporaryDirectory() as td:
+        plain = os.path.join(td, "plain")
+        with open(plain, "w") as f:
+            f.write("x")
+        arc = os.path.join(td, "t.tar")
+        with tarfile.open(arc, "w") as tf:
+            for name in ("rel/panel.py", "../escape.py", "/abs.py"):
+                info = tarfile.TarInfo(name)
+                info.size = 1
+                with open(plain, "rb") as f:
+                    tf.addfile(info, f)
+            link = tarfile.TarInfo("rel/passwd")
+            link.type, link.linkname = tarfile.SYMTYPE, "/etc/passwd"
+            tf.addfile(link)
+        with tarfile.open(arc) as tf:
+            kept = [m.name for m in _safe_members(tf)]
+        assert kept == ["rel/panel.py"], f"only the archive's own files: {kept}"
     assert _ver(VERSION), f"VERSION {VERSION!r} does not compare against a tag"
 
     # The scheduled reboot. `up` is what keeps a machine that has just rebooted

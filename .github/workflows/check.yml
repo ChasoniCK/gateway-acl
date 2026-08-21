@@ -8,6 +8,8 @@ jobs:
       - uses: actions/checkout@v5
       - name: panel.py --selftest
         run: python3 panel.py --selftest
+      - name: singbox_sub.py --selftest
+        run: python3 singbox_sub.py --selftest
       - name: install.sh syntax
         run: bash -n install.sh
       - name: shellcheck
