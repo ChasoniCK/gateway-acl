@@ -15,12 +15,14 @@ subscription refresh.
 
     python3 singbox_sub.py --url URL --base /etc/sing-box/config.json > new.json
     python3 singbox_sub.py --url URL --iface eno1 > new.json   # a fresh install
+    python3 singbox_sub.py --url URL --exclude 'Росс|Russia' > new.json
     python3 singbox_sub.py --selftest
 """
 
 import argparse
 import base64
 import json
+import re
 import sys
 import urllib.request
 from urllib.parse import parse_qsl, unquote, urlsplit
@@ -140,6 +142,12 @@ def outbound(link, tag):
     raise Unsupported(f"protocol {p.scheme}")
 
 
+def node_name(link):
+    """What the provider called the node — the flag and country in practice."""
+    p = urlsplit(link)
+    return " ".join((unquote(p.fragment).strip() or p.hostname or "node").split())
+
+
 def tag_for(link, taken):
     """`sub-` plus the name the provider gave the node, made unique.
 
@@ -147,8 +155,7 @@ def tag_for(link, taken):
     knows which outbounds are its own to delete. The name is kept because it is
     what shows up in the journal when a node misbehaves.
     """
-    name = unquote(urlsplit(link).fragment).strip() or urlsplit(link).hostname or "node"
-    name = " ".join(name.split())
+    name = node_name(link)
     tag = OWNED + name
     n = 2
     while tag in taken:
@@ -157,10 +164,27 @@ def tag_for(link, taken):
     return tag
 
 
-def convert(body, warn=lambda s: None):
-    """Every usable node of a subscription, in the order the provider listed."""
+def convert(body, warn=lambda s: None, exclude=None):
+    """Every usable node of a subscription, in the order the provider listed.
+
+    `exclude` is a regular expression matched against the provider's name for
+    the node, and it exists because the group is a `urltest`: it picks by
+    latency, so a domestic node is always the fastest and therefore always the
+    one chosen — the tunnel then exits in the country it was meant to leave.
+    Nothing here can tell where a node is; only its name can, and only the
+    person reading it knows what the names mean.
+    """
+    try:
+        rx = re.compile(exclude, re.I) if exclude else None
+    except re.error as e:  # the caller typed it; a traceback is not an answer
+        raise SystemExit(f"--exclude: неверное регулярное выражение / "
+                         f"bad regular expression: {e}")
     outs, taken = [], set()
     for link in links(body):
+        name = node_name(link)
+        if rx and rx.search(name):
+            warn(f"{name}: исключён / excluded")
+            continue
         try:
             outs.append(outbound(link, tag_for(link, taken)))
         except Unsupported as e:
@@ -252,8 +276,8 @@ def fresh(outs, iface, group=GROUP):
     }
 
 
-def build(body, base=None, iface=None, warn=lambda s: None):
-    outs = convert(body, warn)
+def build(body, base=None, iface=None, warn=lambda s: None, exclude=None):
+    outs = convert(body, warn, exclude)
     if not outs:
         raise SystemExit("подписка не дала ни одного пригодного узла / "
                          "the subscription yielded no usable node")
@@ -306,6 +330,17 @@ def selftest():
         "base64 or not is the same list"
     assert len(convert(plain)) == 2
 
+    # A urltest group picks by latency, so a node at home always wins and the
+    # tunnel exits where it was meant to leave. Excluded means absent from the
+    # file, not merely out of the group: an outbound nothing points at is a node
+    # nothing can fall back onto by accident.
+    said = []
+    kept = convert(plain, said.append, "Rossiya")
+    assert [o["tag"] for o in kept] == ["sub-fi"], kept
+    assert said and "Rossiya" in said[0], "an excluded node is announced too"
+    assert len(convert(plain, exclude="россия")) == 2, "no match excludes nothing"
+    assert convert(plain, exclude="i") == [], "the regex may take everything"
+
     # The whole point of merge(): everything that is not ours comes out identical.
     base = {"dns": {"servers": [{"address": "1.1.1.1"}]},
             "inbounds": [{"type": "tun", "tag": "tun-in"}],
@@ -356,6 +391,8 @@ def main():
     ap.add_argument("--url")
     ap.add_argument("--base", help="existing config to keep; omit for a fresh one")
     ap.add_argument("--iface", default="eth0", help="what direct binds to when fresh")
+    ap.add_argument("--exclude", help="regex; nodes whose provider name matches "
+                                      "are left out of the config entirely")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
     if a.selftest:
@@ -368,7 +405,7 @@ def main():
         with open(a.base) as f:
             base = json.load(f)
     warned = []
-    cfg, outs = build(fetch(a.url), base, a.iface, warned.append)
+    cfg, outs = build(fetch(a.url), base, a.iface, warned.append, a.exclude)
     for w in warned:
         print(f"  пропущен / skipped: {w}", file=sys.stderr)
     print(f"  узлов / nodes: {len(outs)}", file=sys.stderr)

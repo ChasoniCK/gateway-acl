@@ -253,6 +253,60 @@ The prefix is the whole basis of that ownership. Rename a `sub-` outbound and th
 next refresh will treat it as yours and leave it alone; that is the supported way
 to keep a node the subscription has stopped listing.
 
+### A urltest group always picks the node nearest home
+
+The group is a `urltest`: it fetches `generate_204` through every member and
+keeps the quickest. That is the right rule for choosing between two foreign
+nodes and exactly the wrong one the moment the subscription contains a node in
+your own country — it is nearest, so it wins every election, and the tunnel
+exits where it started. The journal names the winner on every connection, which
+is the fastest way to see it:
+
+```
+outbound/vless[sub-RU node]: outbound connection to 160.79.104.10:443
+```
+
+Nothing in the config can tell where a node is; only the name the provider gave
+it can. So the installer asks for a regular expression, keeps it in
+`/etc/gateway-acl/sub.exclude`, and `singbox_sub.py --exclude` leaves the
+matching nodes out of the file altogether — not merely out of the group, since
+an outbound nothing points at is one a hand-written rule can still fall onto.
+
+Two symptoms of a domestic exit, both easy to misread as something else: sites
+report the home country while the tunnel is plainly up, and everything blocked
+from there stays blocked. A site being *slow* is a node problem; a site being
+*geographically wrong* is this.
+
+The expression is worth reading the node list for first. A provider names a node
+by where it is **entered**, not by where it leaves: `Россия (Reality)` exits in
+Russia, while `Россия через Финляндию` enters in Russia and exits in Finland.
+The second kind exists precisely because the direct foreign addresses are what
+the ISP blocks, so it is frequently the only kind that connects at all — an
+expression matching plain `Росс` takes both and leaves a group whose every
+member times out:
+
+```
+ERROR outbound/urltest[proxy]: dial tcp 144.31.232.142:443: i/o timeout
+```
+
+That line is the tell, and it is one sing-box only ever writes about its own
+dial to a node's server — the tunnel reaching outwards, not a client reaching
+through it.
+
+Testing this from the gateway is harder than it looks: `auto_route` catches the
+host's own traffic too, so `curl` to a node's address is answered by the tunnel
+in a fraction of a millisecond and proves nothing about the wire. `--interface`
+does not save you either — `auto_redirect`'s nft rules run before the routing
+decision. The journal is the only honest witness.
+
+Do not use a public IP-echo to check where you come out, either: in a config
+with split routing it is very likely to be a `direct` destination, and it then
+reports the home address no matter how well the tunnel works.
+
+```
+INFO outbound/direct[direct]: outbound connection to 34.117.59.81:443   ← ipinfo.io, not proxied
+```
+
 ### xhttp is not implemented
 
 ```

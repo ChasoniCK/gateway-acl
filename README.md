@@ -132,6 +132,20 @@ Give it a subscription link and it sets up the tunnel as well. The link is kept
 in `/etc/gateway-acl/sub.url` (mode 0600) and offered back on the next run, so an
 upgrade is one Enter. Leave the answer empty and sing-box is not touched at all.
 
+The second question is which nodes to leave out, as a regular expression matched
+against the names the provider gave them, kept in `/etc/gateway-acl/sub.exclude`.
+It matters more than it looks: the `proxy` group is a `urltest`, it picks by
+latency, and a node in your own country is always the fastest — so a
+subscription that includes one sends every device out at home, which is the one
+thing the tunnel existed to avoid. A single `-` clears the filter.
+
+Read the names before writing the expression. A provider's name says where the
+node is *entered*, not where it leaves: `Россия (Reality)` comes out in Russia
+and `Россия через Финляндию` goes in there and out in Finland — and the second
+kind is often the only kind that works, because the direct foreign addresses are
+what the ISP blocks. `Россия \(` excludes the first and keeps the second; `Росс`
+excludes both and can leave you with nothing that connects.
+
 What it writes is deliberately narrow: outbounds tagged `sub-*` and the member
 list of the `proxy` group. Routing rules, DNS, inbounds and any outbound you
 wrote by hand survive a refresh unchanged, and the config it replaces is kept
