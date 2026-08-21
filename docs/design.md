@@ -493,6 +493,16 @@ settings form resets that timer: it is the one moment the user is demonstrably
 asking about updates, and it gives them a way to force a check without
 restarting the service.
 
+The button beside it (`POST /check`) is the same thing said out loud:
+`check_update(force=True)` ignores both the day gate and the `update_check`
+switch, and returns True, False or None so the answer can be a sentence — a
+release, no release, or GitHub not answering — where the poller wants silence.
+What it does not ignore is GitHub's own counter: sixty unauthenticated requests
+an hour from an address, and a panel that spends them on a held-down button has
+also broken its daily check. `MANUAL_EVERY` puts a minute between two of them,
+and a click inside that minute is answered with the same sentence the form
+explains the limit with, rather than with another request.
+
 ## Testing a ruleset without risking the host
 
 `nft -c -f file` checks a ruleset, but still needs `CAP_NET_ADMIN` and will not

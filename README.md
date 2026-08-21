@@ -77,7 +77,10 @@ device ──► this Linux host ──► uplink or tunnel (sing-box / WireGuar
 - **Update notice, and the button under it.** Once a day the panel asks GitHub
   for the latest release tag and shows a banner if yours is older. *Install now*
   fetches that release and runs the installer with the answers you already gave,
-  so an upgrade needs no terminal. Off with one checkbox.
+  so an upgrade needs no terminal. Off with one checkbox. *Check for an update*
+  next to it asks right now, even with the notice switched off — sparingly,
+  though: GitHub allows sixty unauthenticated requests an hour from one address,
+  and the panel refuses a second check within a minute for that reason.
 - **Settings in the corner.** Language, update notice, poll interval, LAN
   interface, network, gateway address, port and the password — all of
   `config.json` behind one form, validated before it is written. Next to the
@@ -191,12 +194,15 @@ panel password buys: whoever knows it can make the gateway install a release. Th
 reboot button has always been the same kind of power, but say it plainly rather
 than discover it.
 
-**The panel reaches out exactly once a day** — a GET to
+**The panel reaches out once a day, and whenever you press the button** — a GET to
 `api.github.com/repos/ChasoniCK/gateway-acl/releases/latest` for the latest
 release tag. Nothing about you is sent, but the request itself is visible to
 GitHub: your address and the time. The check is on by default; the switch is
-under **Settings** in the corner of the panel, and takes effect at once. On a gateway
-with no internet the request simply fails and the panel stays quiet.
+under **Settings** in the corner of the panel, and takes effect at once. Beside
+it, *check for an update* makes that same request on demand — the only outbound
+traffic the panel ever has, so it happens no more often than you press it. On a
+gateway with no internet the request simply fails: the daily check stays quiet,
+the button says so.
 
 ## Settings
 

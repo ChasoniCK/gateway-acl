@@ -15,8 +15,9 @@ Whoever knocks without being allowed is recorded by the kernel itself into the
 dynamic `blocked` set with a timeout — that is the unknown-devices list.
 
 The only request this program ever makes to the internet is a check of the
-latest release tag on GitHub — once a day, and once more whenever the settings
-are saved. `"update_check": false` turns it off.
+latest release tag on GitHub — once a day, once more whenever the settings are
+saved, and whenever the check button is pressed. `"update_check": false` turns
+the daily one off; the button asks anyway, but no oftener than once a minute.
 
 Run as root: nft is required.
   --selftest        checks, never touches the network
@@ -25,10 +26,12 @@ Run as root: nft is required.
   --version         print the version and exit
 """
 import base64
+import contextlib
 import getpass
 import hashlib
 import hmac
 import html
+import io
 import ipaddress
 import json
 import os
@@ -61,6 +64,10 @@ RELEASES_PAGE = "https://github.com/ChasoniCK/gateway-acl/releases/latest"
 # part of the constant on purpose: only the tag comes off the network.
 TARBALL = "https://codeload.github.com/ChasoniCK/gateway-acl/tar.gz/refs/tags/"
 UPDATE_EVERY = 86400
+# The floor between two hand-made checks. GitHub allows sixty unauthenticated
+# requests an hour from an address, and spending them on a button held down is
+# how the daily check starts failing too.
+MANUAL_EVERY = 60
 TAR_MAX = 20 << 20
 
 ETC = os.environ.get("GWACL_DIR", "/etc/gateway-acl")
@@ -73,7 +80,7 @@ UPDATE_LOG = f"{ETC}/update.log"
 
 DEFAULTS = {"iface": "eno1", "lan": "192.168.1.0/24", "self_ip": "192.168.1.10",
             "port": 8080, "poll_sec": 60, "pw": None, "lang": "ru",
-            "update_check": True, "keep_months": 3,
+            "update_check": True, "update_notify": True, "keep_months": 3,
             "reboot": False, "reboot_at": "05:30",
             # Not a setting and not on the form: the moment the gateway stops
             # letting everyone through again. It lives in the config because it
@@ -130,7 +137,8 @@ _statelock = threading.Lock()
 _state = {"at": 0.0, "month": None, "val": None}   # the last answer /api gave
 _sessions = {}          # digest of the token -> when it expires
 _fails = {}             # address -> (misses, blocked until)
-_upd = {"at": 0, "new": None}   # last check, and the tag worth showing
+_upd = {"at": 0, "new": None, "manual": 0}  # last check, the tag worth showing,
+                                            # and when a hand last asked
 
 
 def conf():
@@ -295,10 +303,25 @@ STRINGS = {
         "updating": "Обновление пошло. Панель перезапустится — обновите страницу "
                     "через минуту-другую.",
         "updateNone": "Обновления нет.",
+        "updateFound": "Вышла версия {v}.",
+        "updateFail": "GitHub не ответил. Проверьте связь и попробуйте позже.",
         "updateLog": "Как всё прошло: {{UPDLOG}}",
         "settingsTitle": "Настройки",
         "sLang": "язык панели",
         "sUpdate": "сообщать о новых версиях",
+        "sNotify": "уведомлять о них в браузере",
+        "sNotifyHint": "Пока вкладка открыта, о новой версии скажет уведомление "
+                       "браузера — если он их разрешил и страница открыта по "
+                       "https или с localhost; по http на адрес в сети браузер "
+                       "уведомления не даёт вовсе. Там, где не даёт, точка "
+                       "появится в заголовке вкладки. Про версию говорится один "
+                       "раз, а не при каждом опросе.",
+        "notifyBody": "Вышла версия {v}. Откройте панель, чтобы поставить.",
+        "sCheck": "проверить обновление",
+        "sCheckHint": "Панель и так спрашивает GitHub раз в сутки. Вручную — "
+                      "не чаще раза в минуту и всё равно редко: GitHub считает "
+                      "запросы с адреса (60 в час), и если их выбрать, "
+                      "перестанет отвечать и суточной проверке.",
         "sPoll": "опрос счётчиков, с",
         "sKeep": "хранить по дням, мес.",
         "sKeepWhat": "Сколько месяцев держать разбивку по дням. Что старше — "
@@ -488,10 +511,25 @@ STRINGS = {
         "updating": "The update has started. The panel will restart — reload the "
                     "page in a minute or two.",
         "updateNone": "There is no update.",
+        "updateFound": "Version {v} is out.",
+        "updateFail": "GitHub did not answer. Check the link and try later.",
         "updateLog": "How it went: {{UPDLOG}}",
         "settingsTitle": "Settings",
         "sLang": "panel language",
         "sUpdate": "tell me about new versions",
+        "sNotify": "and pop up a browser notification",
+        "sNotifyHint": "While a tab is open, a new version arrives as a browser "
+                       "notification — if the browser allows them and the page "
+                       "came over https or from localhost; over plain http on a "
+                       "network address the browser withholds notifications "
+                       "entirely. Where it does, a dot appears in the tab title "
+                       "instead. A version is announced once, not on every poll.",
+        "notifyBody": "Version {v} is out. Open the panel to install it.",
+        "sCheck": "check for an update",
+        "sCheckHint": "The panel already asks GitHub once a day. By hand: once a "
+                      "minute at most, and sparingly even then — GitHub counts "
+                      "requests per address (60 an hour), and spending them "
+                      "stops the daily check from getting an answer too.",
         "sPoll": "counter poll, s",
         "sKeep": "keep day by day, months",
         "sKeepWhat": "How many months keep their day-by-day breakdown. Older "
@@ -605,6 +643,7 @@ def check_settings(body, base):
         raise ValueError(T["badLang"].replace("{lang}", lang))
     c["lang"] = lang
     c["update_check"] = bool(body.get("update_check", c["update_check"]))
+    c["update_notify"] = bool(body.get("update_notify", c["update_notify"]))
 
     try:
         poll_sec = int(body.get("poll_sec", c["poll_sec"]))
@@ -1458,8 +1497,14 @@ def newer(tag, cur=VERSION):
     return tag.strip() if new and old and new > old else None
 
 
-def check_update():
+def check_update(force=False):
     """Ask GitHub, at most once a day, whether a newer release is tagged.
+
+    `force` is the button: it asks regardless of the day gate and regardless of
+    "update_check", because somebody who clicked wants an answer now. It returns
+    True when GitHub answered, False when it did not and None when the check was
+    skipped — the button has to say which of the three happened, the poller
+    ignores all of it.
 
     Every failure is silence: a gateway that cannot reach the internet is a
     supported setup, not a fault to report on the panel. The timestamp is
@@ -1468,8 +1513,9 @@ def check_update():
     poller thread, and an answer of an unexpected shape must not take the
     traffic counters down with it.
     """
-    if not CFG.get("update_check", True) or time.time() - _upd["at"] < UPDATE_EVERY:
-        return
+    if not force and (not CFG.get("update_check", True)
+                      or time.time() - _upd["at"] < UPDATE_EVERY):
+        return None
     _upd["at"] = time.time()
     try:
         req = urllib.request.Request(RELEASES_URL, headers={
@@ -1478,8 +1524,9 @@ def check_update():
             "User-Agent": f"gateway-acl/{VERSION}"})
         with urllib.request.urlopen(req, timeout=10) as r:
             _upd["new"] = newer(json.loads(r.read(1 << 20)).get("tag_name") or "")
+        return True
     except Exception:
-        pass
+        return False
 
 
 # --- installing an update ---------------------------------------------------
@@ -2198,6 +2245,8 @@ def render(tpl, t=None):
                .replace("{{SEL_RU}}", " selected" if LANG == "ru" else "")
                .replace("{{SEL_EN}}", " selected" if LANG == "en" else "")
                .replace("{{UPD}}", " checked" if CFG["update_check"] else "")
+               .replace("{{NTF}}", " checked" if CFG["update_notify"] else "")
+               .replace("{{NTF_OFF}}", "" if CFG["update_check"] else " disabled")
                .replace("{{EXAMPLE}}",
                         str(LAN.network_address + min(56, LAN.num_addresses - 2))))
 
@@ -2422,11 +2471,19 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
     <label>{{t.sSelfIp}}<input id=s_self value="{{GW}}"></label>
     <label>{{t.sPw}}<input id=s_pw type=password autocomplete=new-password
       placeholder="{{t.sPwKeep}}"></label>
-    <label class=chk><input id=s_upd class=sw type=checkbox{{UPD}}>{{t.sUpdate}}</label>
+    <label class=chk><input id=s_upd class=sw type=checkbox{{UPD}}
+      onchange="s_ntf.disabled=!this.checked">{{t.sUpdate}}</label>
+    <!-- Nested under the check it depends on: there is nothing to announce
+         when nobody is asking GitHub. -->
+    <label class=chk><input id=s_ntf class=sw type=checkbox{{NTF}}{{NTF_OFF}}
+      onchange=askNotify()>{{t.sNotify}}</label>
    </div>
    <div class=act><span class=ver>gateway-acl {{VERSION}}</span>
+    <button id=s_check onclick=checkUpd()>{{t.sCheck}}</button>
     <button id=s_reboot onclick=rebootHost()>{{t.sReboot}}</button>
     <button onclick=saveCfg()>{{t.sSave}}</button></div>
+   <p class=hint>{{t.sCheckHint}}</p>
+   <p class=hint>{{t.sNotifyHint}}</p>
    <p class=hint>{{t.sNetHint}}</p>
   </div>
  </details>
@@ -2847,7 +2904,8 @@ const draw = () => {
 
   upd.hidden = !S.update;
   // textContent, not innerHTML: the tag comes off the network.
-  if (S.update) updtext.textContent = T.updateNew.replace('{v}', S.update);
+  if (S.update) { updtext.textContent = T.updateNew.replace('{v}', S.update);
+                  announce(S.update); }
   // A listed address that answers as somebody else — the rule is now written
   // for whoever took it.
   clash.hidden = !S.clash.length;
@@ -2896,7 +2954,8 @@ f.onsubmit = e => { e.preventDefault();
 // The answer is the new address when the port changed, and empty otherwise:
 // everything else is already live, the reload is only to redraw the labels.
 const saveCfg = () => fetch('/settings', {method:'POST', body: JSON.stringify({
-    lang: s_lang.value, update_check: s_upd.checked, poll_sec: +s_poll.value,
+    lang: s_lang.value, update_check: s_upd.checked,
+    update_notify: s_ntf.checked, poll_sec: +s_poll.value,
     keep_months: +s_keep.value, reboot: s_rb.checked, reboot_at: s_reboot_at.value,
     port: +s_port.value, iface: s_iface.value,
     lan: s_lan.value, self_ip: s_self.value, pw: s_pw.value})})
@@ -2907,6 +2966,35 @@ const saveCfg = () => fetch('/settings', {method:'POST', body: JSON.stringify({
 // machine goes down, and the page is expected to sit there stale until it is back.
 const rebootHost = () => confirm(T.confirmReboot)
   && fetch('/reboot', {method:'POST'}).then(r => r.text().then(alert));
+
+// A new version is worth one interruption, not one per poll: a panel tab sits
+// open for days. The version told about is kept in localStorage and not in a
+// variable, or a reload would announce the same release over again.
+const TITLE = document.title;
+const announce = v => {
+  if (!s_ntf.checked || localStorage.getItem('gwacl_told') === v) return;
+  localStorage.setItem('gwacl_told', v);
+  // Notification exists in a secure context only: over plain http on a network
+  // address the browser withholds it entirely, and the tab title is then the
+  // one thing left that reaches somebody looking at another tab.
+  if (window.Notification && Notification.permission === 'granted')
+    new Notification(T.updateTitle, {body: T.notifyBody.replace('{v}', v)});
+  document.title = '\u2022 ' + TITLE;
+};
+onfocus = () => { document.title = TITLE; };
+// The permission may only be asked for out of a gesture, so the switch is where
+// it is asked. A refusal is the browser's to keep: the switch stays on, and the
+// dot in the title is what is left.
+const askNotify = () => { if (s_ntf.checked && window.Notification
+    && Notification.permission === 'default') Notification.requestPermission(); };
+
+// Asks the gateway to ask GitHub now. The answer is a sentence either way, so
+// it is shown as it arrives; a found release still has to reach the page through
+// the ordinary state, hence the reload of it rather than a line written here.
+const checkUpd = () => { s_check.disabled = true;
+  fetch('/check', {method:'POST'})
+    .then(r => r.text().then(x => { alert(x); if (r.ok) load(); }))
+    .finally(() => { s_check.disabled = false; }); };
 
 // The tag goes into the question through replace, not into any address: what
 // gets downloaded is decided on the gateway, off a constant.
@@ -3030,6 +3118,23 @@ class H(BaseHTTPRequestHandler):
         if self.path == "/reboot":
             self._send(200, T["rebooting"], "text/plain")
             reboot_host()
+            return
+        if self.path == "/check":
+            # A hand asking now, so the day gate and the "tell me" switch are
+            # both out of the way — but not GitHub's own counter, which is why
+            # a second click within the minute is answered by the same sentence
+            # the form explains it with instead of another request.
+            if time.time() - _upd["manual"] < MANUAL_EVERY:
+                self._send(429, T["sCheckHint"], "text/plain")
+                return
+            _upd["manual"] = time.time()
+            if not check_update(force=True):
+                self._send(502, T["updateFail"], "text/plain")
+            elif _upd["new"]:
+                self._send(200, T["updateFound"].replace("{v}", _upd["new"]),
+                           "text/plain")
+            else:
+                self._send(200, T["updateNone"], "text/plain")
             return
         if self.path == "/update":
             # Only the tag the poller itself read from GitHub, and only while it
@@ -3570,11 +3675,19 @@ def selftest():
             "both halves have to come back as one history"
 
         # A file damaged by a version that wrote it without a rename costs its
-        # own contents and nothing more: the panel still starts.
+        # own contents and nothing more: the panel still starts. Its complaint
+        # is caught rather than printed: this is a selftest deliberately feeding
+        # itself half a file, and the line scrolling past an installer's output
+        # reads as a fault of the install. Caught, not silenced — that the
+        # damage is reported at all is the other half of what is being tested.
         open(TRAFFIC, "w").write('{"days": {"2026-01-0')
-        reboot()
-        assert history()["days"][today] == {"10.0.0.5": [1600, 900]}, \
-            "half a cold file must not take the day in progress with it"
+        said = io.StringIO()
+        with contextlib.redirect_stderr(said):
+            reboot()
+            assert history()["days"][today] == {"10.0.0.5": [1600, 900]}, \
+                "half a cold file must not take the day in progress with it"
+        assert TRAFFIC in said.getvalue(), \
+            "a file that could not be read has to say so, once, on stderr"
 
         reboot()
         TRAFFIC, TODAY, nft_table, load = keep_io
@@ -3746,6 +3859,10 @@ def selftest():
     assert check_settings(dict(form, reboot=False), base)["reboot_at"] == "05:30", \
         "turning the reboot off must keep the hour it was set to"
     assert c["update_check"] is False and c["lan"] == "10.7.0.0/24"
+    assert c["update_notify"] is base["update_notify"], \
+        "a field the form did not send keeps the value it had"
+    assert check_settings(dict(form, update_notify=False), base)["update_notify"] \
+        is False
     assert c["pw"] == base["pw"], "a settings save must not drop the password"
     assert check_settings({}, base) == base, "an empty form changes nothing"
     with socket.socket() as busy:
@@ -3774,7 +3891,7 @@ def selftest():
                "bday", "bhour", "chartbox", "cumlbl", "mstrip", "sysbox", "tb",
                "h_ip", "h_name", "h_traf", "h_now", "h_seen", "unk", "ub",
                "flt", "off", "kother", "kotherbox", "othlbl", "lanips", "s_keep",
-               "s_reboot", "s_reboot_at", "s_rb", "bypbox", "allsw", "clash",
+               "s_reboot", "s_reboot_at", "s_rb", "s_check", "bypbox", "allsw", "clash",
                "clashb"):
         assert f"id={el}>" in page or f"id={el} " in page, f"the page has no {el}"
 
