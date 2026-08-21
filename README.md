@@ -81,7 +81,14 @@ device ──► this Linux host ──► uplink or tunnel (sing-box / WireGuar
   next to it asks right now, even with the notice switched off — sparingly,
   though: GitHub allows sixty unauthenticated requests an hour from one address,
   and the panel refuses a second check within a minute for that reason.
-- **Settings in the corner.** Language, update notice, poll interval, LAN
+- **A browser notification when a release lands.** A second checkbox under the
+  first: while a panel tab is open, a new version arrives as a desktop
+  notification instead of waiting to be noticed. Browsers hand notifications
+  out in a secure context only, so over plain `http://` on a LAN address there
+  are none — there the tab title carries a dot instead. A version is announced
+  once, not on every poll.
+- **Settings in the corner.** Language, update notice and its notification,
+  poll interval, LAN
   interface, network, gateway address, port and the password — all of
   `config.json` behind one form, validated before it is written. Next to the
   save button, a reboot for the gateway itself — it asks first.
@@ -207,11 +214,11 @@ the button says so.
 ## Settings
 
 Everything in `config.json` is editable from the panel — language, the update
-notice, the poll interval, the LAN interface, the network, the gateway address,
-the panel port and the password. The form is validated as a whole before
-anything is written: a network with host bits set, a gateway address outside its
-own network, an interface that does not exist or a port already in use are
-refused, and nothing is saved.
+notice and its browser notification, the poll interval, the LAN interface, the
+network, the gateway address, the panel port and the password. The form is
+validated as a whole before anything is written: a network with host bits set, a
+gateway address outside its own network, an interface that does not exist or a
+port already in use are refused, and nothing is saved.
 
 Language, the update notice, the poll interval and the password apply
 immediately. A changed network rebuilds the nftables rules on the spot. Only a

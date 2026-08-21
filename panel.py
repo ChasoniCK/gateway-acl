@@ -18,6 +18,8 @@ The only request this program ever makes to the internet is a check of the
 latest release tag on GitHub — once a day, once more whenever the settings are
 saved, and whenever the check button is pressed. `"update_check": false` turns
 the daily one off; the button asks anyway, but no oftener than once a minute.
+`"update_notify"` decides whether the page that finds a release also raises a
+browser notification about it.
 
 Run as root: nft is required.
   --selftest        checks, never touches the network
@@ -2972,7 +2974,8 @@ const rebootHost = () => confirm(T.confirmReboot)
 // variable, or a reload would announce the same release over again.
 const TITLE = document.title;
 const announce = v => {
-  if (!s_ntf.checked || localStorage.getItem('gwacl_told') === v) return;
+  if (!s_ntf.checked || s_ntf.disabled
+      || localStorage.getItem('gwacl_told') === v) return;
   localStorage.setItem('gwacl_told', v);
   // Notification exists in a secure context only: over plain http on a network
   // address the browser withholds it entirely, and the tab title is then the
