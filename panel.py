@@ -210,6 +210,8 @@ STRINGS = {
         "colName": "имя",
         "colTraffic": "трафик",
         "colSeen": "активность",
+        "sortBy": "Сортировка",
+        "addDevice": "Добавить устройство",
         "phName": "название устройства",
         "add": "добавить",
         "hint": "На устройстве прописать вручную: шлюз <b>{{GW}}</b>, маска "
@@ -425,6 +427,8 @@ STRINGS = {
         "colName": "name",
         "colTraffic": "traffic",
         "colSeen": "activity",
+        "sortBy": "Sort",
+        "addDevice": "Add device",
         "phName": "name device",
         "add": "add",
         "hint": "Set manually on the device: gateway <b>{{GW}}</b>, netmask "
@@ -2421,6 +2425,10 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
     font-size:var(--f-sec);line-height:1.4;white-space:normal}
  .q:hover>span,.q:focus>span{display:block}
  #flt{max-width:9rem}
+ #addrow>summary{list-style:none;display:inline-block;margin-top:var(--s3)}
+ #addrow>summary::-webkit-details-marker{display:none}
+ #addrow form{display:flex;gap:var(--s2);flex-wrap:wrap;margin-top:var(--s2)}
+ #addrow form input{flex:1;min-width:8rem}
  .mini{font-size:.78rem;color:var(--dim);white-space:nowrap}
  /* Address, whatever the network knows it as, and the button. It wraps: on a
     phone the three of them do not fit on one line. */
@@ -2565,20 +2573,26 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  </div>
 </div>
 
-<div class=card>
- <div class=ch><h2>{{t.devicesTitle}}</h2><span class=sp></span>
-  <button id=allsw onclick=toggleAll() title="{{t.allWhat}}"></button>
-  <input id=flt placeholder="{{t.filter}}" aria-label="{{t.filter}}" oninput=draw()>
+<div class=panel>
+ <div class=chead><h2>{{t.devicesTitle}}</h2><span class=sp></span>
+  <input id=flt class=field placeholder="{{t.filter}}" aria-label="{{t.filter}}"
+    oninput=draw()>
+  <select id=srt class=field title="{{t.sortBy}}" onchange=setSort(this.value)></select>
+  <button class=btn id=srtd onclick=flipSort()></button>
+  <button class=btn id=allsw onclick=toggleAll() title="{{t.allWhat}}"></button>
  </div>
  <div class="list inset" id=tb></div>
- <form id=f style="margin-top:1rem">
-  <!-- The list is what ARP and the DHCP leases already know and this table
-       does not: a native datalist, so the browser does the completing. -->
-  <input name=ip placeholder="{{EXAMPLE}}" list=lanips required>
-  <datalist id=lanips></datalist>
-  <input name=nm placeholder="{{t.phName}}">
-  <button>{{t.add}}</button>
- </form>
+ <details id=addrow>
+  <summary class=btn>+ {{t.addDevice}}</summary>
+  <form id=f>
+   <!-- The list is what ARP and the DHCP leases already know and this table
+        does not: a native datalist, so the browser does the completing. -->
+   <input name=ip class=field placeholder="{{EXAMPLE}}" list=lanips required>
+   <datalist id=lanips></datalist>
+   <input name=nm class=field placeholder="{{t.phName}}">
+   <button class="btn tinted">{{t.add}}</button>
+  </form>
+ </details>
  <p class=hint>{{t.hint}}</p>
 </div>
 
@@ -2867,12 +2881,11 @@ document.addEventListener('keydown', e => {
 const keep = () => { try {
   localStorage.gwacl = JSON.stringify({mode, sortk, sortd});
 } catch (e) {} };
-const sortBy = k => {
-  // Names and addresses read best ascending, quantities biggest-first.
-  sortd = sortk === k ? -sortd : (k === 'ip' || k === 'name' ? 1 : -1);
-  sortk = k;
-  keep(); draw();
-};
+// Ключ и направление разведены: раньше повторный клик по колонке переворачивал
+// порядок, а у селекта повторный выбор того же пункта события не даёт.
+const DIRDEF = {ip: 1, name: 1, traf: -1, now: -1, seen: -1};
+const setSort = k => { sortk = k; sortd = DIRDEF[k]; keep(); draw(); };
+const flipSort = () => { sortd = -sortd; keep(); draw(); };
 const setMode = m => { mode = m; keep(); draw(); };
 // The picked device goes in the fragment and nowhere else: that makes it a
 // link one can send, and gives the back button something to undo. Picking only
@@ -2937,6 +2950,12 @@ const draw = () => {
   const others = S.devices.filter(x => x.ip !== S.you);
   allsw.hidden = !others.length;
   allsw.textContent = others.some(x => x.on) ? T.allOff : T.allOn;
+  srt.innerHTML = Object.entries({ip: 'colAddr', name: 'colName', traf: 'colTraffic',
+                                  now: 'colNow', seen: 'colSeen'})
+    .map(([k, s]) => `<option value=${k}${k === sortk ? ' selected' : ''}>`
+                     + `${T[s]}</option>`).join('');
+  srtd.textContent = sortd > 0 ? '↑' : '↓';
+  srtd.title = T.sortBy;
   const dv = one ? [one] : S.devices;
   const U = dv.reduce((a,x) => a+x.up, 0), D = dv.reduce((a,x) => a+x.down, 0);
   // The month's total counts every address the history knows of, the devices
@@ -3998,7 +4017,7 @@ def selftest():
     for el in ("banners", "kt", "kdelta", "mtitle", "ksum", "seg",
                "chartbox", "mstrip", "sysbox", "tb",
                "unk", "ub",
-               "flt", "lanips", "s_keep",
+               "flt", "srt", "srtd", "addrow", "lanips", "s_keep",
                "s_reboot", "s_reboot_at", "s_rb", "s_check", "bypbox", "allsw", "clash",
                "clashb", "s_theme", "sheet"):
         assert f"id={el}>" in page or f"id={el} " in page, f"the page has no {el}"
