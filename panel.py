@@ -309,6 +309,10 @@ STRINGS = {
         "updateFail": "GitHub не ответил. Проверьте связь и попробуйте позже.",
         "updateLog": "Как всё прошло: {{UPDLOG}}",
         "settingsTitle": "Настройки",
+        "theme": "Тема",
+        "themeAuto": "Авто",
+        "themeLight": "Светлая",
+        "themeDark": "Тёмная",
         "sLang": "язык панели",
         "sUpdate": "сообщать о новых версиях",
         "sNotify": "уведомлять о них в браузере",
@@ -517,6 +521,10 @@ STRINGS = {
         "updateFail": "GitHub did not answer. Check the link and try later.",
         "updateLog": "How it went: {{UPDLOG}}",
         "settingsTitle": "Settings",
+        "theme": "Theme",
+        "themeAuto": "Auto",
+        "themeLight": "Light",
+        "themeDark": "Dark",
         "sLang": "panel language",
         "sUpdate": "tell me about new versions",
         "sNotify": "and pop up a browser notification",
@@ -2253,10 +2261,13 @@ ICON_PNG = png_icon()
 # home screen — and it cannot read a CSS variable, so the two backgrounds are
 # repeated here by hand.
 HEAD = """<meta name=viewport content="width=device-width,initial-scale=1">
-<meta name=theme-color content="#101216" media="(prefers-color-scheme: dark)">
-<meta name=theme-color content="#eef0f3" media="(prefers-color-scheme: light)">
+<meta name=theme-color content="#1C1C1E" media="(prefers-color-scheme: dark)">
+<meta name=theme-color content="#F2F2F7" media="(prefers-color-scheme: light)">
 <link rel=icon href="{{ICON}}">
-<link rel=apple-touch-icon href="{{ICONPNG}}">"""
+<link rel=apple-touch-icon href="{{ICONPNG}}">
+<script>/* до первой отрисовки, иначе тёмная панель моргнёт светлой */
+try{var t=localStorage.gwacl_theme;
+if(t=="dark"||t=="light")document.documentElement.dataset.theme=t}catch(e){}</script>"""
 
 LOGIN_T = """<!doctype html><meta charset=utf-8>
 {{HEAD}}
@@ -2521,6 +2532,9 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
   <summary>{{t.settingsTitle}}</summary>
   <div class=card>
    <div class=set>
+    <label>{{t.theme}}<select id=s_theme onchange="setTheme(this.value)">
+     <option value=auto>{{t.themeAuto}}<option value=light>{{t.themeLight}}
+     <option value=dark>{{t.themeDark}}</select></label>
     <label>{{t.sLang}}<select id=s_lang>
      <option value=ru{{SEL_RU}}>Русский<option value=en{{SEL_EN}}>English</select></label>
     <label>{{t.sPoll}}<input id=s_poll type=number min=5 max=3600 value="{{POLL}}"></label>
@@ -2823,6 +2837,16 @@ const CMP = {
   now: x => x.rate[0] + x.rate[1],
   seen: x => x.seen,
 };
+// Тема — вкус того, кто смотрит, а не настройка шлюза: в config.json её нет,
+// значит и saveCfg() о ней не знает.
+const setTheme = v => {
+  const r = document.documentElement;
+  if (v === 'auto') { delete r.dataset.theme; } else { r.dataset.theme = v; }
+  try { v === 'auto' ? localStorage.removeItem('gwacl_theme')
+                     : localStorage.setItem('gwacl_theme', v); } catch (e) {}
+};
+try { s_theme.value = localStorage.gwacl_theme || 'auto'; } catch (e) {}
+
 // The view someone left behind, so a reload does not throw them back to the
 // default sort. In a private window localStorage throws — then it is simply
 // not remembered. The picked device is not here: it lives in the address bar.
@@ -3961,7 +3985,7 @@ def selftest():
                "h_ip", "h_name", "h_traf", "h_now", "h_seen", "unk", "ub",
                "flt", "off", "kother", "kotherbox", "othlbl", "lanips", "s_keep",
                "s_reboot", "s_reboot_at", "s_rb", "s_check", "bypbox", "allsw", "clash",
-               "clashb"):
+               "clashb", "s_theme"):
         assert f"id={el}>" in page or f"id={el} " in page, f"the page has no {el}"
 
     # Цвет живёт в переменных, иначе одна из двух тем ломается молча. Литерал
@@ -3972,6 +3996,8 @@ def selftest():
         bad = re.search(r":[^;{}]*(#[0-9a-fA-F]{3,8}\b|rgba?\()", css)
         assert not bad, f"{name}: цвет мимо токенов — {bad.group(0)!r}"
     assert "prefers-color-scheme" in TOKENS, "тёмная тема потерялась"
+    assert "gwacl_theme" in HEAD, "тема будет мигать: нет скрипта в HEAD"
+    assert "[data-theme=dark]" in TOKENS, "ручной выбор тёмной не переопределяет"
 
     ru = set(STRINGS["ru"])
     for lang, t in STRINGS.items():
