@@ -2216,6 +2216,9 @@ CSS = TOKENS + """
 
  .sheet{position:fixed;inset:0;z-index:20;background:var(--scrim);
         display:flex;align-items:center;justify-content:center;padding:var(--s4)}
+ /* [hidden] and .sheet share specificity, so without this the display:flex
+    above wins over the UA rule and the hidden attribute stops hiding anything. */
+ .sheet[hidden]{display:none}
  .sheet>div{background:var(--panel);border-radius:14px;box-shadow:var(--sh);
         width:min(30rem,100%);max-height:86vh;overflow:auto;padding:var(--s5)}
 
@@ -2360,7 +2363,7 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  .ban.grey{background:var(--fill);color:var(--dim)}
  .big{font-size:1.5rem}
  /* The chart earns the width, the machine's numbers do not. */
- .row{display:grid;gap:1rem;grid-template-columns:minmax(0,2fr) minmax(0,24rem);
+ .row2{display:grid;gap:1rem;grid-template-columns:minmax(0,2fr) minmax(0,24rem);
       align-items:start}
  .ch{display:flex;align-items:baseline;gap:.6rem;margin-bottom:.9rem}
  .ch h2{margin:0}
@@ -2482,7 +2485,7 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  a{color:var(--link)}
  form{display:flex;gap:.5rem;flex-wrap:wrap}
  form input{flex:1;min-width:8rem}
- @media (max-width:900px){.row{grid-template-columns:1fr}}
+ @media (max-width:900px){.row2{grid-template-columns:1fr}}
  /* On a phone the columns do not fit — a row becomes a block of two lines:
     address with name, then traffic, activity and buttons. */
  @media (max-width:620px){
@@ -2570,7 +2573,7 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  </div>
 </div>
 
-<div class=row>
+<div class=row2>
  <div class=card>
   <div class=ch>
    <h2>{{t.monthUse}}</h2><span id=chsel></span><span class=sp></span>
