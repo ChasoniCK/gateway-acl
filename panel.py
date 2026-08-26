@@ -2384,7 +2384,8 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  /* One bar per month, click to go there. The height is the month's total, so
     a glance says whether this one is out of the ordinary. */
  .months{display:flex;gap:var(--s1);align-items:flex-end}
- .mo{flex:1;min-width:0;background:none;border:0;padding:var(--s1) 0;cursor:pointer;
+ .mo{flex:1;min-width:0;background:none;border:0;padding:var(--s1) 0 14px;
+     cursor:pointer;position:relative;
      display:flex;flex-direction:column;justify-content:flex-end;align-items:center;
      gap:var(--s1)}
  /* Narrow: at full page width a bar as wide as its cell reads as a tile, and
@@ -2394,7 +2395,10 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  .mo:hover i{background:var(--dim2)}
  .mo.cur i{background:var(--blue)}
  .mo span{font-size:var(--f-sec);color:var(--dim);font-variant-numeric:tabular-nums}
- .mo u{font-size:10px;color:var(--dim2);text-decoration:none}
+ /* Из потока: иначе лишняя строка делает кнопку выше, а flex-end прижимает по
+    низу кнопку целиком — и бар января оказывается выше баров соседей. */
+ .mo u{position:absolute;bottom:0;left:0;right:0;text-align:center;
+       font-size:10px;color:var(--dim2);text-decoration:none}
  .mo.cur span{color:var(--fg);font-weight:600}
  .srow{display:grid;grid-template-columns:7rem minmax(0,1fr);gap:.2rem .8rem;
        align-items:baseline;padding:.45rem 0;border-bottom:1px solid var(--line)}
