@@ -2125,7 +2125,9 @@ DARK = """--bg:#1C1C1E;--panel:#2C2C2E;--line:rgba(84,84,88,.6);
 SHAPE = """--on:#FFFFFF;--r-panel:10px;--r-ctl:6px;--r-pill:999px;
   --s1:4px;--s2:8px;--s3:12px;--s4:16px;--s5:24px;--s6:32px;
   --f-h1:20px;--f-group:13px;--f-row:14px;--f-sec:12px;--f-hero:28px;
-  --down:var(--blue);--up:var(--orange)"""
+  --down:var(--blue);--up:var(--orange);
+  --sh-knob:0 1px 3px rgba(0,0,0,.3);--sh-seg:0 1px 3px rgba(0,0,0,.18);
+  --scrim:rgba(0,0,0,.35)"""
 
 TOKENS = (" :root{%s;%s}\n"
           " @media (prefers-color-scheme:dark){:root:not([data-theme=light]){%s}}\n"
@@ -2182,7 +2184,7 @@ CSS = TOKENS + """
      width:38px;height:22px;padding:0;margin:0;border-radius:var(--r-pill);
      background:var(--track);cursor:pointer;transition:background .15s}
  .sw::before{content:"";position:absolute;top:2px;left:2px;width:18px;height:18px;
-     border-radius:50%;background:var(--on);box-shadow:0 1px 3px rgba(0,0,0,.3);
+     border-radius:50%;background:var(--on);box-shadow:var(--sh-knob);
      transition:transform .15s}
  .sw:checked{background:var(--green)}
  .sw:checked::before{transform:translateX(16px)}
@@ -2192,9 +2194,9 @@ CSS = TOKENS + """
  .seg button{background:none;border:0;border-radius:var(--r-pill);cursor:pointer;
       padding:var(--s1) var(--s3);font-size:var(--f-sec);color:var(--dim)}
  .seg button.on{background:var(--panel);color:var(--fg);
-      box-shadow:0 1px 3px rgba(0,0,0,.18)}
+      box-shadow:var(--sh-seg)}
 
- .sheet{position:fixed;inset:0;z-index:20;background:rgba(0,0,0,.35);
+ .sheet{position:fixed;inset:0;z-index:20;background:var(--scrim);
         display:flex;align-items:center;justify-content:center;padding:var(--s4)}
  .sheet>div{background:var(--panel);border-radius:14px;box-shadow:var(--sh);
         width:min(30rem,100%);max-height:86vh;overflow:auto;padding:var(--s5)}
@@ -3967,7 +3969,7 @@ def selftest():
     page_css = PAGE_T.split("<style>", 1)[1].split("</style>", 1)[0]
     for name, css in (("CSS", CSS[len(TOKENS):]),
                       ("PAGE_T", page_css.replace("{{CSS}}", ""))):
-        bad = re.search(r":[^;{}]*#[0-9a-fA-F]{3,8}\b", css)
+        bad = re.search(r":[^;{}]*(#[0-9a-fA-F]{3,8}\b|rgba?\()", css)
         assert not bad, f"{name}: цвет мимо токенов — {bad.group(0)!r}"
     assert "prefers-color-scheme" in TOKENS, "тёмная тема потерялась"
 
