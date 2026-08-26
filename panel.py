@@ -2103,44 +2103,108 @@ def state(month=None):
 
 # --- pages ------------------------------------------------------------------
 
-CSS = """
- :root{--bg:#101216;--card:#171a20;--line:#262a33;--fg:#d8dce3;--dim:#767d8a;
-       --up:#a8763f;--down:#5b9bb5;--warn:#c4756a;
-       /* Everything below is the same palette one step further in: the fields
-          and the popovers, the grey a bar is drawn in, the borders that answer
-          to the pointer. They are variables so that the light theme is a block
-          of values rather than a second copy of the stylesheet. */
-       --in:#1c2027;--edge:#4a505c;--mut:#2f3542;--mut2:#485162;--pick:#1b2029;
-       --track:#22262e;--live:#6f9f6f;--ok:#8fae8f;--okline:#3c4d3c;
-       --link:#8ab6c8;--sh:#000a}
- /* Whatever the machine on the other side is set to. The panel is looked at
-    from a phone in a dark flat and from a laptop by a window, and a page that
-    ignores that is the one that has to be squinted at. */
- @media (prefers-color-scheme:light){
-  :root{--bg:#eef0f3;--card:#fff;--line:#dfe2e8;--fg:#1c2027;--dim:#697180;
-        --up:#96662f;--down:#2c7b99;--warn:#b3564a;
-        --in:#f7f8fa;--edge:#9aa3b2;--mut:#ccd2dc;--mut2:#aeb7c5;--pick:#eaf0f6;
-        --track:#e3e6ec;--live:#4a8a52;--ok:#3f7a48;--okline:#b9cdb9;
-        --link:#1f6f8c;--sh:#0002}
- }
+# Светлая — значения по умолчанию: панель равняется на Настройки macOS, а те
+# светлые. Тёмная описана один раз и подставляется в два селектора — в
+# media-запрос для тех, кто ничего не выбирал, и в атрибут для ручного выбора.
+LIGHT = """--bg:#F2F2F7;--panel:#FFFFFF;--line:rgba(60,60,67,.29);
+  --fill:rgba(120,120,128,.12);--fg:#000000;--dim:rgba(60,60,67,.6);
+  --dim2:rgba(60,60,67,.3);--blue:#007AFF;--green:#34C759;--red:#FF3B30;
+  --orange:#FF9500;--mut:rgba(120,120,128,.35);--track:rgba(120,120,128,.16);
+  --redbg:rgba(255,59,48,.12);--bluebg:rgba(0,122,255,.12);
+  --sh:0 8px 30px rgba(0,0,0,.14)"""
+
+DARK = """--bg:#1C1C1E;--panel:#2C2C2E;--line:rgba(84,84,88,.6);
+  --fill:rgba(120,120,128,.24);--fg:#FFFFFF;--dim:rgba(235,235,245,.6);
+  --dim2:rgba(235,235,245,.3);--blue:#0A84FF;--green:#30D158;--red:#FF453A;
+  --orange:#FF9F0A;--mut:rgba(120,120,128,.45);--track:rgba(120,120,128,.24);
+  --redbg:rgba(255,69,58,.18);--bluebg:rgba(10,132,255,.18);
+  --sh:0 8px 30px rgba(0,0,0,.5)"""
+
+# Форма и кегль от темы не зависят, поэтому объявлены один раз. --on здесь же:
+# кнопка переключателя и текст на синей кнопке белые в обеих темах.
+SHAPE = """--on:#FFFFFF;--r-panel:10px;--r-ctl:6px;--r-pill:999px;
+  --s1:4px;--s2:8px;--s3:12px;--s4:16px;--s5:24px;--s6:32px;
+  --f-h1:20px;--f-group:13px;--f-row:14px;--f-sec:12px;--f-hero:28px;
+  --down:var(--blue);--up:var(--orange)"""
+
+TOKENS = (" :root{%s;%s}\n"
+          " @media (prefers-color-scheme:dark){:root:not([data-theme=light]){%s}}\n"
+          " :root[data-theme=dark]{%s}\n" % (LIGHT, SHAPE, DARK, DARK))
+
+CSS = TOKENS + """
  *{box-sizing:border-box}
- /* The page takes the whole window. Nothing here is prose, so a reading
-    measure would only push the numbers apart. */
- body{font:15px/1.55 system-ui,sans-serif;margin:0;
-      padding:1.5rem 1.75rem 4rem;background:var(--bg);color:var(--fg)}
- h1{font-size:1.05rem;font-weight:600;margin:0;letter-spacing:.01em}
- select,input,button{font:inherit;background:var(--in);border:1px solid var(--line);
-   color:var(--fg);border-radius:5px;padding:.32rem .55rem}
- button{cursor:pointer}
- .card{background:var(--card);border:1px solid var(--line);border-radius:9px;
-       padding:1rem 1.1rem;margin-bottom:1rem}
- .card h2{font-size:.78rem;font-weight:600;letter-spacing:.09em;
-          text-transform:uppercase;color:var(--dim);margin:0 0 .9rem}
- .num{font-family:ui-monospace,SFMono-Regular,monospace;font-variant-numeric:tabular-nums;
-      white-space:nowrap}
- /* overflow-wrap: a hint carries file paths, and one long path would otherwise
-    push a phone screen sideways. */
- .hint{color:var(--dim);font-size:.83rem;margin:.4rem 0 0;overflow-wrap:anywhere}
+ body{font:var(--f-row)/1.45 system-ui,sans-serif;margin:0;
+      padding:var(--s5) var(--s5) var(--s6);background:var(--bg);color:var(--fg);
+      -webkit-font-smoothing:antialiased}
+ h1{font-size:var(--f-h1);font-weight:600;margin:0;letter-spacing:-.01em}
+ h2{font-size:var(--f-group);font-weight:600;margin:0;letter-spacing:0}
+ .num{font-variant-numeric:tabular-nums;white-space:nowrap}
+ .mono{font-family:ui-monospace,SFMono-Regular,monospace;
+       font-variant-numeric:tabular-nums}
+ .dim{color:var(--dim)}
+ .sec{font-size:var(--f-sec);color:var(--dim)}
+ .hint{color:var(--dim);font-size:var(--f-sec);margin:var(--s2) 0 0;
+       overflow-wrap:anywhere}
+
+ /* Панель: белое на сером отделяется само, поэтому рамки нет. В тёмной теме
+    серое на сером не отделяется — там она волосяная. */
+ .panel{background:var(--panel);border-radius:var(--r-panel);
+        padding:var(--s4);margin-bottom:var(--s4)}
+ @media (prefers-color-scheme:dark){:root:not([data-theme=light]) .panel{
+   box-shadow:0 0 0 .5px var(--line)}}
+ :root[data-theme=dark] .panel{box-shadow:0 0 0 .5px var(--line)}
+
+ /* Строка списка. Разделитель отступлен слева под контент — маковский приём:
+    он показывает, где начинается смысл строки. */
+ .list{display:flex;flex-direction:column}
+ .row{display:flex;align-items:center;gap:var(--s3);min-height:44px;
+      padding:var(--s2) 0;border-bottom:.5px solid var(--line)}
+ .row:last-child{border-bottom:0}
+ .list.inset .row{margin-left:var(--s6)}
+ .list.inset .row>:first-child{margin-left:calc(-1 * var(--s6))}
+ .row .sp{flex:1}
+
+ button,select,input{font:inherit;color:inherit}
+ .btn{background:none;border:0;border-radius:var(--r-ctl);cursor:pointer;
+      padding:var(--s1) var(--s2);color:var(--blue)}
+ .btn:hover{background:var(--fill)}
+ .btn.plain{color:var(--fg)}
+ .btn.bad{color:var(--red)}
+ .btn:disabled{color:var(--dim2);cursor:default;background:none}
+ .btn.tinted{background:var(--blue);color:var(--on)}
+ .field{background:var(--fill);border:0;border-radius:var(--r-ctl);
+        padding:var(--s1) var(--s2);min-width:0}
+ .field:focus,.btn:focus-visible,.sw:focus-visible,.seg button:focus-visible{
+   outline:2px solid var(--blue);outline-offset:1px}
+
+ /* Переключатель — сам чекбокс без нативного вида, кнопка это его ::before. */
+ .sw{appearance:none;-webkit-appearance:none;flex:none;position:relative;
+     width:38px;height:22px;padding:0;margin:0;border-radius:var(--r-pill);
+     background:var(--track);cursor:pointer;transition:background .15s}
+ .sw::before{content:"";position:absolute;top:2px;left:2px;width:18px;height:18px;
+     border-radius:50%;background:var(--on);box-shadow:0 1px 3px rgba(0,0,0,.3);
+     transition:transform .15s}
+ .sw:checked{background:var(--green)}
+ .sw:checked::before{transform:translateX(16px)}
+
+ .seg{display:inline-flex;background:var(--track);border-radius:var(--r-pill);
+      padding:2px}
+ .seg button{background:none;border:0;border-radius:var(--r-pill);cursor:pointer;
+      padding:var(--s1) var(--s3);font-size:var(--f-sec);color:var(--dim)}
+ .seg button.on{background:var(--panel);color:var(--fg);
+      box-shadow:0 1px 3px rgba(0,0,0,.18)}
+
+ .sheet{position:fixed;inset:0;z-index:20;background:rgba(0,0,0,.35);
+        display:flex;align-items:center;justify-content:center;padding:var(--s4)}
+ .sheet>div{background:var(--panel);border-radius:14px;box-shadow:var(--sh);
+        width:min(30rem,100%);max-height:86vh;overflow:auto;padding:var(--s5)}
+
+ .pop{position:absolute;z-index:9;padding:var(--s2) var(--s3);
+      background:var(--panel);border-radius:var(--r-ctl);box-shadow:var(--sh);
+      font-size:var(--f-sec);pointer-events:none;white-space:nowrap}
+ a{color:var(--blue)}
+ @media (max-width:620px){body{padding:var(--s3) var(--s3) var(--s5)}
+  .panel{padding:var(--s3)}}
 """
 
 # ponytail: one inline glyph instead of a file to serve — it also stops the
@@ -3897,6 +3961,15 @@ def selftest():
                "s_reboot", "s_reboot_at", "s_rb", "s_check", "bypbox", "allsw", "clash",
                "clashb"):
         assert f"id={el}>" in page or f"id={el} " in page, f"the page has no {el}"
+
+    # Цвет живёт в переменных, иначе одна из двух тем ломается молча. Литерал
+    # ищется после двоеточия: так селектор вроде #chartbox не считается цветом.
+    page_css = PAGE_T.split("<style>", 1)[1].split("</style>", 1)[0]
+    for name, css in (("CSS", CSS[len(TOKENS):]),
+                      ("PAGE_T", page_css.replace("{{CSS}}", ""))):
+        bad = re.search(r":[^;{}]*#[0-9a-fA-F]{3,8}\b", css)
+        assert not bad, f"{name}: цвет мимо токенов — {bad.group(0)!r}"
+    assert "prefers-color-scheme" in TOKENS, "тёмная тема потерялась"
 
     ru = set(STRINGS["ru"])
     for lang, t in STRINGS.items():
