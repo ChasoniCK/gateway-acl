@@ -454,12 +454,12 @@ git commit -m "Тема: авто, светлая, тёмная — выбор �
 - Modify: `panel.py` — `PAGE_T` (разметка `.bar`, карточка `#upd`, `bypbox`, `off`), JS `draw()` и `stale()`, `STRINGS`, `selftest()`
 
 **Interfaces:**
-- Produces: `<header>` с id `hdr`; `<div id=banners>`; JS `banner(kind, text, act)`; ключ `close`. Удаляются id `msel`, `off`, `upd`, `updtext`, `bypbox`.
+- Produces: `<header>` с id `hdr`; `<div id=banners>`; JS `banner(kind, text, act)`; ключ `close`. Удаляются id `msel`, `off`, `upd`, `updtext`. **`bypbox` остаётся** — `draw()` пишет в него, и элемент, убранный раньше своего кода, обрушит всю отрисовку. В шит его переносит задача 5.
 - Consumes: примитивы `.btn`, `.panel` из задачи 2.
 
 - [ ] **Step 1: Написать провал**
 
-В кортеже id в `selftest()` заменить `"msel"`, `"off"`, `"upd"`, `"updtext"`, `"bypbox"` на `"banners"`.
+В кортеже id в `selftest()` заменить `"msel"`, `"off"`, `"upd"`, `"updtext"` на `"banners"`. `"bypbox"` не трогать.
 
 - [ ] **Step 2: Убедиться, что провал настоящий**
 
@@ -480,6 +480,7 @@ python3 panel.py --selftest
 ```html
 <header id=hdr>
  <h1>{{t.h1}}</h1><span class=sp></span>
+ <span id=bypbox></span>
  <details class=gear>…нынешний блок настроек переносится сюда целиком, без
   единой правки…</details>
  <button class="btn plain" onclick="location='/logout'">{{t.logout}}</button>
@@ -556,7 +557,7 @@ onscroll = () => hdr.classList.toggle('stuck', scrollY > 4);
 
 - [ ] **Step 6: Убрать мёртвое**
 
-Из `PAGE_T` уходят: `<select id=msel>`, `<span id=off>`, `<span id=bypbox>`, кнопка CSV из шапки (переедет в задаче 6), карточка `#upd` целиком. Из JS — строки `msel.innerHTML = …` и `upd.hidden = …`. Функция `bypass()` остаётся: её вызывает баннер и, с задачи 5, шит настроек.
+Из `PAGE_T` уходят: `<select id=msel>`, `<span id=off>`, кнопка CSV из шапки (переедет в задаче 6), карточка `#upd` целиком. Из JS — строки `msel.innerHTML = …` и `upd.hidden = …`. `bypass()` и кусок `draw()`, наполняющий `bypbox`, остаются нетронутыми: селект переезжает в шит задачей 5. Кнопка-предупреждение при открытом байпасе из `bypbox` уходит уже здесь — её роль забрал красный баннер.
 
 - [ ] **Step 7: Прогнать селфтест**
 
@@ -768,7 +769,7 @@ python3 panel.py --selftest
  </div>
  <div class=panel>
   <h2>{{t.sysTitle}}</h2>
-  <div id=sysbox></div>
+  <div class="list inset" id=sysbox></div>
  </div>
 </div>
 ```
@@ -930,9 +931,12 @@ CSS:
  svg.dim g.hi{opacity:1}
 ```
 
-- [ ] **Step 3: Убрать легенду**
+- [ ] **Step 3: Убедиться, что легенды не осталось**
 
-Из `PAGE_T` уходит весь `<div class=legend>` вместе со `#othlbl` и `#cumlbl`, из CSS — правила `.legend`. Строка `cumlbl.hidden = mode !== 'day'` удаляется из `draw()`. Ключи `inbound`, `outbound`, `other`, `cumul` остаются: их использует сводка, карточка и `<title>` пунктира.
+Разметку легенды снесла задача 6 вместе со всей карточкой трафика. Здесь надо
+добить хвосты: правила `.legend` в CSS страницы и строку `cumlbl.hidden = mode
+!== 'day'` в `draw()`, если она пережила. Ключи `inbound`, `outbound`, `other`,
+`cumul` остаются — их использует сводка, карточка наведения и `<title>` пунктира.
 
 - [ ] **Step 4: Прогнать селфтест**
 
@@ -1145,6 +1149,11 @@ python3 panel.py --selftest
      + `<input class=nm value="${esc(x.name)}" placeholder="${esc(x.host || T.phName)}" `
      + `onclick="event.stopPropagation()" `
      + `onchange="setName('${esc(x.ip)}',this.value)">`
+     // Имя, которым устройство представляется сети, предложено как имя, которое
+     // можно оставить. Через data-, не в onclick: hostname из чужого файла аренд.
+     + (!x.name && x.host ? `<button class=ghost data-ip="${esc(x.ip)}" `
+        + `data-nm="${esc(x.host)}" onclick="event.stopPropagation();addKnown(this)" `
+        + `title="${esc(n(T.useHost, x.host))}">+</button>` : '')
      + `<div class=sec><span class=mono>${esc(x.ip)}</span>`
      + `${me ? ' · ' + T.youAre : ''} · ${x.seen ? ago(S.now - x.seen) : '—'}</div>`
      + `</div><span class=sp></span>`
@@ -1175,7 +1184,9 @@ const devDetail = (x, peak) => `<div class=ddet>`
         + `<option value="">${T.tmFor}</option>`
         + TIMES.map(([v, k]) => `<option value="${v}">${T[k]}</option>`).join('')
         + `</select>`)
-  + (S.vpnable ? `<label class=vpn title="${T.vpnWhat}">${T.vpnOn}`
+  // vpnOff — это «мимо VPN»: у переключателя подпись называет состояние, в
+  // которое он включён, а не действие, как называла его кнопка.
+  + (S.vpnable ? `<label class=vpn title="${T.vpnWhat}">${T.vpnOff}`
       + `<input class=sw type=checkbox${x.vpn ? '' : ' checked'} `
       + `onchange="post({ip:'${esc(x.ip)}',vpn:!this.checked})"></label>` : '')
   + `<button class=btn onclick="pickDev('${esc(x.ip)}')">${T.showInChart}</button>`
@@ -1239,7 +1250,20 @@ const spark = (ser, max, on) => {
 
 - [ ] **Step 9: Убрать мёртвое**
 
-Удаляются: `<thead>` со всеми `th`, объект `HEADS`, цикл `for (const th of document.querySelectorAll('th.s'))`, правила CSS для `table`, `th`, `td`, `tr.pick`, `.act`, `.me`, `.off td`, `.ghost`, `.nm .ghost`, и весь мобильный блок `@media (max-width:620px)` в части `thead{display:none}` и перекладывания ячеек. Кнопка `+` (подставить имя из DHCP) переезжает в раскрытие следующей задачей — пока просто удаляется вместе с `.ghost`.
+Удаляются: `<thead>` со всеми `th`, объект `HEADS`, цикл `for (const th of document.querySelectorAll('th.s'))`, правила CSS для `table`, `th`, `td`, `tr.pick`, `.act`, `.me`, `.off td`, и весь мобильный блок `@media (max-width:620px)` в части `thead{display:none}` и перекладывания ячеек.
+
+Кнопка `+` (подставить имя из DHCP) **остаётся** — она в шаге 5 выше. Её правила
+переписываются под новую строку:
+
+```css
+ .dname{position:relative}
+ .ghost{position:absolute;right:2px;top:2px;padding:0 var(--s1);font-size:var(--f-sec);
+        color:var(--dim);background:var(--fill);border:0;border-radius:var(--r-ctl);
+        cursor:pointer}
+ .ghost:hover{color:var(--fg)}
+ @media (hover:hover){.ghost{opacity:0;transition:opacity .1s}
+  .drow:hover .ghost,.ghost:focus{opacity:1}}
+```
 
 - [ ] **Step 10: Прогнать селфтест**
 
