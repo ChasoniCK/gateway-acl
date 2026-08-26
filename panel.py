@@ -2376,6 +2376,8 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  .hero em{font-style:normal;font-size:var(--f-sec);color:var(--dim)}
  #chartbox{position:relative;margin-top:var(--s4)}
  #chartbox svg{display:block;width:100%;height:auto}
+ svg.dim g{opacity:.4}
+ svg.dim g.hi{opacity:1}
  /* One bar per month, click to go there. The height is the month's total, so
     a glance says whether this one is out of the ordinary. */
  .months{display:flex;gap:.25rem;align-items:flex-end}
@@ -2708,48 +2710,72 @@ const rows = () => {
 };
 
 const chart = (rs, cum) => {
-  // A month with a total but no days behind it is one that has been rolled up.
-  // "no data" would contradict the figure standing right above the chart.
   if (!rs.length) return `<p class=hint>${mode === 'hour' ? T.noHours
     : mtot ? T.rolled : T.noData}</p>`;
-  // Take the actual width: one viewBox unit is then one pixel, and the
-  // labels do not shrink on a phone.
-  const W = Math.max(chartbox.clientWidth || 720, 280), H = 190,
-        L = 54, B = 20, top = 10;
+  const W = Math.max(chartbox.clientWidth || 720, 280), H = 180, B = 18, top = 16;
   const max = Math.max(...rs.map(d => d[1] + d[2] + d[4]), 1024);
-  const bw = (W - L) / rs.length, plot = H - B - top;
+  const bw = W / rs.length, plot = H - B - top;
   const y = v => top + plot - (v / max) * plot;
-  let g = '';
-  for (const f of [0, .5, 1]) g += `<line x1=${L} x2=${W} y1=${y(max*f)} y2=${y(max*f)} `
-    + `stroke="var(--line)"/><text x=${L-8} y=${y(max*f)+4} text-anchor=end fill="var(--dim)" `
-    + `font-size=10 font-family=ui-monospace>${f ? fmtAx(max*f) : 0}</text>`;
+  // Единственная линия: потолок. Ось слева не нужна — цифры даёт карточка.
+  let g = `<line x1=0 x2=${W} y1=${y(max)} y2=${y(max)} stroke="var(--line)"/>`
+    + `<text x=0 y=${y(max) - 5} fill="var(--dim)" font-size=10>${fmtAx(max)}</text>`;
   const bars = rs.map((d, i) => {
-    const x = L + i*bw + bw*.18, w = Math.max(1, bw*.64), o = d[4];
-    const hu = (d[1]/max)*plot, hd = (d[2]/max)*plot;
+    const x = i * bw + bw * .18, w = Math.max(1, bw * .64), o = d[4];
+    const r = Math.min(2, w / 2);
     const lbl = rs.length > 20 ? (i % 5 === 0) : true;
-    return `<g><title>${d[3]}  ↓ ${fmt(d[2])}  ↑ ${fmt(d[1])}`
+    // Скругление только сверху: rect с rx скруглил бы и основание, поэтому
+    // верхний сегмент рисуется путём, а нижние — обычными прямоугольниками.
+    const cap = (yy, hh, fill) => hh < .5 ? '' :
+      `<path d="M${x} ${yy + hh}V${yy + r}q0 -${r} ${r} -${r}h${w - 2 * r}`
+      + `q${r} 0 ${r} ${r}V${yy + hh}z" fill="${fill}"/>`;
+    const box = (yy, hh, fill) => hh < .5 ? '' :
+      `<rect x=${x} y=${yy} width=${w} height=${hh} fill="${fill}"/>`;
+    const hu = (d[1] / max) * plot, hd = (d[2] / max) * plot, ho = (o / max) * plot;
+    return `<g data-i=${i} onmouseenter="hover(${i})" onmouseleave="hover(-1)">`
+      + `<title>${d[3]}  ↓ ${fmt(d[2])}  ↑ ${fmt(d[1])}`
       + `${o ? `  ${T.other} ${fmt(o)}` : ''}</title>`
-      + (o ? `<rect x=${x} y=${y(d[1]+d[2]+o)} width=${w} height=${(o/max)*plot} `
-           + `fill="var(--mut)"/>` : '')
-      + `<rect x=${x} y=${y(d[1]+d[2])} width=${w} height=${hu} fill="var(--up)"/>`
-      + `<rect x=${x} y=${y(d[2])} width=${w} height=${hd} fill="var(--down)"/>`
-      + `<rect x=${L+i*bw} y=${top} width=${bw} height=${plot} fill="none" pointer-events="all"/></g>`
-      + (lbl ? `<text x=${x+w/2} y=${H-5} text-anchor=middle fill="var(--dim)" font-size=10 font-family=ui-monospace>${d[0]}</text>` : '');
+      + (o ? cap(y(d[1] + d[2] + o), ho, 'var(--mut)')
+           : cap(y(d[1] + d[2]), hu, 'var(--up)'))
+      + (o ? box(y(d[1] + d[2]), hu, 'var(--up)') : '')
+      + box(y(d[2]), hd, 'var(--down)')
+      + `<rect x=${i * bw} y=${top} width=${bw} height=${plot} fill="none" `
+      + `pointer-events="all"/></g>`
+      + (lbl ? `<text x=${x + w / 2} y=${H - 4} text-anchor=middle `
+             + `fill="var(--dim)" font-size=10>${d[0]}</text>` : '');
   }).join('');
-  // The running total, scaled so the end of the line is the top of the plot:
-  // the shape answers "are we going faster than last time", the tooltip the
-  // exact figure. A second axis would cost more than it explains.
   let line = '';
   const tot = rs.reduce((a, d) => a + d[1] + d[2] + d[4], 0);
   if (cum && rs.length > 1 && tot) {
     let run = 0;
     const pts = rs.map((d, i) => { run += d[1] + d[2] + d[4];
-      return `${(L + i*bw + bw/2).toFixed(1)},${(top + plot - run/tot*plot).toFixed(1)}`;
+      return `${(i * bw + bw / 2).toFixed(1)},${(top + plot - run / tot * plot).toFixed(1)}`;
     }).join(' ');
-    line = `<polyline fill=none stroke="var(--dim)" stroke-width=1.4 stroke-dasharray="3 3"`
-      + ` points="${pts}"><title>${T.cumul}  ${fmt(tot)}</title></polyline>`;
+    line = `<polyline fill=none stroke="var(--dim2)" stroke-width=1 `
+      + `stroke-dasharray="2 3" points="${pts}"><title>${T.cumul}  `
+      + `${fmt(tot)}</title></polyline>`;
   }
-  return `<svg viewBox="0 0 ${W} ${H}">${g}${bars}${line}</svg>`;
+  return `<svg viewBox="0 0 ${W} ${H}">${g}${bars}${line}</svg>`
+    + `<div class=pop hidden></div>`;
+};
+
+// Наведение не перерисовывает график: столбцы гасятся классом, карточка —
+// один div, который переезжает. Иначе каждое движение мыши стоило бы SVG.
+const hover = i => {
+  const svg = chartbox.querySelector('svg'), pop = chartbox.querySelector('.pop');
+  if (!svg || !pop) return;
+  svg.classList.toggle('dim', i >= 0);
+  for (const g of svg.querySelectorAll('g')) g.classList.toggle('hi', +g.dataset.i === i);
+  if (i < 0) { pop.hidden = true; return; }
+  const d = rows()[i];
+  pop.innerHTML = `<b>${d[3]}</b><br>`
+    + `<span style="color:var(--down)">↓</span> ${fmt(d[2])} · `
+    + `<span style="color:var(--up)">↑</span> ${fmt(d[1])}`
+    + (d[4] ? ` · ${T.other} ${fmt(d[4])}` : '');
+  pop.hidden = false;
+  const box = svg.getBoundingClientRect(), bw = box.width / rows().length;
+  const x = (i + .5) * bw - pop.offsetWidth / 2;
+  pop.style.left = Math.max(0, Math.min(box.width - pop.offsetWidth, x)) + 'px';
+  pop.style.top = '0px';
 };
 
 const spark = (ser, max, on) => {
