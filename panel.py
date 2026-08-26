@@ -2224,7 +2224,10 @@ CSS = TOKENS + """
  .sheet>div{background:var(--panel);border-radius:14px;box-shadow:var(--sh);
         width:min(30rem,100%);max-height:86vh;overflow:auto;padding:var(--s5)}
 
- .pop{position:absolute;z-index:9;padding:var(--s2) var(--s3);
+ /* 11: above the sticky header (10) so a hover card near the top of a
+    scrolled chart is not drawn under it, below the settings sheet (20) so
+    it never floats over a modal. */
+ .pop{position:absolute;z-index:11;padding:var(--s2) var(--s3);
       background:var(--panel);border-radius:var(--r-ctl);box-shadow:var(--sh);
       font-size:var(--f-sec);pointer-events:none;white-space:nowrap}
  a{color:var(--blue)}
@@ -2731,13 +2734,19 @@ const chart = (rs, cum) => {
     const box = (yy, hh, fill) => hh < .5 ? '' :
       `<rect x=${x} y=${yy} width=${w} height=${hh} fill="${fill}"/>`;
     const hu = (d[1] / max) * plot, hd = (d[2] / max) * plot, ho = (o / max) * plot;
+    // Скругление достаётся самому верхнему видимому сегменту, а не тому, что
+    // сверху по замыслу: «прочее» высотой в полпикселя не рисуется вовсе, и
+    // столбец остался бы с плоским верхом среди скруглённых соседей.
+    const segs = [[ho, 'var(--mut)', y(d[1] + d[2] + o)],
+                  [hu, 'var(--up)', y(d[1] + d[2])],
+                  [hd, 'var(--down)', y(d[2])]];
+    const first = segs.findIndex(s => s[0] >= .5);
+    const body = segs.map(([h, f, yy], k) =>
+        h < .5 ? '' : k === first ? cap(yy, h, f) : box(yy, h, f)).join('');
     return `<g data-i=${i} onmouseenter="hover(${i})" onmouseleave="hover(-1)">`
       + `<title>${d[3]}  ↓ ${fmt(d[2])}  ↑ ${fmt(d[1])}`
       + `${o ? `  ${T.other} ${fmt(o)}` : ''}</title>`
-      + (o ? cap(y(d[1] + d[2] + o), ho, 'var(--mut)')
-           : cap(y(d[1] + d[2]), hu, 'var(--up)'))
-      + (o ? box(y(d[1] + d[2]), hu, 'var(--up)') : '')
-      + box(y(d[2]), hd, 'var(--down)')
+      + body
       + `<rect x=${i * bw} y=${top} width=${bw} height=${plot} fill="none" `
       + `pointer-events="all"/></g>`
       + (lbl ? `<text x=${x + w / 2} y=${H - 4} text-anchor=middle `
@@ -2963,7 +2972,9 @@ const draw = () => {
   for (const [i, b] of [...seg.children].entries())
     b.className = (i === 0) === (mode === 'day') ? 'on' : '';
 
-  chartbox.innerHTML = chart(rows(), mode === 'day');
+  // Не под курсором: перерисовка снесла бы открытую карточку значений, а
+  // держать цифры неподвижными — ровно то, чего хочет тот, кто на них смотрит.
+  if (!chartbox.matches(':hover')) chartbox.innerHTML = chart(rows(), mode === 'day');
   mstrip.innerHTML = strip();
   // Not while the pointer is in there: rebuilding the card would close an open
   // tooltip, and holding the numbers still is exactly what someone reading
