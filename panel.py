@@ -199,6 +199,7 @@ STRINGS = {
         "title": "Шлюз",
         "h1": "Устройства через шлюз",
         "logout": "выйти",
+        "close": "Закрыть",
         "monthUse": "Расход за месяц",
         "total": "всего",
         "inbound": "входящий",
@@ -407,6 +408,7 @@ STRINGS = {
         "title": "Gateway",
         "h1": "Devices through the gateway",
         "logout": "log out",
+        "close": "Close",
         "monthUse": "Monthly usage",
         "total": "total",
         "inbound": "inbound",
@@ -2338,8 +2340,16 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
 {{HEAD}}
 <title>{{t.title}}</title>
 <style>{{CSS}}
- .bar{display:flex;align-items:baseline;gap:.75rem;flex-wrap:wrap;margin-bottom:1.25rem}
- .bar .sp{flex:1}
+ #hdr{display:flex;align-items:center;gap:var(--s2);position:sticky;top:0;
+      z-index:10;background:var(--bg);padding:var(--s3) 0;margin-bottom:var(--s3)}
+ #hdr.stuck{box-shadow:0 .5px 0 var(--line)}
+ #hdr .sp{flex:1}
+ .ban{display:flex;align-items:center;gap:var(--s3);border-radius:var(--r-panel);
+      padding:var(--s2) var(--s3);margin-bottom:var(--s2);font-size:var(--f-row)}
+ .ban .sp{flex:1}
+ .ban.red{background:var(--redbg);color:var(--red)}
+ .ban.blue{background:var(--bluebg)}
+ .ban.grey{background:var(--fill);color:var(--dim)}
  .big{font-size:1.5rem}
  /* The chart earns the width, the machine's numbers do not. */
  .row{display:grid;gap:1rem;grid-template-columns:minmax(0,2fr) minmax(0,24rem);
@@ -2410,7 +2420,6 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  .off td.ip,.off td input{color:var(--dim)}
  .me{color:var(--dim);font-size:.72rem;margin-left:.4rem}
  #flt{max-width:9rem}
- #off{color:var(--warn);font-size:.82rem}
  /* Which version this gateway is on, where one goes to ask. Pushed left so it
     sits opposite the save button instead of costing the card a line. */
  .ver{margin-right:auto;color:var(--dim);font-size:.78rem;
@@ -2432,9 +2441,6 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  .blk .mini{flex:0 1 21rem;min-width:7rem;overflow-wrap:anywhere;white-space:normal}
  /* When it last knocked: its own width, so it does not share the name's. */
  .blk .knock{flex:0 0 auto;min-width:6.5rem}
- /* The one control that suspends the whole point of the program says so in the
-    panel's warning colour, wherever it sits. */
- button.warn{color:var(--warn);border-color:var(--warn)}
  /* The name a device gives the network, offered as a name to keep. It sits at
     the end of the field rather than beside it: a button of its own at the far
     edge of the column reads as belonging to the next column along. The field
@@ -2523,11 +2529,9 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
     width:auto;max-height:78vh;overflow:auto}
  }
 </style>
-<div class=bar>
- <h1>{{t.h1}}</h1><span id=off hidden></span><span class=sp></span>
- <select id=msel onchange="load(this.value)"></select>
+<header id=hdr>
+ <h1>{{t.h1}}</h1><span class=sp></span>
  <span id=bypbox></span>
- <button onclick=csv() title="{{t.csvWhat}}">CSV</button>
  <details class=gear>
   <summary>{{t.settingsTitle}}</summary>
   <div class=card>
@@ -2569,20 +2573,9 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
    <p class=hint>{{t.sNetHint}}</p>
   </div>
  </details>
- <button onclick="location='/logout'">{{t.logout}}</button>
-</div>
-
-<div class=card id=upd hidden>
- <h2>{{t.updateTitle}}</h2>
- <p id=updtext style="margin:0"></p>
- <!-- A fixed address, not one taken from the answer: the tag comes off the
-      network, the link must not. -->
- <p style="margin:.35rem 0 0"><a href="{{RELEASES}}" target=_blank
-    rel="noopener noreferrer">{{t.updateWhat}}</a></p>
- <div class=act><button onclick=doUpdate()>{{t.updateNow}}</button></div>
- <p class=hint>{{t.updateHint}}</p>
- <p class=hint>{{t.updateLog}}</p>
-</div>
+ <button class="btn plain" onclick="location='/logout'">{{t.logout}}</button>
+</header>
+<div id=banners></div>
 
 <div class=row>
  <div class=card>
@@ -2674,6 +2667,8 @@ const ago = s => s < 90 ? T.now : s < 3600 ? n(T.minAgo, Math.round(s/60))
 // whatever set it, so "off until seven" and "on for an hour" are the same thing.
 const left = s => s < 5400 ? n(T.tmLeftM, Math.max(1, Math.round(s/60)))
                            : n(T.tmLeftH, Math.round(s/3600));
+const banner = (kind, text, act) =>
+  `<div class="ban ${kind}"><span class=sp>${text}</span>${act || ''}</div>`;
 const TIMES = [[15, 'tm15'], [60, 'tm1h'], [180, 'tm3h'], [480, 'tm8h'],
                ['am', 'tmMorning']];
 // Minutes and not a moment: the browser is the one that knows what "until
@@ -2894,18 +2889,15 @@ const draw = () => {
   if (!S) return;
   if (sel && !S.devices.some(x => x.ip === sel)) sel = null;
   const one = sel && S.devices.find(x => x.ip === sel);
-  msel.innerHTML = S.months.map(m =>
-    `<option${m[0] === S.month ? ' selected' : ''}>${m[0]}</option>`).join('');
   for (const k in HEADS) {
     const th = document.getElementById('h_' + k), on = sortk === k;
     th.textContent = T[HEADS[k]] + (on ? (sortd > 0 ? ' ↑' : ' ↓') : '');
     // The arrow says it to the eye, aria-sort to everything else.
     th.setAttribute('aria-sort', on ? (sortd > 0 ? 'ascending' : 'descending') : 'none');
   }
-  // Open, and how much longer — or the menu that opens it.
-  bypbox.innerHTML = S.bypass > S.now
-    ? `<button class=warn title="${T.bypWhat}" onclick="bypass(0)">${T.bypOn} `
-      + `${left(S.bypass - S.now)} ×</button>`
+  // The menu that opens it — while it is already open there is nothing left
+  // to pick, and the red banner below carries that state and the way to close it.
+  bypbox.innerHTML = S.bypass > S.now ? ''
     : `<select title="${T.bypWhat}" onchange="bypass(this.value,this)">`
       + `<option value="">${T.byp}</option>`
       + BYP.map(([v, k]) => `<option value="${v}">${T[k]}</option>`).join('')
@@ -2994,10 +2986,21 @@ const draw = () => {
      + `<button onclick="del('${esc(x.ip)}',${me})">${T.del}</button></div></td></tr>`;
   }).join('') || `<tr><td colspan=6 class=hint>${fq ? T.noMatch : T.empty}</td></tr>`;
 
-  upd.hidden = !S.update;
-  // textContent, not innerHTML: the tag comes off the network.
-  if (S.update) { updtext.textContent = T.updateNew.replace('{v}', S.update);
-                  announce(S.update); }
+  // esc: версия приходит из ответа GitHub. Сервер проверяет тег регуляркой
+  // только там, где строит адрес загрузки, — на странице она чужой текст.
+  banners.innerHTML =
+      (S.bypass > S.now
+        ? banner('red', `${T.bypOn} ${left(S.bypass - S.now)}`,
+                 `<button class="btn bad" onclick="bypass(0)">${T.close}</button>`)
+        : '')
+    + (S.update
+        ? banner('blue', esc(T.updateNew.replace('{v}', S.update)),
+                 `<a class=btn href="{{RELEASES}}" target=_blank `
+                 + `rel="noopener noreferrer">${T.updateWhat}</a>`
+                 + `<button class=btn onclick=doUpdate()>${T.updateNow}</button>`)
+        : '')
+    + offban;
+  if (S.update) announce(S.update);
   // A listed address that answers as somebody else — the rule is now written
   // for whoever took it.
   clash.hidden = !S.clash.length;
@@ -3024,12 +3027,12 @@ const draw = () => {
 // Without this the page keeps showing the last good numbers for as long as it
 // is open: the service restarts, the gateway goes down, and nothing on screen
 // changes. The header says so instead, and names the time it last heard back.
-let okAt = null;
+let okAt = null, offban = '';
 const stale = bad => {
-  off.hidden = !bad;
-  if (bad) off.textContent = T.offline.replace('{t}', okAt
-    ? okAt.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'}) : '—');
-  else okAt = new Date();
+  offban = bad ? banner('grey', T.offline.replace('{t}', okAt
+    ? okAt.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : '—')) : '';
+  if (bad && S) draw();       // связь пропала — перерисовать нечем, кроме себя
+  if (!bad) okAt = new Date();
 };
 const load = m => fetch('/api?month=' + (month = m || month || ''))
   .then(r => r.status === 401 ? location.reload()
@@ -3096,6 +3099,7 @@ const doUpdate = () => confirm(T.updateConfirm.replace('{v}', S && S.update || '
 // Only the chart depends on the pixel width. Redrawing the table here would
 // take the cursor out of a name someone is in the middle of typing.
 onresize = () => { if (S) chartbox.innerHTML = chart(rows(), mode === 'day'); };
+onscroll = () => hdr.classList.toggle('stuck', scrollY > 4);
 
 // The sort headers are cells, not buttons — a tab stop and the two keys a
 // button would answer to cost less than rebuilding the row out of buttons.
@@ -3980,10 +3984,10 @@ def selftest():
     # The script drives the page by id. A rename on one side only leaves a card
     # silently empty in the browser, which no other check here would notice.
     page = render(PAGE_T)
-    for el in ("msel", "upd", "updtext", "kt", "kd", "ku", "ka", "kdelta", "chsel",
+    for el in ("banners", "kt", "kd", "ku", "ka", "kdelta", "chsel",
                "bday", "bhour", "chartbox", "cumlbl", "mstrip", "sysbox", "tb",
                "h_ip", "h_name", "h_traf", "h_now", "h_seen", "unk", "ub",
-               "flt", "off", "kother", "kotherbox", "othlbl", "lanips", "s_keep",
+               "flt", "kother", "kotherbox", "othlbl", "lanips", "s_keep",
                "s_reboot", "s_reboot_at", "s_rb", "s_check", "bypbox", "allsw", "clash",
                "clashb", "s_theme"):
         assert f"id={el}>" in page or f"id={el} " in page, f"the page has no {el}"
