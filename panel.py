@@ -2916,12 +2916,11 @@ const draw = () => {
   mtot = (S.months.find(m => m[0] === S.month) || [0, 0])[1];
   oth = one ? 0 : Math.max(0, mtot - S.devices.reduce((a,x) => a+x.up+x.down, 0));
 
-  // Имя месяца берёт браузер: 12 названий на язык в STRINGS не нужны, а язык
-  // панели он уже знает.
+  // Только имя месяца: с year:'numeric' русская локаль добавляет «г.», и
+  // заголовок карточки начинает читаться как строка из бухгалтерского отчёта.
   const [my, mm] = S.month.split('-');
-  const mname = new Date(+my, +mm - 1).toLocaleDateString(T.locale,
-                  {month: 'long', year: 'numeric'});
-  mtitle.innerHTML = mname[0].toUpperCase() + mname.slice(1)
+  const mname = new Date(+my, +mm - 1).toLocaleDateString(T.locale, {month: 'long'});
+  mtitle.innerHTML = mname[0].toUpperCase() + mname.slice(1) + ' ' + my
     + (one ? ` · <button class=btn onclick="pickDev(null)" title="${T.showAll}">`
              + `${esc(one.name || one.ip)} ×</button>` : '');
 
