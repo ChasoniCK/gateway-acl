@@ -2885,6 +2885,23 @@ const csv = () => {
   URL.revokeObjectURL(a.href);
 };
 
+// Баннеры рисуются отдельно от остальной страницы: связь может пропасть до
+// того, как приедет первое состояние, и сказать об этом надо всё равно.
+const renderBanners = () => {
+  banners.innerHTML =
+      (S && S.bypass > S.now
+        ? banner('red', `${T.bypOn} ${left(S.bypass - S.now)}`,
+                 `<button class="btn bad" onclick="bypass(0)">${T.close}</button>`)
+        : '')
+    + (S && S.update
+        ? banner('blue', esc(T.updateNew.replace('{v}', S.update)),
+                 `<a class=btn href="{{RELEASES}}" target=_blank `
+                 + `rel="noopener noreferrer">${T.updateWhat}</a>`
+                 + `<button class=btn onclick=doUpdate()>${T.updateNow}</button>`)
+        : '')
+    + offban;
+};
+
 const draw = () => {
   if (!S) return;
   if (sel && !S.devices.some(x => x.ip === sel)) sel = null;
@@ -2986,20 +3003,7 @@ const draw = () => {
      + `<button onclick="del('${esc(x.ip)}',${me})">${T.del}</button></div></td></tr>`;
   }).join('') || `<tr><td colspan=6 class=hint>${fq ? T.noMatch : T.empty}</td></tr>`;
 
-  // esc: версия приходит из ответа GitHub. Сервер проверяет тег регуляркой
-  // только там, где строит адрес загрузки, — на странице она чужой текст.
-  banners.innerHTML =
-      (S.bypass > S.now
-        ? banner('red', `${T.bypOn} ${left(S.bypass - S.now)}`,
-                 `<button class="btn bad" onclick="bypass(0)">${T.close}</button>`)
-        : '')
-    + (S.update
-        ? banner('blue', esc(T.updateNew.replace('{v}', S.update)),
-                 `<a class=btn href="{{RELEASES}}" target=_blank `
-                 + `rel="noopener noreferrer">${T.updateWhat}</a>`
-                 + `<button class=btn onclick=doUpdate()>${T.updateNow}</button>`)
-        : '')
-    + offban;
+  renderBanners();
   if (S.update) announce(S.update);
   // A listed address that answers as somebody else — the rule is now written
   // for whoever took it.
@@ -3031,7 +3035,7 @@ let okAt = null, offban = '';
 const stale = bad => {
   offban = bad ? banner('grey', T.offline.replace('{t}', okAt
     ? okAt.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : '—')) : '';
-  if (bad && S) draw();       // связь пропала — перерисовать нечем, кроме себя
+  renderBanners();            // связь может пропасть до первого S — баннер не ждёт draw()
   if (!bad) okAt = new Date();
 };
 const load = m => fetch('/api?month=' + (month = m || month || ''))
