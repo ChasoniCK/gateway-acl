@@ -2212,7 +2212,7 @@ CSS = TOKENS + """
  .sw::before{content:"";position:absolute;top:2px;left:2px;width:18px;height:18px;
      border-radius:50%;background:var(--on);box-shadow:var(--sh-knob);
      transition:transform .15s}
- .sw:checked{background:var(--green)}
+ .sw:checked{background:var(--blue)}
  .sw:checked::before{transform:translateX(16px)}
 
  .seg{display:inline-flex;background:var(--track);border-radius:var(--r-pill);
