@@ -310,6 +310,10 @@ STRINGS = {
         "updateFail": "GitHub не ответил. Проверьте связь и попробуйте позже.",
         "updateLog": "Как всё прошло: {{UPDLOG}}",
         "settingsTitle": "Настройки",
+        "groupGeneral": "Основное",
+        "groupNet": "Сеть",
+        "groupMaint": "Обслуживание",
+        "groupPw": "Пароль",
         "theme": "Тема",
         "themeAuto": "Авто",
         "themeLight": "Светлая",
@@ -523,6 +527,10 @@ STRINGS = {
         "updateFail": "GitHub did not answer. Check the link and try later.",
         "updateLog": "How it went: {{UPDLOG}}",
         "settingsTitle": "Settings",
+        "groupGeneral": "General",
+        "groupNet": "Network",
+        "groupMaint": "Maintenance",
+        "groupPw": "Password",
         "theme": "Theme",
         "themeAuto": "Auto",
         "themeLight": "Light",
@@ -2420,10 +2428,6 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  .off td.ip,.off td input{color:var(--dim)}
  .me{color:var(--dim);font-size:.72rem;margin-left:.4rem}
  #flt{max-width:9rem}
- /* Which version this gateway is on, where one goes to ask. Pushed left so it
-    sits opposite the save button instead of costing the card a line. */
- .ver{margin-right:auto;color:var(--dim);font-size:.78rem;
-      font-family:ui-monospace,monospace;align-self:center}
  /* Every sparkline is scaled to the same peak day, so the rows compare
     against each other and not only against themselves. */
  .spark{display:block;margin:.25rem 0 0 auto}
@@ -2461,46 +2465,20 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  .act select{padding-right:.3rem}
  .act button:hover,.act select:hover{color:var(--fg);border-color:var(--edge)}
  .act .on{color:var(--ok);border-color:var(--okline)}
- /* The settings live in the corner: a summary that looks like the buttons
-    beside it, and a card that drops out of it. details does the opening on
-    its own — no script, and it works in whatever browser is at hand. */
- .gear{position:relative}
- .gear>summary{cursor:pointer;list-style:none;padding:.32rem .55rem;
-   border:1px solid var(--line);border-radius:5px;background:var(--in)}
- .gear>summary::-webkit-details-marker{display:none}
- .gear[open]>summary,.gear>summary:hover{border-color:var(--edge)}
- .gear>.card{position:absolute;right:0;top:calc(100% + .4rem);z-index:5;
-   width:min(36rem,88vw);margin:0;box-shadow:0 12px 34px var(--sh)}
- .set{display:grid;grid-template-columns:repeat(auto-fit,minmax(10rem,1fr));
-      gap:.7rem .9rem;margin-bottom:.9rem}
- .set label{display:block;font-size:.75rem;color:var(--dim);letter-spacing:.04em}
- .set input,.set select{width:100%;margin-top:.2rem}
- .set .chk,.chk input{display:flex;align-items:center;width:auto;margin:0}
- /* wrap: the reboot row carries a field after its text and the column is
-    narrow — a label that overflowed its cell would sit on top of the next. */
- .set .chk{gap:.45rem;align-self:end;padding-bottom:.4rem;flex-wrap:wrap}
- /* A switch, in the panel's own two colours: it is still the checkbox itself,
-    stripped of its native look, and the knob is its ::before sliding across.
-    No wrapper span, so the label, the keyboard and :checked all keep working. */
- /* .set .sw, not .sw: the width has to outrank the .chk input above it. */
- .set .sw{appearance:none;-webkit-appearance:none;flex:none;position:relative;
-     width:34px;height:18px;padding:0;border-radius:9px;cursor:pointer;
-     transition:background .15s,border-color .15s}
- .sw::before{content:"";position:absolute;top:2px;left:2px;width:12px;height:12px;
-     border-radius:50%;background:var(--dim);transition:transform .15s,background .15s}
- .sw:checked{background:var(--down);border-color:var(--down)}
- .sw:checked::before{background:var(--fg);transform:translateX(16px)}
- /* A switched-off field must still look like a field. Browsers grey a disabled
-    input down to nearly the card behind it, and WebKit overrides `color` with
-    its own fill — the hour is worth reading while the switch is off. */
- .set input:disabled{opacity:1;color:var(--dim);-webkit-text-fill-color:var(--dim);
-   background:var(--bg);border-style:dashed;cursor:not-allowed}
  .legend{display:flex;gap:1rem;font-size:.78rem;color:var(--dim);margin-top:.5rem}
  .legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:.35rem}
  .legend i.dash{width:14px;height:0;border-radius:0;border-top:1.5px dashed var(--dim);
                 vertical-align:middle}
  /* The legend paints every <i> as a swatch — the question mark is not one. */
  .legend .q{width:auto;height:auto;border-radius:50%;margin:0 0 0 .3rem}
+ .shead{display:flex;align-items:center;gap:var(--s2);margin-bottom:var(--s4)}
+ .shead .sp{flex:1}
+ .grp{margin:var(--s4) 0 var(--s2);color:var(--dim)}
+ .srow2{display:flex;align-items:center;gap:var(--s2);margin-top:var(--s4)}
+ .srow2 .sp{flex:1}
+ .sheet .field{max-width:11rem}
+ .sheet input:disabled{opacity:1;color:var(--dim);-webkit-text-fill-color:var(--dim);
+   cursor:not-allowed}
  a{color:var(--link)}
  form{display:flex;gap:.5rem;flex-wrap:wrap}
  form input{flex:1;min-width:8rem}
@@ -2523,59 +2501,74 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
   .spark{display:none}
   .srow{grid-template-columns:7rem minmax(0,1fr)}
   .act{justify-content:flex-start}
-  /* Too narrow to hang off the corner: a sheet at the bottom instead, so it
-     never covers the button that opened it. */
-  .gear>.card{position:fixed;left:.7rem;right:.7rem;bottom:.7rem;top:auto;
-    width:auto;max-height:78vh;overflow:auto}
  }
 </style>
 <header id=hdr>
  <h1>{{t.h1}}</h1><span class=sp></span>
- <span id=bypbox></span>
- <details class=gear>
-  <summary>{{t.settingsTitle}}</summary>
-  <div class=card>
-   <div class=set>
-    <label>{{t.theme}}<select id=s_theme onchange="setTheme(this.value)">
-     <option value=auto>{{t.themeAuto}}<option value=light>{{t.themeLight}}
-     <option value=dark>{{t.themeDark}}</select></label>
-    <label>{{t.sLang}}<select id=s_lang>
-     <option value=ru{{SEL_RU}}>Русский<option value=en{{SEL_EN}}>English</select></label>
-    <label>{{t.sPoll}}<input id=s_poll type=number min=5 max=3600 value="{{POLL}}"></label>
-    <label title="{{t.sKeepWhat}}"
-     >{{t.sKeep}}<input id=s_keep type=number min=1 max=24 value="{{KEEP}}"></label>
-    <!-- The switch is the label of the field it turns on, so the two cannot
-         drift apart; the hour stays visible while it is off, only greyed. -->
-    <label class=chk title="{{t.sRebootAtWhat}}"><input id=s_rb class=sw type=checkbox{{RB}}
-      onchange="s_reboot_at.disabled=!this.checked">{{t.sRebootAt}}
-     <!-- lang, not the page's: <input type=time> takes its 12/24-hour face from
-          a locale, and en-GB is the one that is 24-hour in every language. -->
-     <input id=s_reboot_at type=time lang=en-GB value="{{REBOOT_AT}}"{{RB_OFF}}></label>
-    <label>{{t.sPort}}<input id=s_port type=number min=1 max=65535 value="{{PORT}}"></label>
-    <label>{{t.sIface}}<input id=s_iface value="{{IFACE}}"></label>
-    <label>{{t.sLan}}<input id=s_lan value="{{LANCIDR}}"></label>
-    <label>{{t.sSelfIp}}<input id=s_self value="{{GW}}"></label>
-    <label>{{t.sPw}}<input id=s_pw type=password autocomplete=new-password
-      placeholder="{{t.sPwKeep}}"></label>
-    <label class=chk><input id=s_upd class=sw type=checkbox{{UPD}}
-      onchange="s_ntf.disabled=!this.checked">{{t.sUpdate}}</label>
-    <!-- Nested under the check it depends on: there is nothing to announce
-         when nobody is asking GitHub. -->
-    <label class=chk><input id=s_ntf class=sw type=checkbox{{NTF}}{{NTF_OFF}}
-      onchange=askNotify()>{{t.sNotify}}</label>
-   </div>
-   <div class=act><span class=ver>gateway-acl {{VERSION}}</span>
-    <button id=s_check onclick=checkUpd()>{{t.sCheck}}</button>
-    <button id=s_reboot onclick=rebootHost()>{{t.sReboot}}</button>
-    <button onclick=saveCfg()>{{t.sSave}}</button></div>
-   <p class=hint>{{t.sCheckHint}}</p>
-   <p class=hint>{{t.sNotifyHint}}</p>
-   <p class=hint>{{t.sNetHint}}</p>
-  </div>
- </details>
+ <button class="btn plain" onclick=openSheet()>{{t.settingsTitle}}</button>
  <button class="btn plain" onclick="location='/logout'">{{t.logout}}</button>
 </header>
 <div id=banners></div>
+<div class=sheet id=sheet hidden onclick="if(event.target===this)closeSheet()">
+ <div>
+  <div class=shead><h1>{{t.settingsTitle}}</h1><span class=sp></span>
+   <button class=btn onclick=closeSheet()>{{t.close}}</button></div>
+
+  <h2 class=grp>{{t.groupGeneral}}</h2>
+  <div class="list inset panel">
+   <div class=row><span class=sp>{{t.sLang}}</span><select id=s_lang class=field>
+    <option value=ru{{SEL_RU}}>Русский<option value=en{{SEL_EN}}>English</select></div>
+   <div class=row><span class=sp>{{t.theme}}</span><select id=s_theme class=field
+     onchange="setTheme(this.value)"><option value=auto>{{t.themeAuto}}
+     <option value=light>{{t.themeLight}}<option value=dark>{{t.themeDark}}</select></div>
+   <div class=row><span class=sp>{{t.sPoll}}</span>
+    <input id=s_poll class=field type=number min=5 max=3600 value="{{POLL}}"></div>
+   <div class=row><span class=sp>{{t.sKeep}}</span>
+    <input id=s_keep class=field type=number min=1 max=24 value="{{KEEP}}"></div>
+   <p class=hint>{{t.sKeepWhat}}</p>
+  </div>
+
+  <h2 class=grp>{{t.groupNet}}</h2>
+  <div class="list inset panel">
+   <div class=row><span class=sp>{{t.sPort}}</span>
+    <input id=s_port class=field type=number min=1 max=65535 value="{{PORT}}"></div>
+   <div class=row><span class=sp>{{t.sIface}}</span>
+    <input id=s_iface class=field value="{{IFACE}}"></div>
+   <div class=row><span class=sp>{{t.sLan}}</span>
+    <input id=s_lan class=field value="{{LANCIDR}}"></div>
+   <div class=row><span class=sp>{{t.sSelfIp}}</span>
+    <input id=s_self class=field value="{{GW}}"></div>
+   <p class=hint>{{t.sNetHint}}</p>
+  </div>
+
+  <h2 class=grp>{{t.groupMaint}}</h2>
+  <div class="list inset panel">
+   <div class=row><span class=sp>{{t.sRebootAt}}</span>
+    <input id=s_reboot_at class=field type=time lang=en-GB value="{{REBOOT_AT}}"{{RB_OFF}}>
+    <input id=s_rb class=sw type=checkbox{{RB}}
+      onchange="s_reboot_at.disabled=!this.checked"></div>
+   <div class=row><span class=sp>{{t.sUpdate}}</span><input id=s_upd class=sw
+     type=checkbox{{UPD}} onchange="s_ntf.disabled=!this.checked"></div>
+   <div class=row><span class=sp>{{t.sNotify}}</span><input id=s_ntf class=sw
+     type=checkbox{{NTF}}{{NTF_OFF}} onchange=askNotify()></div>
+   <p class=hint>{{t.sNotifyHint}}</p>
+   <div class=row><span class=sp>{{t.byp}}</span><span id=bypbox></span></div>
+   <div class=row><span class=sp></span>
+    <button class=btn id=s_check onclick=checkUpd()>{{t.sCheck}}</button>
+    <button class="btn bad" id=s_reboot onclick=rebootHost()>{{t.sReboot}}</button></div>
+   <p class=hint>{{t.sCheckHint}}</p>
+  </div>
+
+  <h2 class=grp>{{t.groupPw}}</h2>
+  <div class="list inset panel">
+   <div class=row><span class=sp>{{t.sPw}}</span><input id=s_pw class=field
+     type=password autocomplete=new-password placeholder="{{t.sPwKeep}}"></div>
+  </div>
+
+  <div class=srow2><span class="sec mono sp">gateway-acl {{VERSION}}</span>
+   <button class="btn tinted" onclick=saveCfg()>{{t.sSave}}</button></div>
+ </div>
+</div>
 
 <div class=row>
  <div class=card>
@@ -2842,6 +2835,13 @@ const setTheme = v => {
 };
 try { s_theme.value = localStorage.gwacl_theme || 'auto'; } catch (e) {}
 
+// details закрывался сам; шит — нет, поэтому Esc и клик мимо пишутся руками.
+const openSheet = () => { sheet.hidden = false; s_lang.focus(); };
+const closeSheet = () => { sheet.hidden = true; };
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && !sheet.hidden) closeSheet();
+});
+
 // The view someone left behind, so a reload does not throw them back to the
 // default sort. In a private window localStorage throws — then it is simply
 // not remembered. The picked device is not here: it lives in the address bar.
@@ -2913,9 +2913,11 @@ const draw = () => {
     th.setAttribute('aria-sort', on ? (sortd > 0 ? 'ascending' : 'descending') : 'none');
   }
   // The menu that opens it — while it is already open there is nothing left
-  // to pick, and the red banner below carries that state and the way to close it.
-  bypbox.innerHTML = S.bypass > S.now ? ''
-    : `<select title="${T.bypWhat}" onchange="bypass(this.value,this)">`
+  // to pick, so the row shows the remaining time instead; the warning and the
+  // way to close it live in the red banner above.
+  bypbox.innerHTML = S.bypass > S.now
+    ? `<span class="sec num">${left(S.bypass - S.now)}</span>`
+    : `<select class=field title="${T.bypWhat}" onchange="bypass(this.value,this)">`
       + `<option value="">${T.byp}</option>`
       + BYP.map(([v, k]) => `<option value="${v}">${T[k]}</option>`).join('')
       + `</select>`;
@@ -3116,6 +3118,7 @@ for (const th of document.querySelectorAll('th.s')) {
 
 // "/" is where one starts typing at a table, in every other program.
 document.onkeydown = e => {
+  if (!sheet.hidden) return;   // filter sits behind the sheet's scrim
   if (e.key === '/' && !/^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName)) {
     e.preventDefault();
     flt.focus();
@@ -3993,7 +3996,7 @@ def selftest():
                "h_ip", "h_name", "h_traf", "h_now", "h_seen", "unk", "ub",
                "flt", "kother", "kotherbox", "othlbl", "lanips", "s_keep",
                "s_reboot", "s_reboot_at", "s_rb", "s_check", "bypbox", "allsw", "clash",
-               "clashb", "s_theme"):
+               "clashb", "s_theme", "sheet"):
         assert f"id={el}>" in page or f"id={el} " in page, f"the page has no {el}"
 
     # Цвет живёт в переменных, иначе одна из двух тем ломается молча. Литерал
