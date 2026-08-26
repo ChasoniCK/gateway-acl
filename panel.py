@@ -377,6 +377,7 @@ STRINGS = {
         "vsPrev": "к прошлому месяцу",
         "noHours": "часы копятся с запуска панели — подождите немного",
         "showAll": "показать все",
+        "showInChart": "Показать в графике",
         "sysTitle": "Машина",
         "sCpu": "процессор",
         "sMem": "память",
@@ -595,6 +596,7 @@ STRINGS = {
         "vsPrev": "against the previous month",
         "noHours": "hours accrue from the panel's start — give it a moment",
         "showAll": "show all",
+        "showInChart": "Show in chart",
         "sysTitle": "Machine",
         "sCpu": "cpu",
         "sMem": "memory",
@@ -2418,37 +2420,8 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
     border-radius:var(--r-ctl);box-shadow:var(--sh);color:var(--fg);
     font-size:var(--f-sec);line-height:1.4;white-space:normal}
  .q:hover>span,.q:focus>span{display:block}
- /* Every row carries the dot, so the column keeps its shape and the eye reads
-    a colour change rather than something appearing out of nowhere. */
- .dot{display:inline-block;width:6px;height:6px;border-radius:50%;
-      background:var(--mut2);margin-right:.45rem;vertical-align:middle}
- .dot.live{background:var(--live)}
- table{width:100%;border-collapse:collapse}
- th{font-size:.72rem;font-weight:600;letter-spacing:.08em;text-transform:uppercase;
-    color:var(--dim);text-align:left;padding:0 .4rem .5rem;border-bottom:1px solid var(--line)}
- th.r,td.r{text-align:right}
- th.s{cursor:pointer;user-select:none}
- th.s:hover,th.s:focus-visible{color:var(--fg)}
- td{padding:.55rem .4rem;border-bottom:1px solid var(--line);vertical-align:middle}
- tbody tr:last-child td{border-bottom:0}
- td.ip{font-family:ui-monospace,monospace;white-space:nowrap;cursor:pointer}
- td.ip:hover{color:var(--link)}
- tr.pick td.ip{color:var(--down)}
- tr.pick{background:var(--pick)}
- td input{width:100%;background:transparent;border:1px solid transparent;padding:.2rem .35rem}
- td input:hover{border-color:var(--line)}
- td input:focus{background:var(--in);border-color:var(--edge);outline:none}
- .off td.ip,.off td input{color:var(--dim)}
- .me{color:var(--dim);font-size:.72rem;margin-left:.4rem}
  #flt{max-width:9rem}
- /* Every sparkline is scaled to the same peak day, so the rows compare
-    against each other and not only against themselves. */
- .spark{display:block;margin:.25rem 0 0 auto}
  .mini{font-size:.78rem;color:var(--dim);white-space:nowrap}
- /* wrap: four controls in a cell, and one of them appears only when a tunnel
-    mark is configured — on a narrow screen they go to a second line rather
-    than pushing the table sideways. */
- .act{display:flex;gap:.35rem;justify-content:flex-end;flex-wrap:wrap}
  /* Address, whatever the network knows it as, and the button. It wraps: on a
     phone the three of them do not fit on one line. */
  .blk{display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;margin:.35rem 0}
@@ -2458,26 +2431,36 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  .blk .mini{flex:0 1 21rem;min-width:7rem;overflow-wrap:anywhere;white-space:normal}
  /* When it last knocked: its own width, so it does not share the name's. */
  .blk .knock{flex:0 0 auto;min-width:6.5rem}
- /* The name a device gives the network, offered as a name to keep. It sits at
-    the end of the field rather than beside it: a button of its own at the far
-    edge of the column reads as belonging to the next column along. The field
-    is empty whenever it exists, and the padding keeps it that way while
-    somebody is typing over it. */
- .nm{position:relative;display:flex;align-items:center}
- .nm input{padding-right:1.5rem}
- .ghost{position:absolute;right:.15rem;padding:0 .3rem;font-size:.82rem;
-        color:var(--dim);background:none;border-color:var(--line)}
- .ghost:hover{color:var(--fg);border-color:var(--edge)}
- /* At rest it would be a mark floating in the middle of a row: the field it
-    belongs to has no border until the pointer is on it. So it appears with
-    that border — but only where there is a pointer at all, or a phone would
-    hide it for good. */
- @media (hover:hover){.nm .ghost{opacity:0;transition:opacity .1s}
-  tr:hover .ghost,.ghost:focus{opacity:1}}
- .act button,.act select{padding:.22rem .5rem;font-size:.82rem;color:var(--dim)}
- .act select{padding-right:.3rem}
- .act button:hover,.act select:hover{color:var(--fg);border-color:var(--edge)}
- .act .on{color:var(--ok);border-color:var(--okline)}
+ .drow{border-bottom:.5px solid var(--line)}
+ .drow:last-child{border-bottom:0}
+ .dmain{display:flex;align-items:center;gap:var(--s3);min-height:48px;
+        padding:var(--s2) 0;cursor:pointer}
+ .dmain .sp{flex:1}
+ .dname{min-width:0;flex:0 1 14rem}
+ .nm{background:none;border:0;border-radius:var(--r-ctl);padding:2px var(--s1);
+     width:100%;font-size:var(--f-row)}
+ .nm:hover{background:var(--fill)}
+ .nm:focus{background:var(--fill);outline:2px solid var(--blue);outline-offset:0}
+ .dnum{text-align:right}
+ .dot{flex:none;width:7px;height:7px;border-radius:50%;background:transparent}
+ .dot.live{background:var(--green)}
+ .chev{color:var(--dim2);transition:transform .15s;display:inline-block}
+ .drow.open .chev{transform:rotate(90deg)}
+ .drow.off .nm,.drow.off .dnum{color:var(--dim)}
+ .ddet{padding:0 0 var(--s3) var(--s5);display:flex;flex-direction:column;
+       gap:var(--s2)}
+ .spark{display:block;width:100%;height:28px}
+ .dacts{display:flex;align-items:center;gap:var(--s2);flex-wrap:wrap}
+ .dacts .sp{flex:1}
+ .vpn{display:flex;align-items:center;gap:var(--s2);font-size:var(--f-sec);
+      color:var(--dim)}
+ .dname{position:relative}
+ .ghost{position:absolute;right:2px;top:2px;padding:0 var(--s1);font-size:var(--f-sec);
+        color:var(--dim);background:var(--fill);border:0;border-radius:var(--r-ctl);
+        cursor:pointer}
+ .ghost:hover{color:var(--fg)}
+ @media (hover:hover){.ghost{opacity:0;transition:opacity .1s}
+  .drow:hover .ghost,.ghost:focus{opacity:1}}
  .shead{display:flex;align-items:center;gap:var(--s2);margin-bottom:var(--s4)}
  .shead .sp{flex:1}
  .grp{margin:var(--s4) 0 var(--s2);color:var(--dim)}
@@ -2490,21 +2473,9 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  form{display:flex;gap:.5rem;flex-wrap:wrap}
  form input{flex:1;min-width:8rem}
  @media (max-width:900px){.row2{grid-template-columns:1fr}}
- /* On a phone the columns do not fit — a row becomes a block of two lines:
-    address with name, then traffic, activity and buttons. */
  @media (max-width:620px){
   body{padding:1rem .7rem 3rem}
   .card{padding:.8rem .75rem}
-  thead{display:none}
-  table,tbody{display:block}
-  tr{display:flex;flex-wrap:wrap;align-items:center;gap:.35rem .9rem;
-     padding:.6rem 0;border-bottom:1px solid var(--line)}
-  tbody tr:last-child{border-bottom:0}
-  td{display:block;border:0;padding:0}
-  td:nth-child(2){flex:1 1 8rem}
-  td.r{text-align:left}
-  .spark{display:none}
-  .act{justify-content:flex-start}
  }
 </style>
 <header id=hdr>
@@ -2599,14 +2570,7 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
   <button id=allsw onclick=toggleAll() title="{{t.allWhat}}"></button>
   <input id=flt placeholder="{{t.filter}}" aria-label="{{t.filter}}" oninput=draw()>
  </div>
- <table><thead><tr>
-  <th class=s id=h_ip onclick="sortBy('ip')">
-  <th class=s id=h_name onclick="sortBy('name')">
-  <th class="r s" id=h_traf onclick="sortBy('traf')">
-  <th class="r s" id=h_now onclick="sortBy('now')">
-  <th class="r s" id=h_seen onclick="sortBy('seen')">
-  <th></tr></thead>
- <tbody id=tb></tbody></table>
+ <div class="list inset" id=tb></div>
  <form id=f style="margin-top:1rem">
   <!-- The list is what ARP and the DHCP leases already know and this table
        does not: a native datalist, so the browser does the completing. -->
@@ -2696,8 +2660,12 @@ const upfmt = s => {
 
 // S is the last answer from the server, kept so that sorting, the day/hour
 // switch and picking a device redraw from memory instead of asking again.
+// Раскрытие держится в переменной, а не в разметке: draw() перерисовывает
+// список каждые пять секунд и стёр бы состояние, живущее только в DOM.
+// open — имя функции окна; своя переменная с тем же именем перекрыла бы её
+// на весь скрипт, поэтому openIp.
 let S = null, month = null, sel = null, mode = 'day', sortk = 'ip', sortd = 1,
-    oth = 0, mtot = 0;
+    oth = 0, mtot = 0, openIp = null;
 
 // [short label, up, down, full label, other] — the chart draws whatever this
 // returns, so the month, the last 24 hours and one device's slice are the same
@@ -2792,15 +2760,38 @@ const hover = i => {
 
 const spark = (ser, max, on) => {
   if (!ser || ser.length < 2) return '';
-  const w = 72, h = 15, bw = w/ser.length;
-  return `<svg class=spark viewBox="0 0 ${w} ${h}" width=${w} height=${h} `
+  const w = 240, h = 28, bw = w / ser.length;
+  return `<svg class=spark viewBox="0 0 ${w} ${h}" preserveAspectRatio=none `
     + `fill="var(--down)"${on ? '' : ' opacity=.35'}>`
-    + ser.map((v, i) => { const t = (v[0]+v[1])/max*h;
-        // Quoted: an unquoted last attribute would swallow the closing slash.
-        return t < .4 ? '' : `<rect x="${(i*bw).toFixed(2)}" y="${(h-t).toFixed(2)}" `
-          + `width="${Math.max(.7, bw*.72).toFixed(2)}" height="${t.toFixed(2)}"/>`;
+    + ser.map((v, i) => { const t = (v[0] + v[1]) / max * h;
+        return t < .4 ? '' : `<rect x="${(i * bw).toFixed(2)}" y="${(h - t).toFixed(2)}" `
+          + `width="${Math.max(.7, bw * .72).toFixed(2)}" height="${t.toFixed(2)}"/>`;
       }).join('') + `</svg>`;
 };
+
+const devDetail = (x, peak) => `<div class=ddet>`
+  + spark(x.series, peak, x.on)
+  + `<div class=dacts>`
+  + (x.until > S.now
+      ? `<button class=btn title="${T.tmCancel}" `
+        + `onclick="post({ip:'${esc(x.ip)}',for:0})">${left(x.until - S.now)} ×</button>`
+      : `<select class=field title="${T.tmWhat}" `
+        + `onchange="timer('${esc(x.ip)}',${!x.on},this)">`
+        + `<option value="">${T.tmFor}</option>`
+        + TIMES.map(([v, k]) => `<option value="${v}">${T[k]}</option>`).join('')
+        + `</select>`)
+  // vpnOff — это «мимо VPN»: у переключателя подпись называет состояние, в
+  // которое он включён, а не действие, как называла его кнопка.
+  + (S.vpnable ? `<label class=vpn title="${T.vpnWhat}">${T.vpnOff}`
+      + `<input class=sw type=checkbox${x.vpn ? '' : ' checked'} `
+      + `onchange="post({ip:'${esc(x.ip)}',vpn:!this.checked})"></label>` : '')
+  + `<button class=btn onclick="pickDev('${esc(x.ip)}')">${T.showInChart}</button>`
+  + `<span class=sp></span>`
+  + `<button class="btn bad" onclick="del('${esc(x.ip)}',${x.ip === S.you})">`
+  + `${T.del}</button></div>`
+  + `<div class="sec mono">${esc(x.mac)}</div></div>`;
+
+const toggleRow = ip => { openIp = openIp === ip ? null : ip; draw(); };
 
 const strip = () => {
   const ms = S.months.slice(-12), max = Math.max(...ms.map(m => m[1]), 1);
@@ -2845,8 +2836,6 @@ const machine = s => {
   return h || `<p class=hint>${T.sysNone}</p>`;
 };
 
-const HEADS = {ip: 'colAddr', name: 'colName', traf: 'colTraffic',
-               now: 'colNow', seen: 'colSeen'};
 const CMP = {
   // Octets padded, or 192.168.1.9 would sort after 192.168.1.10.
   ip: x => x.ip.split('.').map(o => o.padStart(3, '0')).join('.'),
@@ -2936,12 +2925,6 @@ const draw = () => {
   if (!S) return;
   if (sel && !S.devices.some(x => x.ip === sel)) sel = null;
   const one = sel && S.devices.find(x => x.ip === sel);
-  for (const k in HEADS) {
-    const th = document.getElementById('h_' + k), on = sortk === k;
-    th.textContent = T[HEADS[k]] + (on ? (sortd > 0 ? ' ↑' : ' ↓') : '');
-    // The arrow says it to the eye, aria-sort to everything else.
-    th.setAttribute('aria-sort', on ? (sortd > 0 ? 'ascending' : 'descending') : 'none');
-  }
   // The menu that opens it — while it is already open there is nothing left
   // to pick, so the row shows the remaining time instead; the warning and the
   // way to close it live in the red banner above.
@@ -3007,42 +2990,33 @@ const draw = () => {
   tb.innerHTML = list.map(x => {
     const t = x.up + x.down, me = x.ip === S.you, r = x.rate[0] + x.rate[1];
     const live = r > 0 || (x.seen && S.now - x.seen < fresh);
-    return `<tr class="${x.on ? '' : 'off'}${x.ip === sel ? ' pick' : ''}">`
-     + `<td class=ip title="${esc(x.mac)}" onclick="pickDev('${esc(x.ip)}')">`
-     // The dot carries its meaning in colour alone; the title is the rest of it.
-     + `<i class="dot${live ? ' live' : ''}" title="${live ? T.dotLive : T.dotQuiet}"></i>`
-     + `${esc(x.ip)}${me ? `<span class=me>${T.youAre}</span>` : ''}</td>`
-     + `<td><div class=nm><input value="${esc(x.name)}" `
-     + `placeholder="${esc(x.host || T.phName)}" `
+    const op = openIp === x.ip;
+    return `<div class="drow${x.on ? '' : ' off'}${op ? ' open' : ''}">`
+     + `<div class=dmain onclick="toggleRow('${esc(x.ip)}')">`
+     + `<i class="dot${live ? ' live' : ''}" `
+     + `title="${live ? T.dotLive : T.dotQuiet}"></i>`
+     + `<div class=dname>`
+     // stopPropagation: клик по имени правит имя, а не раскрывает строку.
+     + `<input class=nm value="${esc(x.name)}" placeholder="${esc(x.host || T.phName)}" `
+     + `onclick="event.stopPropagation()" `
      + `onchange="setName('${esc(x.ip)}',this.value)">`
-     // Through data-, not into the onclick: the hostname comes out of a lease
-     // file this program does not own. addKnown already posts exactly this.
+     // Имя, которым устройство представляется сети, предложено как имя, которое
+     // можно оставить. Через data-, не в onclick: hostname из чужого файла аренд.
      + (!x.name && x.host ? `<button class=ghost data-ip="${esc(x.ip)}" `
-        + `data-nm="${esc(x.host)}" onclick="addKnown(this)" `
+        + `data-nm="${esc(x.host)}" onclick="event.stopPropagation();addKnown(this)" `
         + `title="${esc(n(T.useHost, x.host))}">+</button>` : '')
-     + `</div></td>`
-     + `<td class="r num">${fmt(t)}${spark(x.series, peak, x.on)}</td>`
-     + `<td class="r num mini">${r > 0 ? `↓ ${fmt(x.rate[1])}${T.perSec}`
-        + `  ↑ ${fmt(x.rate[0])}${T.perSec}` : '—'}</td>`
-     + `<td class="r mini">${x.seen ? ago(S.now - x.seen) : '—'}</td>`
-     + `<td><div class=act><button class="${x.on ? '' : 'on'}" `
-     + `onclick="post({ip:'${esc(x.ip)}',on:${!x.on}})">${x.on ? T.turnOff : T.turnOn}</button>`
-     // Same shape as the switch above it: the label is what pressing it does,
-     // and the green is the way back — a device standing outside the tunnel is
-     // the state one eventually wants undone.
-     + (S.vpnable ? `<button class="${x.vpn ? '' : 'on'}" title="${T.vpnWhat}" `
-        + `onclick="post({ip:'${esc(x.ip)}',vpn:${!x.vpn}})">`
-        + `${x.vpn ? T.vpnOff : T.vpnOn}</button>` : '')
-     // Whichever way it stands, the menu offers the other one for a while.
-     + (x.until > S.now
-        ? `<button title="${T.tmCancel}" onclick="post({ip:'${esc(x.ip)}',for:0})">`
-          + `${left(x.until - S.now)} ×</button>`
-        : `<select title="${T.tmWhat}" onchange="timer('${esc(x.ip)}',${!x.on},this)">`
-          + `<option value="">${T.tmFor}</option>`
-          + TIMES.map(([v, k]) => `<option value="${v}">${T[k]}</option>`).join('')
-          + `</select>`)
-     + `<button onclick="del('${esc(x.ip)}',${me})">${T.del}</button></div></td></tr>`;
-  }).join('') || `<tr><td colspan=6 class=hint>${fq ? T.noMatch : T.empty}</td></tr>`;
+     + `<div class=sec><span class=mono>${esc(x.ip)}</span>`
+     + `${me ? ' · ' + T.youAre : ''} · ${x.seen ? ago(S.now - x.seen) : '—'}</div>`
+     + `</div><span class=sp></span>`
+     + `<div class=dnum><b class=num>${fmt(t)}</b>`
+     + `<div class="sec num">${r > 0 ? `↓ ${fmt(x.rate[1])}${T.perSec}`
+        + `  ↑ ${fmt(x.rate[0])}${T.perSec}` : '—'}</div></div>`
+     + `<span class=chev>›</span>`
+     + `<input class=sw type=checkbox${x.on ? ' checked' : ''} `
+     + `onclick="event.stopPropagation()" `
+     + `onchange="post({ip:'${esc(x.ip)}',on:this.checked})">`
+     + `</div>${op ? devDetail(x, peak) : ''}</div>`;
+  }).join('') || `<p class=hint>${fq ? T.noMatch : T.empty}</p>`;
 
   renderBanners();
   if (S.update) announce(S.update);
@@ -3145,15 +3119,6 @@ const doUpdate = () => confirm(T.updateConfirm.replace('{v}', S && S.update || '
 // take the cursor out of a name someone is in the middle of typing.
 onresize = () => { if (S) chartbox.innerHTML = chart(rows(), mode === 'day'); };
 onscroll = () => hdr.classList.toggle('stuck', scrollY > 4);
-
-// The sort headers are cells, not buttons — a tab stop and the two keys a
-// button would answer to cost less than rebuilding the row out of buttons.
-for (const th of document.querySelectorAll('th.s')) {
-  th.tabIndex = 0;
-  th.onkeydown = e => {
-    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); th.click(); }
-  };
-}
 
 // "/" is where one starts typing at a table, in every other program.
 document.onkeydown = e => {
@@ -4032,7 +3997,7 @@ def selftest():
     page = render(PAGE_T)
     for el in ("banners", "kt", "kdelta", "mtitle", "ksum", "seg",
                "chartbox", "mstrip", "sysbox", "tb",
-               "h_ip", "h_name", "h_traf", "h_now", "h_seen", "unk", "ub",
+               "unk", "ub",
                "flt", "lanips", "s_keep",
                "s_reboot", "s_reboot_at", "s_rb", "s_check", "bypbox", "allsw", "clash",
                "clashb", "s_theme", "sheet"):
