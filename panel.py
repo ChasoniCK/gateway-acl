@@ -2383,16 +2383,19 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  svg.dim g.hi{opacity:1}
  /* One bar per month, click to go there. The height is the month's total, so
     a glance says whether this one is out of the ordinary. */
- .months{display:flex;gap:.25rem;align-items:flex-end}
- .mo{flex:1;min-width:0;background:none;border:0;padding:.15rem 0;display:flex;
-     flex-direction:column;justify-content:flex-end;align-items:center;gap:.3rem}
+ .months{display:flex;gap:var(--s1);align-items:flex-end}
+ .mo{flex:1;min-width:0;background:none;border:0;padding:var(--s1) 0;cursor:pointer;
+     display:flex;flex-direction:column;justify-content:flex-end;align-items:center;
+     gap:var(--s1)}
  /* Narrow: at full page width a bar as wide as its cell reads as a tile, and
     the differences in height stop being the thing you notice. */
- .mo i{display:block;width:100%;max-width:1.6rem;background:var(--mut);border-radius:2px}
- .mo:hover i{background:var(--mut2)}
- .mo.cur i{background:var(--down)}
- .mo span{font-size:.68rem;color:var(--dim);font-family:ui-monospace,monospace}
- .mo.cur span{color:var(--fg)}
+ .mo i{display:block;width:100%;max-width:1.4rem;background:var(--mut);
+       border-radius:3px 3px 0 0}
+ .mo:hover i{background:var(--dim2)}
+ .mo.cur i{background:var(--blue)}
+ .mo span{font-size:var(--f-sec);color:var(--dim);font-variant-numeric:tabular-nums}
+ .mo u{font-size:10px;color:var(--dim2);text-decoration:none}
+ .mo.cur span{color:var(--fg);font-weight:600}
  .srow{display:grid;grid-template-columns:7rem minmax(0,1fr);gap:.2rem .8rem;
        align-items:baseline;padding:.45rem 0;border-bottom:1px solid var(--line)}
  /* Not a title attribute: this card is rebuilt on every poll, and the browser
@@ -2801,10 +2804,16 @@ const spark = (ser, max, on) => {
 
 const strip = () => {
   const ms = S.months.slice(-12), max = Math.max(...ms.map(m => m[1]), 1);
-  return `<div class=months>` + ms.map(m =>
-    `<button class="mo${m[0] === S.month ? ' cur' : ''}" onclick="load('${m[0]}')" `
-    + `title="${m[0]}  ${fmt(m[1])}"><i style="height:${Math.max(2, m[1]/max*46).toFixed(0)}px">`
-    + `</i><span>${m[0].slice(5)}</span></button>`).join('') + `</div>`;
+  return `<div class=months>` + ms.map((m, i) => {
+    const [yy, mm] = m[0].split('-');
+    // Год только там, где он меняется: двенадцать одинаковых подписей ничего
+    // не сообщают, а «12» слева и «08» справа — это разные годы.
+    const yr = (i === 0 || mm === '01') ? `<u>${yy.slice(2)}</u>` : '';
+    return `<button class="mo${m[0] === S.month ? ' cur' : ''}" `
+      + `onclick="load('${m[0]}')" title="${m[0]}  ${fmt(m[1])}">`
+      + `<i style="height:${Math.max(2, m[1] / max * 46).toFixed(0)}px"></i>`
+      + `<span>${mm}</span>${yr}</button>`;
+  }).join('') + `</div>`;
 };
 
 // A number nobody can interpret is not a metric. Hover says which sensor.
