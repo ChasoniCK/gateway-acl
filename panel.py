@@ -2298,8 +2298,10 @@ LOGIN_T = """<!doctype html><meta charset=utf-8>
 <title>{{t.loginTitle}}</title>
 <style>{{CSS}}
  body{max-width:20rem;margin:0 auto;padding-top:22vh}
- form{display:flex;gap:var(--s2);margin-top:var(--s3)}
- form input{flex:1}
+ /* Колонкой, а не в строку: на входе одно поле и одно действие, и кнопка во
+    всю ширину — это и есть «войти», а не приписка сбоку от поля. */
+ form{display:flex;flex-direction:column;gap:var(--s2);margin-top:var(--s3)}
+ form input{width:100%}
  .err{color:var(--red);font-size:var(--f-sec);margin-top:var(--s2)}
 </style>
 <div class=panel>
