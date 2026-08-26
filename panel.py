@@ -2400,27 +2400,24 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  .mo u{position:absolute;bottom:0;left:0;right:0;text-align:center;
        font-size:10px;color:var(--dim2);text-decoration:none}
  .mo.cur span{color:var(--fg);font-weight:600}
- .srow{display:grid;grid-template-columns:7rem minmax(0,1fr);gap:.2rem .8rem;
-       align-items:baseline;padding:.45rem 0;border-bottom:1px solid var(--line)}
+ .meter{height:3px;border-radius:var(--r-pill);background:var(--track);
+        margin:0 0 var(--s2) var(--s6)}
+ .meter i{display:block;height:100%;border-radius:var(--r-pill);background:var(--blue)}
  /* Not a title attribute: this card is rebuilt on every poll, and the browser
     drops a pending native tooltip whenever the node under the cursor is
     replaced. A CSS one survives that, opens on focus as well as on hover — so
     a tap works too — and shows up in a screenshot. */
- .q{position:relative;margin-left:.3rem;padding:0 .3rem;border:1px solid var(--line);
-    border-radius:50%;color:var(--dim);font-size:.62rem;font-style:normal;cursor:help}
- .q:hover,.q:focus{color:var(--fg);border-color:var(--edge);outline:none}
- .q>span{display:none;position:absolute;z-index:9;left:-.5rem;top:calc(100% + .5rem);
-    width:min(15rem,62vw);padding:.55rem .65rem;background:var(--in);
-    border:1px solid var(--edge);border-radius:6px;box-shadow:0 10px 26px var(--sh);
-    color:var(--fg);font-size:.76rem;line-height:1.45;white-space:normal}
+ .q{position:relative;margin-left:var(--s1);color:var(--dim);font-style:normal;
+    font-size:var(--f-sec);cursor:help}
+ .q:hover,.q:focus{color:var(--fg);outline:none}
+ /* 11: above the sticky header (10) — the machine card scrolls under #hdr and
+    the tooltip must stay readable there — below the settings sheet (20), same
+    reasoning as .pop. */
+ .q>span{display:none;position:absolute;z-index:11;left:0;top:calc(100% + var(--s1));
+    width:min(15rem,62vw);padding:var(--s2) var(--s3);background:var(--panel);
+    border-radius:var(--r-ctl);box-shadow:var(--sh);color:var(--fg);
+    font-size:var(--f-sec);line-height:1.4;white-space:normal}
  .q:hover>span,.q:focus>span{display:block}
- .srow:last-child{border-bottom:0}
- .srow>span{font-size:.78rem;color:var(--dim)}
- /* Beats .num's nowrap: the load line carries the core count and an interface
-    name can be anything, so a long value wraps instead of leaving the card. */
- .srow b{white-space:normal;overflow-wrap:anywhere}
- .meter{grid-column:2;height:3px;border-radius:2px;background:var(--track)}
- .meter i{display:block;height:100%;border-radius:2px;background:var(--down)}
  /* Every row carries the dot, so the column keeps its shape and the eye reads
     a colour change rather than something appearing out of nowhere. */
  .dot{display:inline-block;width:6px;height:6px;border-radius:50%;
@@ -2507,7 +2504,6 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
   td:nth-child(2){flex:1 1 8rem}
   td.r{text-align:left}
   .spark{display:none}
-  .srow{grid-template-columns:7rem minmax(0,1fr)}
   .act{justify-content:flex-start}
  }
 </style>
@@ -2820,12 +2816,15 @@ const strip = () => {
   }).join('') + `</div>`;
 };
 
-// A number nobody can interpret is not a metric. Hover says which sensor.
-const q = text => `<i class=q tabindex=0>?<span>${esc(text)}</span></i>`;
-const meter = (pct, warn) => `<div class=meter><i style="width:${Math.min(100, Math.max(0, pct)).toFixed(0)}%`
-  + `${pct >= warn ? ';background:var(--warn)' : ''}"></i></div>`;
-const srow = (label, val, pct, warn) => `<div class=srow><span>${label}</span>`
-  + `<b class=num>${val}</b>${pct === null ? '' : meter(pct, warn)}</div>`;
+// ⓘ, а не кружок с вопросом: тот же CSS-механизм — нативный title не годится,
+// карточка перерисовывается на каждом опросе и снимает незакрытую подсказку.
+const q = text => `<i class=q tabindex=0>ⓘ<span>${esc(text)}</span></i>`;
+const meter = (pct, warn) => `<div class=meter><i style="width:`
+  + `${Math.min(100, Math.max(0, pct)).toFixed(0)}%`
+  + `${pct >= warn ? ';background:var(--red)' : ''}"></i></div>`;
+const srow = (label, val, pct, warn) =>
+  `<div class=row><span class=sp>${label}</span><b class=num>${val}</b></div>`
+  + (pct === null ? '' : meter(pct, warn));
 
 const machine = s => {
   let h = '';
@@ -2839,10 +2838,9 @@ const machine = s => {
   h += srow(T.sNetIf.replace('{iface}', esc(s.iface)),
             `↓ ${fmt(s.bps[0])}${T.perSec}  ↑ ${fmt(s.bps[1])}${T.perSec}`, null);
   if (s.load) h += srow(T.sLoad, s.load.map(x => x.toFixed(2)).join('  ')
-      + (s.cores ? '  · ' + n(T.cores, s.cores) : ''),
-      s.cores ? s.load[0]/s.cores*100 : null, 100);
+      + (s.cores ? '  · ' + n(T.cores, s.cores) : ''), null);
   if (s.temp) h += srow(T.sTemp + q(n(T.tempWhat, s.temp[1])),
-                        s.temp[0].toFixed(0) + ' °C', (s.temp[0]-30)/50*100, 80);
+                        s.temp[0].toFixed(0) + ' °C', null);
   if (s.up) h += srow(T.sUptime, upfmt(s.up), null);
   return h || `<p class=hint>${T.sysNone}</p>`;
 };
