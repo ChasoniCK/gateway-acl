@@ -372,6 +372,7 @@ STRINGS = {
         "byDay": "по дням",
         "byHour": "за сутки",
         "byMonth": "по месяцам",
+        "locale": "ru-RU",
         "cumul": "накопительно",
         "vsPrev": "к прошлому месяцу",
         "noHours": "часы копятся с запуска панели — подождите немного",
@@ -589,6 +590,7 @@ STRINGS = {
         "byDay": "by day",
         "byHour": "last 24 h",
         "byMonth": "by month",
+        "locale": "en-GB",
         "cumul": "cumulative",
         "vsPrev": "against the previous month",
         "noHours": "hours accrue from the panel's start — give it a moment",
@@ -2361,19 +2363,18 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  .ban.red{background:var(--redbg);color:var(--red)}
  .ban.blue{background:var(--bluebg)}
  .ban.grey{background:var(--fill);color:var(--dim)}
- .big{font-size:1.5rem}
  /* The chart earns the width, the machine's numbers do not. */
- .row2{display:grid;gap:1rem;grid-template-columns:minmax(0,2fr) minmax(0,24rem);
+ .row2{display:grid;gap:var(--s4);grid-template-columns:minmax(0,2fr) minmax(0,22rem);
       align-items:start}
  .ch{display:flex;align-items:baseline;gap:.6rem;margin-bottom:.9rem}
  .ch h2{margin:0}
  .ch .sp{flex:1}
- .sub{font-size:.72rem;font-weight:600;letter-spacing:.09em;text-transform:uppercase;
-      color:var(--dim);margin:1.2rem 0 .5rem}
- .kpi{display:flex;gap:2rem;flex-wrap:wrap;margin-bottom:.4rem}
- .kpi div{min-width:6rem}
- .kpi span{display:block;font-size:.75rem;color:var(--dim);letter-spacing:.05em}
- .delta{font-style:normal;font-size:.8rem;color:var(--dim);margin-left:.45rem}
+ .chead{display:flex;align-items:center;gap:var(--s2);margin-bottom:var(--s3)}
+ .chead .sp{flex:1}
+ .hero{display:flex;align-items:baseline;gap:var(--s2)}
+ .hero b{font-size:var(--f-hero);font-weight:600;letter-spacing:-.02em}
+ .hero em{font-style:normal;font-size:var(--f-sec);color:var(--dim)}
+ #chartbox{position:relative;margin-top:var(--s4)}
  #chartbox svg{display:block;width:100%;height:auto}
  /* One bar per month, click to go there. The height is the month's total, so
     a glance says whether this one is out of the ordinary. */
@@ -2468,12 +2469,6 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  .act select{padding-right:.3rem}
  .act button:hover,.act select:hover{color:var(--fg);border-color:var(--edge)}
  .act .on{color:var(--ok);border-color:var(--okline)}
- .legend{display:flex;gap:1rem;font-size:.78rem;color:var(--dim);margin-top:.5rem}
- .legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:.35rem}
- .legend i.dash{width:14px;height:0;border-radius:0;border-top:1.5px dashed var(--dim);
-                vertical-align:middle}
- /* The legend paints every <i> as a swatch — the question mark is not one. */
- .legend .q{width:auto;height:auto;border-radius:50%;margin:0 0 0 .3rem}
  .shead{display:flex;align-items:center;gap:var(--s2);margin-bottom:var(--s4)}
  .shead .sp{flex:1}
  .grp{margin:var(--s4) 0 var(--s2);color:var(--dim)}
@@ -2491,8 +2486,6 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  @media (max-width:620px){
   body{padding:1rem .7rem 3rem}
   .card{padding:.8rem .75rem}
-  .kpi{gap:1.1rem}
-  .big{font-size:1.25rem}
   thead{display:none}
   table,tbody{display:block}
   tr{display:flex;flex-wrap:wrap;align-items:center;gap:.35rem .9rem;
@@ -2574,34 +2567,22 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
 </div>
 
 <div class=row2>
- <div class=card>
-  <div class=ch>
-   <h2>{{t.monthUse}}</h2><span id=chsel></span><span class=sp></span>
-   <div class=act>
-    <button id=bday onclick="setMode('day')">{{t.byDay}}</button>
-    <button id=bhour onclick="setMode('hour')">{{t.byHour}}</button>
-   </div>
+ <div class=panel>
+  <div class=chead><h2 id=mtitle></h2><span class=sp></span>
+   <div class=seg id=seg>
+    <button onclick="setMode('day')">{{t.byDay}}</button>
+    <button onclick="setMode('hour')">{{t.byHour}}</button></div>
+   <button class=btn onclick=csv() title="{{t.csvWhat}}">CSV</button>
   </div>
-  <div class=kpi>
-   <div><span>{{t.total}}</span><b class="num big" id=kt></b><em class=delta id=kdelta></em></div>
-   <div><span>{{t.inbound}}</span><b class=num id=kd></b></div>
-   <div><span>{{t.outbound}}</span><b class=num id=ku></b></div>
-   <div><span>{{t.perDay}}</span><b class=num id=ka></b></div>
-   <div id=kotherbox hidden><span>{{t.other}}</span><b class=num id=kother></b></div>
-  </div>
+  <div class=hero><b class="num" id=kt></b><em id=kdelta></em></div>
+  <div class="sec num" id=ksum></div>
   <div id=chartbox></div>
-  <div class=legend><span><i style="background:var(--down)"></i>{{t.inbound}}</span>
-   <span><i style="background:var(--up)"></i>{{t.outbound}}</span>
-   <span id=othlbl hidden><i style="background:var(--mut)"></i>{{t.other}}<i class=q
-     tabindex=0>?<span>{{t.otherWhat}}</span></i></span>
-   <span id=cumlbl><i class=dash></i>{{t.cumul}}</span></div>
-  <h3 class=sub>{{t.byMonth}}</h3>
+  <h3 class=grp>{{t.byMonth}}</h3>
   <div id=mstrip></div>
  </div>
-
- <div class=card>
-  <div class=ch><h2>{{t.sysTitle}}</h2></div>
-  <div id=sysbox></div>
+ <div class=panel>
+  <h2>{{t.sysTitle}}</h2>
+  <div class="list inset" id=sysbox></div>
  </div>
 </div>
 
@@ -2927,11 +2908,6 @@ const draw = () => {
   const others = S.devices.filter(x => x.ip !== S.you);
   allsw.hidden = !others.length;
   allsw.textContent = others.some(x => x.on) ? T.allOff : T.allOn;
-  bday.className = mode === 'day' ? 'on' : '';
-  bhour.className = mode === 'hour' ? 'on' : '';
-  chsel.innerHTML = one ? `<button onclick="pickDev(null)" title="${T.showAll}">`
-    + `${esc(one.name || one.ip)} ×</button>` : '';
-
   const dv = one ? [one] : S.devices;
   const U = dv.reduce((a,x) => a+x.up, 0), D = dv.reduce((a,x) => a+x.down, 0);
   // The month's total counts every address the history knows of, the devices
@@ -2939,17 +2915,30 @@ const draw = () => {
   // that is more than inbound plus outbound, and a tile that says why.
   mtot = (S.months.find(m => m[0] === S.month) || [0, 0])[1];
   oth = one ? 0 : Math.max(0, mtot - S.devices.reduce((a,x) => a+x.up+x.down, 0));
-  kt.textContent = fmt(U+D+oth); kd.textContent = fmt(D); ku.textContent = fmt(U);
-  ka.textContent = fmt(Math.round((U+D+oth) / Math.max(S.days.length, 1)));
-  kother.textContent = fmt(oth);
-  kotherbox.hidden = othlbl.hidden = !oth;
+
+  // Имя месяца берёт браузер: 12 названий на язык в STRINGS не нужны, а язык
+  // панели он уже знает.
+  const [my, mm] = S.month.split('-');
+  const mname = new Date(+my, +mm - 1).toLocaleDateString(T.locale,
+                  {month: 'long', year: 'numeric'});
+  mtitle.innerHTML = mname[0].toUpperCase() + mname.slice(1)
+    + (one ? ` · <button class=btn onclick="pickDev(null)" title="${T.showAll}">`
+             + `${esc(one.name || one.ip)} ×</button>` : '');
+
+  kt.textContent = fmt(U + D + oth);
   // Only against the whole month: a single device against everything last
   // month would be a comparison of two different things.
-  const pc = (!one && S.prev) ? Math.round((U+D+oth-S.prev)/S.prev*100) : null;
+  const pc = (!one && S.prev) ? Math.round((U + D + oth - S.prev) / S.prev * 100) : null;
   kdelta.textContent = pc === null ? '' : (pc > 0 ? '+' : '') + pc + '%';
   kdelta.title = pc === null ? '' : T.vsPrev;
+  ksum.innerHTML = `↓ ${fmt(D)} · ↑ ${fmt(U)} · `
+    + `${fmt(Math.round((U + D + oth) / Math.max(S.days.length, 1)))} ${T.perDay}`
+    + (oth ? ` · ${T.other} ${fmt(oth)}${q(T.otherWhat)}` : '');
+
+  for (const [i, b] of [...seg.children].entries())
+    b.className = (i === 0) === (mode === 'day') ? 'on' : '';
+
   chartbox.innerHTML = chart(rows(), mode === 'day');
-  cumlbl.hidden = mode !== 'day';
   mstrip.innerHTML = strip();
   // Not while the pointer is in there: rebuilding the card would close an open
   // tooltip, and holding the numbers still is exactly what someone reading
@@ -3994,10 +3983,10 @@ def selftest():
     # The script drives the page by id. A rename on one side only leaves a card
     # silently empty in the browser, which no other check here would notice.
     page = render(PAGE_T)
-    for el in ("banners", "kt", "kd", "ku", "ka", "kdelta", "chsel",
-               "bday", "bhour", "chartbox", "cumlbl", "mstrip", "sysbox", "tb",
+    for el in ("banners", "kt", "kdelta", "mtitle", "ksum", "seg",
+               "chartbox", "mstrip", "sysbox", "tb",
                "h_ip", "h_name", "h_traf", "h_now", "h_seen", "unk", "ub",
-               "flt", "kother", "kotherbox", "othlbl", "lanips", "s_keep",
+               "flt", "lanips", "s_keep",
                "s_reboot", "s_reboot_at", "s_rb", "s_check", "bypbox", "allsw", "clash",
                "clashb", "s_theme", "sheet"):
         assert f"id={el}>" in page or f"id={el} " in page, f"the page has no {el}"
