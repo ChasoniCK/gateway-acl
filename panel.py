@@ -2297,17 +2297,17 @@ LOGIN_T = """<!doctype html><meta charset=utf-8>
 {{HEAD}}
 <title>{{t.loginTitle}}</title>
 <style>{{CSS}}
- body{max-width:22rem;margin:0 auto;padding-top:22vh}
- form{display:flex;gap:.5rem;margin-top:.9rem}
- input{flex:1;min-width:0}
- .err{color:var(--warn);font-size:.85rem;margin-top:.7rem}
+ body{max-width:20rem;margin:0 auto;padding-top:22vh}
+ form{display:flex;gap:var(--s2);margin-top:var(--s3)}
+ form input{flex:1}
+ .err{color:var(--red);font-size:var(--f-sec);margin-top:var(--s2)}
 </style>
-<div class=card>
- <h2>{{t.panelTitle}}</h2>
+<div class=panel>
+ <h1>{{t.panelTitle}}</h1>
  <form method=post action=/login>
-  <input type=password name=password placeholder="{{t.password}}"
-         autocomplete=current-password autofocus required>
-  <button>{{t.signIn}}</button>
+  <input class=field name=password type=password autocomplete=current-password
+    placeholder="{{t.password}}" autofocus>
+  <button class="btn tinted">{{t.signIn}}</button>
  </form>
  {{MSG}}
 </div>
@@ -2429,16 +2429,7 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  #addrow>summary::-webkit-details-marker{display:none}
  #addrow form{display:flex;gap:var(--s2);flex-wrap:wrap;margin-top:var(--s2)}
  #addrow form input{flex:1;min-width:8rem}
- .mini{font-size:.78rem;color:var(--dim);white-space:nowrap}
- /* Address, whatever the network knows it as, and the button. It wraps: on a
-    phone the three of them do not fit on one line. */
- .blk{display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;margin:.35rem 0}
- .blk .num{min-width:9rem}
- /* A basis, not flex:1 — the button belongs next to the address it acts on,
-    not pushed to the far edge of a full-width card. */
- .blk .mini{flex:0 1 21rem;min-width:7rem;overflow-wrap:anywhere;white-space:normal}
- /* When it last knocked: its own width, so it does not share the name's. */
- .blk .knock{flex:0 0 auto;min-width:6.5rem}
+ .bad{color:var(--red)}
  .drow{border-bottom:.5px solid var(--line)}
  .drow:last-child{border-bottom:0}
  .dmain{display:flex;align-items:center;gap:var(--s3);min-height:48px;
@@ -2483,7 +2474,6 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  @media (max-width:900px){.row2{grid-template-columns:1fr}}
  @media (max-width:620px){
   body{padding:1rem .7rem 3rem}
-  .card{padding:.8rem .75rem}
  }
 </style>
 <header id=hdr>
@@ -2596,15 +2586,14 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  <p class=hint>{{t.hint}}</p>
 </div>
 
-<div class=card id=clash hidden>
+<div class=panel id=clash hidden>
  <h2>{{t.clashTitle}}</h2>
- <div id=clashb></div>
- <p class=hint>{{t.clashHint}}</p>
+ <div class="list inset" id=clashb></div>
 </div>
 
-<div class=card id=unk hidden>
+<div class=panel id=unk hidden>
  <h2>{{t.blockedTitle}}</h2>
- <div id=ub></div>
+ <div class="list inset" id=ub></div>
  <p class=hint>{{t.blockedHint}}</p>
 </div>
 
@@ -3043,20 +3032,21 @@ const draw = () => {
   // for whoever took it.
   clash.hidden = !S.clash.length;
   clashb.innerHTML = S.clash.map(([ip, was, now, ven]) =>
-    `<div class=blk><span class=num>${esc(ip)}</span>`
-    + `<span class=mini>${esc(T.clashLine.replace('{a}', was).replace('{b}', now))}`
-    + `${ven ? ' · ' + esc(ven) : ''}</span></div>`).join('');
+    `<div class=row><div class=dname><b class=mono>${esc(ip)}</b>`
+    + `<div class=sec>${esc(T.clashLine.replace('{a}', was).replace('{b}', now))}`
+    + `${ven ? ' · ' + esc(ven) : ''}</div></div><span class=sp></span>`
+    + `<span class=bad>${q(T.clashHint)}</span></div>`).join('');
 
   unk.hidden = !S.blocked.length;
   // The name and the hardware address go through data-, not into the onclick:
   // both come out of a lease file this program does not own.
   ub.innerHTML = S.blocked.map(([ip, host, mac, knocked, ven]) =>
-    `<div class=blk><span class=num>${esc(ip)}</span>`
-    + `<span class=mini>${esc(host)}${host && mac ? ' · ' : ''}${esc(mac)}`
-    + `${ven ? ' · ' + esc(ven) : ''}</span>`
-    + `<span class="mini knock">${knocked === null ? '' : ago(knocked)}</span>`
-    + `<button data-ip="${esc(ip)}" data-nm="${esc(host)}" onclick="addKnown(this)">`
-    + `${T.add}</button></div>`).join('');
+    `<div class=row><div class=dname><b class=mono>${esc(ip)}</b>`
+    + `<div class=sec>${esc(host)}${host && mac ? ' · ' : ''}${esc(mac)}`
+    + `${ven ? ' · ' + esc(ven) : ''}</div></div><span class=sp></span>`
+    + `<span class=sec>${knocked === null ? '' : ago(knocked)}</span>`
+    + `<button class=btn data-ip="${esc(ip)}" data-nm="${esc(host)}" `
+    + `onclick="addKnown(this)">${T.add}</button></div>`).join('');
 
   lanips.innerHTML = S.lan.map(([ip, host]) =>
     `<option value="${esc(ip)}">${esc(host)}</option>`).join('');
