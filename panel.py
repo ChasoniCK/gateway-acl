@@ -2604,6 +2604,9 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
 <script>
 const T = {{T_JSON}};
 const esc = s => (s||'').replace(/[<&">]/g, c => ({'<':'&lt;','&':'&amp;','"':'&quot;','>':'&gt;'}[c]));
+// Строки подсказок писались для HTML и несут <code> вокруг имён команд.
+// В нативном атрибуте разметка не парсится — там нужен голый текст.
+const plain = s => (s || '').replace(/<[^>]+>/g, '');
 // Math.round on the first branch: the others end in toFixed, but a rate is a
 // float and bare bytes would print as 957.4611172333846.
 const fmt = b => b < 1024 ? Math.round(b) + T.b
@@ -2925,7 +2928,7 @@ const renderBanners = () => {
         ? banner('blue', esc(T.updateNew.replace('{v}', S.update)),
                  `<a class=btn href="{{RELEASES}}" target=_blank `
                  + `rel="noopener noreferrer">${T.updateWhat}</a>`
-                 + `<button class=btn title="${esc(T.updateHint + ' ' + T.updateLog)}" `
+                 + `<button class=btn title="${esc(plain(T.updateHint) + ' ' + plain(T.updateLog))}" `
                  + `onclick=doUpdate()>${T.updateNow}</button>`)
         : '')
     + offban;
