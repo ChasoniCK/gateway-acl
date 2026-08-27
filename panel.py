@@ -3234,7 +3234,7 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  .ch{display:flex;align-items:baseline;gap:.6rem;margin-bottom:.9rem}
  .ch h2{margin:0}
  .ch .sp{flex:1}
- .chead{display:flex;align-items:center;gap:var(--s3);margin-bottom:var(--s3)}
+ .chead{display:flex;align-items:center;flex-wrap:wrap;gap:var(--s3);margin-bottom:var(--s3)}
  .chead .sp{flex:1}
  .sortgrp{display:flex;align-items:center;gap:2px}
  .hero{display:flex;align-items:baseline;gap:var(--s2)}
