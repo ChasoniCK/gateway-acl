@@ -28,30 +28,31 @@ device ──► this Linux host ──► uplink or tunnel (sing-box / WireGuar
 - **Per-device traffic**, upload and download, accumulated per day and summed per
   month. A daily chart with the running total drawn over it, the last 24 hours,
   a bar per month, a sparkline in every row, and any single device on its own —
-  click its address. All inline SVG, no external libraries.
+  open its row and press *Show in chart*. All inline SVG, no external libraries.
 - **Live speed.** The poll that accrues the counters also divides them by the
   window it covered, so each row says what that device is pulling right now.
 - **The machine itself.** Processor, memory, swap, disk, load, temperature,
   uptime and the interface's throughput, read straight out of `/proc` and
   `/sys`.
 - **Turn a device off** without deleting it — keeps its name and history.
-- **...or off for a while.** Next to the switch, a menu: fifteen minutes, an
+- **...or off for a while.** Open its row and a menu offers fifteen minutes, an
   hour, three, eight, or until seven in the morning. When the time is up the
   device goes back to the state it was in, by itself. It reads the other way
   round just as well — a device that is off can be let out for an hour.
-- **...or past the VPN instead of off.** A second button sends one device around
-  the tunnel: it keeps its internet, straight out through the gateway, while
-  everything else stays inside. Its packets are stamped with an fwmark the
-  tunnel treats as none of its business — `"vpn_mark"` in `config.json`, `8228`
-  (`0x2024`) for sing-box, `51820` for a stock wg-quick, `0` to hide the button.
-  Read that number off your own host — the neighbouring mark does the opposite.
+- **...or past the VPN instead of off.** A switch in the same row sends one
+  device around the tunnel: it keeps its internet, straight out through the
+  gateway, while everything else stays inside. Its packets are stamped with an
+  fwmark the tunnel treats as none of its business — `"vpn_mark"` in
+  `config.json`, `8228` (`0x2024`) for sing-box, `51820` for a stock wg-quick,
+  `0` to hide the switch. Read that number off your own host — the neighbouring
+  mark does the opposite.
   Marked by hardware address, so IPv4 and IPv6 leave together: half a device out
   of the tunnel is a device every site still places at the exit node. See
   [docs/singbox.md](docs/singbox.md).
 - **Devices follow their hardware address.** DHCP hands a known device another
   address, and the entry moves there with its name, its switch and all of its
   traffic history — instead of quietly becoming a rule for nobody.
-- **Let everyone in for a while.** One menu in the corner suspends the list
+- **Let everyone in for a while.** A control under Settings suspends the list
   itself for five minutes, fifteen or an hour — for guests, or for working out
   why something will not connect. The accounting carries on and the kernel goes
   on recording who came, so when the window shuts, everything that used it is
@@ -71,9 +72,10 @@ device ──► this Linux host ──► uplink or tunnel (sing-box / WireGuar
   from memory.
 - **Rename devices** inline, or take the name the device gives the network: it
   is offered at the end of the field while that is still empty. Renaming never
-  touches nftables, so counters survive. Sort the table by any column — with the
-  mouse or the keyboard — filter it by address, name or hostname, and download
-  the selected month as CSV.
+  touches nftables, so counters survive. Sort the list by address, name,
+  traffic, current speed or last seen — pick from a menu, flip the direction
+  with one button — filter it by address, name or hostname, and download the
+  selected month as CSV.
 - **Update notice, and the button under it.** Once a day the panel asks GitHub
   for the latest release tag and shows a banner if yours is older. *Install now*
   fetches that release and runs the installer with the answers you already gave,
@@ -93,8 +95,10 @@ device ──► this Linux host ──► uplink or tunnel (sing-box / WireGuar
   `config.json` behind one form, validated before it is written. Next to the
   save button, a reboot for the gateway itself — it asks first.
 - **A nightly reboot** on a switch — off by default, 05:30 when you turn it on.
-- **Light and dark**, whichever the machine looking at it is set to. Kept on a
-  phone's home screen it gets its own icon and paints the status bar to match.
+- **Light and dark**, whichever the machine looking at it is set to, or pick one
+  yourself in Settings — Auto, Light or Dark, remembered in this browser. Kept
+  on a phone's home screen it gets its own icon and paints the status bar to
+  match.
 
 Everything is Python standard library and inline SVG. No pip, no npm, no CDN —
 the panel works with no internet at all.
