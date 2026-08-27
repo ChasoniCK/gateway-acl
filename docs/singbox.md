@@ -257,7 +257,7 @@ to keep a node the subscription has stopped listing.
 
 The installer only copies and self-tests the converter. It does not fetch a
 source, rewrite `/etc/sing-box/config.json` or restart sing-box during an update.
-On the first v1.6 start, old `sub.url` and `sub.exclude` files are moved into one
+On the first v1.5 start, old `sub.url` and `sub.exclude` files are moved into one
 enabled `legacy/no-cache` profile without touching the working config or
 service. Its first successful refresh creates the cache and begins panel
 ownership.
