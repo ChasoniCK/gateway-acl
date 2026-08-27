@@ -211,6 +211,8 @@ STRINGS = {
         "colTraffic": "трафик",
         "colSeen": "активность",
         "sortBy": "Сортировка",
+        "sortAsc": "Сортировка: по возрастанию",
+        "sortDesc": "Сортировка: по убыванию",
         "addDevice": "Добавить устройство",
         "phName": "название устройства",
         "add": "добавить",
@@ -428,6 +430,8 @@ STRINGS = {
         "colTraffic": "traffic",
         "colSeen": "activity",
         "sortBy": "Sort",
+        "sortAsc": "Sort: ascending",
+        "sortDesc": "Sort: descending",
         "addDevice": "Add device",
         "phName": "name device",
         "add": "add",
@@ -2244,11 +2248,11 @@ CSS = TOKENS + """
 # ponytail: one inline glyph instead of a file to serve — it also stops the
 # browser asking for /favicon.ico on every page.
 ICON = ("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'>"
-        "<rect width='16' height='16' rx='3' fill='%23171a20'/>"
-        "<circle cx='8' cy='8' r='3.4' fill='%235b9bb5'/></svg>")
+        "<rect width='16' height='16' rx='3' fill='%232C2C2E'/>"
+        "<circle cx='8' cy='8' r='3.4' fill='%230A84FF'/></svg>")
 
 
-def png_icon(size=180, bg=(23, 26, 32), fg=(91, 155, 181)):
+def png_icon(size=180, bg=(44, 44, 46), fg=(10, 132, 255)):
     """The same mark as a PNG, for "add to home screen".
 
     Safari ignores an SVG in an apple-touch-icon and falls back to a screenshot
@@ -2470,7 +2474,7 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  .sheet .field{max-width:11rem}
  .sheet input:disabled{opacity:1;color:var(--dim);-webkit-text-fill-color:var(--dim);
    cursor:not-allowed}
- a{color:var(--link)}
+ a{color:var(--blue)}
  form{display:flex;gap:.5rem;flex-wrap:wrap}
  form input{flex:1;min-width:8rem}
  @media (max-width:900px){.row2{grid-template-columns:1fr}}
@@ -2520,12 +2524,12 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
   <div class="list inset panel">
    <div class=row><span class=sp>{{t.sRebootAt}}</span>
     <input id=s_reboot_at class=field type=time lang=en-GB value="{{REBOOT_AT}}"{{RB_OFF}}>
-    <input id=s_rb class=sw type=checkbox{{RB}}
+    <input id=s_rb class=sw type=checkbox{{RB}} aria-label="{{t.sRebootAt}}"
       onchange="s_reboot_at.disabled=!this.checked"></div>
    <div class=row><span class=sp>{{t.sUpdate}}</span><input id=s_upd class=sw
-     type=checkbox{{UPD}} onchange="s_ntf.disabled=!this.checked"></div>
+     type=checkbox{{UPD}} aria-label="{{t.sUpdate}}" onchange="s_ntf.disabled=!this.checked"></div>
    <div class=row><span class=sp>{{t.sNotify}}</span><input id=s_ntf class=sw
-     type=checkbox{{NTF}}{{NTF_OFF}} onchange=askNotify()></div>
+     type=checkbox{{NTF}}{{NTF_OFF}} aria-label="{{t.sNotify}}" onchange=askNotify()></div>
    <p class=hint>{{t.sNotifyHint}}</p>
    <div class=row><span class=sp>{{t.byp}}</span><span id=bypbox></span></div>
    <div class=row><span class=sp></span>
@@ -2947,6 +2951,7 @@ const draw = () => {
                      + `${T[s]}</option>`).join('');
   srtd.textContent = sortd > 0 ? '↑' : '↓';
   srtd.title = T.sortBy;
+  srtd.setAttribute('aria-label', sortd > 0 ? T.sortAsc : T.sortDesc);
   const dv = one ? [one] : S.devices;
   const U = dv.reduce((a,x) => a+x.up, 0), D = dv.reduce((a,x) => a+x.down, 0);
   // The month's total counts every address the history knows of, the devices
@@ -3023,6 +3028,7 @@ const draw = () => {
         + `  ↑ ${fmt(x.rate[0])}${T.perSec}` : '—'}</div></div>`
      + `<span class=chev>›</span>`
      + `<input class=sw type=checkbox${x.on ? ' checked' : ''} `
+     + `aria-label="${esc(x.name || x.ip)}" `
      + `onclick="event.stopPropagation()" `
      + `onchange="post({ip:'${esc(x.ip)}',on:this.checked})">`
      + `</div>${op ? devDetail(x, peak) : ''}</div>`;
