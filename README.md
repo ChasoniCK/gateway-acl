@@ -261,7 +261,10 @@ test a ruleset without touching your host: [docs/design.md](docs/design.md).
 - A timer is as precise as the counter poll — a device set to come back at 07:00
   comes back at the first poll past it. Same for a device that DHCP has moved:
   the panel notices at the next poll, not the instant the lease changes, and it
-  can only follow a device the ARP cache has an entry for.
+  can only follow a device the ARP cache has an entry for. A device the cache
+  has at more than one address at once — which is what an address changed by
+  hand leaves behind — is not followed at all unless the DHCP lease says which
+  of them is current: the entry stays where you put it.
 - A device that moves to another address keeps its history but not its counters:
   the two named counters belong to the address, and the new ones start at zero.
 - An open gateway is written to the config, so it survives a restart of the

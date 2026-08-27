@@ -832,6 +832,20 @@ def reboot_due(at, now, up, window):
 _devs = {"mtime": None, "val": []}
 
 
+def _devs_stamp():
+    """When the device list on disk was last written, or None if there is none.
+
+    The poller reads the list, spends a moment deciding what to do with it and
+    writes the whole of it back; a button pressed in that moment lands in the
+    file and is then overwritten by a list that predates it. Compared before
+    the write, this says the poller lost the race and should let go.
+    """
+    try:
+        return os.stat(DEVICES).st_mtime_ns
+    except OSError:
+        return None
+
+
 def load():
     """The device list, re-read only when the file has changed underneath us.
 
@@ -1228,11 +1242,14 @@ def expire(now=None):
     is the whole mechanism, and a second one would not be worth its own bugs.
     """
     now = int(time.time() if now is None else now)
+    stamp = _devs_stamp()
     devs = load()
     due = [d for d in devs if 0 < d.get("until", 0) <= now]
     over = 0 < CFG["bypass"] <= now      # the open gateway, shutting again
     if not due and not over:
         return False
+    if due and _devs_stamp() != stamp:
+        return False     # written from under us; the next tick reads it again
     for d in due:
         d["on"], d["until"] = not d.get("on", True), 0
     if due:
@@ -2813,6 +2830,46 @@ def parse_leases(text):
     return out
 
 
+def parse_lease_macs(text, now=None):
+    """{hardware address: address} out of a dnsmasq lease file, expired lines out.
+
+    The one place that says where a device is *now*. The kernel's ARP cache does
+    not: it keeps the entry for an address a device has left, and on a home LAN
+    it keeps it for ever — the collector only starts above `gc_thresh1`, which a
+    few dozen devices never reach. A device that has ever had two addresses is
+    therefore at both of them as far as the cache is concerned. dnsmasq instead
+    rewrites the line when the client takes another address, so this is the
+    tie-breaker; `0` in the expiry field means the lease never runs out.
+    """
+    now = time.time() if now is None else now
+    out = {}
+    for line in text.splitlines():
+        f = line.split()
+        if len(f) < 3 or not is_mac(f[1]):
+            continue
+        try:
+            exp = int(f[0])
+        except ValueError:
+            continue
+        if exp and exp < now:
+            continue
+        out[f[1].lower()] = f[2]
+    return out
+
+
+def _lease_text():
+    """The lease file, from whichever of the usual places holds one."""
+    for path in LEASES:
+        text = _read(path)
+        if text:
+            return text
+    return ""
+
+
+def lease_macs():
+    return parse_lease_macs(_lease_text())
+
+
 def lan_names():
     """{address: [hostname, mac]} — whatever the system already knows.
 
@@ -2822,12 +2879,8 @@ def lan_names():
     which box in the flat is knocking.
     """
     out = {ip: ["", mac] for ip, mac in parse_arp(_read("/proc/net/arp")).items()}
-    for path in LEASES:
-        text = _read(path)
-        if text:
-            for ip, host in parse_leases(text).items():
-                out.setdefault(ip, ["", ""])[0] = host
-            break
+    for ip, host in parse_leases(_lease_text()).items():
+        out.setdefault(ip, ["", ""])[0] = host
     return out
 
 
@@ -2948,10 +3001,26 @@ def track_macs():
 
     A device that has never been seen has no hardware address to be followed by,
     so the first sighting records one. Returns True if the ruleset changed.
+
+    The cache alone is not enough to say where a device is: it holds every
+    address the device has ever answered from, and reading it into
+    {mac: address} kept whichever line came last. Two addresses for one device
+    is the normal state of affairs after somebody edits the address on the
+    phone, and the entry then followed the file's own order — onto the address
+    the device had left, back again on the next poll, dragging its history with
+    it each time and putting an address the owner had deleted back on the page.
+    So: one address answering, follow it; several, and only the lease file may
+    break the tie, because it is the one that is rewritten when the address
+    actually changes. Neither, and the entry stays where its owner put it.
     """
     names = lan_names()
-    at = {mac: ip for ip, (_, mac) in names.items() if mac and lan_client(ip)}
+    at = {}
+    for ip, (_, mac) in names.items():
+        if mac and lan_client(ip):
+            at.setdefault(mac, []).append(ip)
+    lease = lease_macs()
     devs = load()
+    stamp = _devs_stamp()
     taken = {d["ip"] for d in devs}
     moves, learned = [], False
     for d in devs:
@@ -2960,7 +3029,9 @@ def track_macs():
             continue
         learned = learned or mac != d.get("mac")
         d["mac"] = mac
-        new = at.get(mac)
+        here = at.get(mac, [])
+        new = here[0] if len(here) == 1 else (
+            lease.get(mac) if lease.get(mac) in here else None)
         # `taken`: two entries must never end up on one address, and an entry
         # whose new address is already somebody else's is left where it is.
         if not new or new == d["ip"] or new in taken:
@@ -2969,6 +3040,14 @@ def track_macs():
         taken.discard(d["ip"])
         taken.add(new)
         d["ip"] = new
+    if not moves and not learned:
+        return False
+    if _devs_stamp() != stamp:
+        # Somebody pressed a button while this was being worked out, and what is
+        # in hand is now the list as it was before they did. Writing it would
+        # undo them — a deleted device would come back by itself a poll later.
+        # ponytail: the next tick works it out again from the file they wrote.
+        return False
     if moves:
         # Bank what the old address moved before the list stops mentioning it:
         # poll() reads the counters against whatever load() says, and the next
@@ -2976,9 +3055,8 @@ def track_macs():
         poll(force=True)
         for old, new in moves:
             rekey(old, new)
-    if moves or learned:
-        devs.sort(key=lambda d: ipaddress.ip_address(d["ip"]))
-        save(devs)
+    devs.sort(key=lambda d: ipaddress.ip_address(d["ip"]))
+    save(devs)
     if moves:
         apply(devs)
     return bool(moves)
@@ -5352,6 +5430,15 @@ PersistentKeepalive = 25
               "1786000000 11:22:33:44:55:66 192.168.1.97 * *\n")
     assert parse_leases(leases) == {"192.168.1.99": "quest-2"}, "* is a placeholder, not a name"
     assert parse_leases("") == {}
+    assert parse_lease_macs(leases, 1785999999) == {
+        "aa:bb:cc:dd:ee:ff": "192.168.1.99",
+        "11:22:33:44:55:66": "192.168.1.97"}, "the lease says where a device is"
+    assert parse_lease_macs(leases, 1786000001) == {}, \
+        "a lease that has run out says nothing about where anything is"
+    assert parse_lease_macs("0 aa:bb:cc:dd:ee:ff 192.168.1.99 q *", 9e9) == \
+        {"aa:bb:cc:dd:ee:ff": "192.168.1.99"}, "0 is a lease that never runs out"
+    assert parse_lease_macs("duid 00:01:00:01\n", 0) == {}, \
+        "dnsmasq writes a DUID line into the same file"
 
     salt = secrets.token_bytes(16)
     h = pw_hash("correct horse", salt)
@@ -5540,8 +5627,12 @@ PersistentKeepalive = 25
     # Devices: the file is read again only when it changes, a timer runs the
     # state back the other way once, and an entry follows its hardware address.
     with tempfile.TemporaryDirectory() as td:
-        global DEVICES, apply, lan_names
-        keep_dev = (DEVICES, TRAFFIC, TODAY, apply, lan_names, nft_table)
+        global DEVICES, apply, lan_names, lease_macs, _devs_stamp
+        keep_dev = (DEVICES, TRAFFIC, TODAY, apply, lan_names, nft_table,
+                    lease_macs)
+        # A gateway running its own selftest has a real lease file, and the
+        # addresses below are made up.
+        lease_macs = lambda: {}
         DEVICES = os.path.join(td, "devices.json")
         TRAFFIC = os.path.join(td, "traffic.json")
         TODAY = os.path.join(td, "today.json")
@@ -5610,7 +5701,33 @@ PersistentKeepalive = 25
         assert not track_macs(), "two entries must never land on one address"
         assert [d["ip"] for d in load()] == [a, b]
 
-        DEVICES, TRAFFIC, TODAY, apply, lan_names, nft_table = keep_dev
+        # The cache still holds the address the device left. Which of the two
+        # comes last in it decided where the entry went, so the entry walked
+        # back and forth between them, poll after poll.
+        save([{"ip": a, "name": "quest", "on": True, "mac": "aa:bb:cc:dd:ee:ff"}])
+        lan_names = lambda: {a: ["", "aa:bb:cc:dd:ee:ff"],
+                             b: ["", "aa:bb:cc:dd:ee:ff"]}
+        applied.clear()
+        assert not track_macs(), "one device at two addresses is not a move"
+        assert load()[0]["ip"] == a and not applied, "the entry stays put"
+        lease_macs = lambda: {"aa:bb:cc:dd:ee:ff": b}
+        assert track_macs(), "the lease breaks the tie"
+        assert load()[0]["ip"] == b
+        lease_macs = lambda: {"aa:bb:cc:dd:ee:ff": str(LAN.network_address + 200)}
+        assert not track_macs(), \
+            "a lease for an address nothing answers at is not where it is either"
+        assert load()[0]["ip"] == b
+        lease_macs = lambda: {}
+
+        # A button pressed while the poller was working must not be undone.
+        save([{"ip": a, "name": "quest", "on": True, "mac": "aa:bb:cc:dd:ee:ff"}])
+        lan_names = lambda: {b: ["", "aa:bb:cc:dd:ee:ff"]}
+        keep_stamp, _devs_stamp = _devs_stamp, lambda: secrets.token_hex(4)
+        assert not track_macs(), "the list changed underneath — let go of it"
+        assert load()[0]["ip"] == a, "and leave what they wrote alone"
+        _devs_stamp = keep_stamp
+
+        DEVICES, TRAFFIC, TODAY, apply, lan_names, nft_table, lease_macs = keep_dev
         _devs["mtime"] = None
         globals().update(_hist=None, _flushed=0.0, _dirty=False, _cold=False,
                          _hot_date=None)

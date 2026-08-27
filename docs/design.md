@@ -184,6 +184,19 @@ takes the hardware address out of the ARP cache the panel already reads for
 names, and moves the entry to wherever that address answers from now. A device
 first seen records its MAC; two entries never land on one address.
 
+The cache is not by itself an answer to "where is it now": it keeps the entry
+for an address the device has left, and on a home LAN it keeps it for ever —
+the kernel's collector only starts above `gc_thresh1`, which a few dozen
+devices never reach. So a device that has ever had two addresses is at both of
+them as far as the cache is concerned, and reading it into one address per MAC
+picked whichever line came last. The entry then followed the file's own order:
+onto the address the device had left, back again on the next poll, carrying its
+history each way and putting an address its owner had deleted back on the page.
+One address answering is a move; several, and only dnsmasq's lease file breaks
+the tie, because that is the file rewritten when the address really changes —
+and only if it names one of the addresses that answer. Otherwise the entry
+stays where its owner put it, and `clashes()` is what says so on the page.
+
 `rekey()` carries the history across — day buckets, hour buckets, `seen` —
 because leaving it behind would file the device's past under "other" and start
 its month from zero, which is the pair of symptoms that reads as lost data. The
