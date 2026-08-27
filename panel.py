@@ -200,7 +200,6 @@ STRINGS = {
         "h1": "Устройства через шлюз",
         "logout": "выйти",
         "close": "Закрыть",
-        "monthUse": "Расход за месяц",
         "total": "всего",
         "inbound": "входящий",
         "outbound": "исходящий",
@@ -419,7 +418,6 @@ STRINGS = {
         "h1": "Devices through the gateway",
         "logout": "log out",
         "close": "Close",
-        "monthUse": "Monthly usage",
         "total": "total",
         "inbound": "inbound",
         "outbound": "outbound",
@@ -2764,7 +2762,10 @@ const hover = i => {
   const box = svg.getBoundingClientRect(), bw = box.width / rows().length;
   const x = (i + .5) * bw - pop.offsetWidth / 2;
   pop.style.left = Math.max(0, Math.min(box.width - pop.offsetWidth, x)) + 'px';
-  pop.style.top = '0px';
+  // Не выше окна: график можно прокрутить так, что его верх уйдёт за верхнюю
+  // границу, а столбцы ещё останутся видны — карточка, приколотая к верху
+  // графика, уехала бы вместе с ним.
+  pop.style.top = Math.max(0, -box.top + 4) + 'px';
 };
 
 const spark = (ser, max, on) => {
@@ -2782,16 +2783,16 @@ const devDetail = (x, peak) => `<div class=ddet>`
   + spark(x.series, peak, x.on)
   + `<div class=dacts>`
   + (x.until > S.now
-      ? `<button class=btn title="${T.tmCancel}" `
+      ? `<button class=btn title="${esc(T.tmCancel)}" `
         + `onclick="post({ip:'${esc(x.ip)}',for:0})">${left(x.until - S.now)} ×</button>`
-      : `<select class=field title="${T.tmWhat}" `
+      : `<select class=field title="${esc(T.tmWhat)}" `
         + `onchange="timer('${esc(x.ip)}',${!x.on},this)">`
         + `<option value="">${T.tmFor}</option>`
         + TIMES.map(([v, k]) => `<option value="${v}">${T[k]}</option>`).join('')
         + `</select>`)
   // vpnOff — это «мимо VPN»: у переключателя подпись называет состояние, в
   // которое он включён, а не действие, как называла его кнопка.
-  + (S.vpnable ? `<label class=vpn title="${T.vpnWhat}">${T.vpnOff}`
+  + (S.vpnable ? `<label class=vpn title="${esc(T.vpnWhat)}">${T.vpnOff}`
       + `<input class=sw type=checkbox${x.vpn ? '' : ' checked'} `
       + `onchange="post({ip:'${esc(x.ip)}',vpn:!this.checked})"></label>` : '')
   + `<button class=btn onclick="pickDev('${esc(x.ip)}')">${T.showInChart}</button>`
@@ -2810,7 +2811,7 @@ const strip = () => {
     // не сообщают, а «12» слева и «08» справа — это разные годы.
     const yr = (i === 0 || mm === '01') ? `<u>${yy.slice(2)}</u>` : '';
     return `<button class="mo${m[0] === S.month ? ' cur' : ''}" `
-      + `onclick="load('${m[0]}')" title="${m[0]}  ${fmt(m[1])}">`
+      + `onclick="load('${m[0]}')" title="${esc(m[0] + '  ' + fmt(m[1]))}">`
       + `<i style="height:${Math.max(2, m[1] / max * 46).toFixed(0)}px"></i>`
       + `<span>${mm}</span>${yr}</button>`;
   }).join('') + `</div>`;
@@ -2924,7 +2925,8 @@ const renderBanners = () => {
         ? banner('blue', esc(T.updateNew.replace('{v}', S.update)),
                  `<a class=btn href="{{RELEASES}}" target=_blank `
                  + `rel="noopener noreferrer">${T.updateWhat}</a>`
-                 + `<button class=btn onclick=doUpdate()>${T.updateNow}</button>`)
+                 + `<button class=btn title="${esc(T.updateHint + ' ' + T.updateLog)}" `
+                 + `onclick=doUpdate()>${T.updateNow}</button>`)
         : '')
     + offban;
 };
@@ -2938,7 +2940,7 @@ const draw = () => {
   // way to close it live in the red banner above.
   bypbox.innerHTML = S.bypass > S.now
     ? `<span class="sec num">${left(S.bypass - S.now)}</span>`
-    : `<select class=field title="${T.bypWhat}" onchange="bypass(this.value,this)">`
+    : `<select class=field title="${esc(T.bypWhat)}" onchange="bypass(this.value,this)">`
       + `<option value="">${T.byp}</option>`
       + BYP.map(([v, k]) => `<option value="${v}">${T[k]}</option>`).join('')
       + `</select>`;
@@ -2965,7 +2967,7 @@ const draw = () => {
   const [my, mm] = S.month.split('-');
   const mname = new Date(+my, +mm - 1).toLocaleDateString(T.locale, {month: 'long'});
   mtitle.innerHTML = mname[0].toUpperCase() + mname.slice(1) + ' ' + my
-    + (one ? ` · <button class=btn onclick="pickDev(null)" title="${T.showAll}">`
+    + (one ? ` · <button class=btn onclick="pickDev(null)" title="${esc(T.showAll)}">`
              + `${esc(one.name || one.ip)} ×</button>` : '');
 
   kt.textContent = fmt(U + D + oth);
@@ -3009,7 +3011,7 @@ const draw = () => {
     return `<div class="drow${x.on ? '' : ' off'}${op ? ' open' : ''}">`
      + `<div class=dmain onclick="toggleRow('${esc(x.ip)}')">`
      + `<i class="dot${live ? ' live' : ''}" `
-     + `title="${live ? T.dotLive : T.dotQuiet}"></i>`
+     + `title="${esc(live ? T.dotLive : T.dotQuiet)}"></i>`
      + `<div class=dname>`
      // stopPropagation: клик по имени правит имя, а не раскрывает строку.
      + `<input class=nm value="${esc(x.name)}" placeholder="${esc(x.host || T.phName)}" `
@@ -4025,7 +4027,7 @@ def selftest():
     page_css = PAGE_T.split("<style>", 1)[1].split("</style>", 1)[0]
     for name, css in (("CSS", CSS[len(TOKENS):]),
                       ("PAGE_T", page_css.replace("{{CSS}}", ""))):
-        bad = re.search(r":[^;{}]*(#[0-9a-fA-F]{3,8}\b|rgba?\()", css)
+        bad = re.search(r":[^;{}]*(#[0-9a-fA-F]{3,8}\b|rgba?\(|hsla?\()", css)
         assert not bad, f"{name}: цвет мимо токенов — {bad.group(0)!r}"
     assert "prefers-color-scheme" in TOKENS, "тёмная тема потерялась"
     assert "gwacl_theme" in HEAD, "тема будет мигать: нет скрипта в HEAD"
