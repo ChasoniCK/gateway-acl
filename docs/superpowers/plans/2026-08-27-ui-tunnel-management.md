@@ -582,17 +582,17 @@ git commit -m "Восстанавливать и контролировать VP
 - Modify: `panel.py:3172-3406`
 - Test: `panel.py:selftest()`
 
-- [ ] **Step 1: Build a socket-free handler fixture and failing security asserts**
+- [x] **Step 1: Build a socket-free handler fixture and failing security asserts**
 
 Instantiate `H` with `object.__new__(H)`, `BytesIO` headers/body and a `BombReader` that raises on read. Assert unauthenticated mutation and bad CSRF never read the body. Add missing/nonnumeric/negative/oversize/Transfer-Encoding cases, exact `/api`/`/vpn`, `/apiX`/`/vpnX` 404, and POST-only logout.
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run: `python3 panel.py --selftest`
 
 Expected: current handler reads the body before auth and accepts fallback paths.
 
-- [ ] **Step 3: Add session/CSRF/body helpers**
+- [x] **Step 3: Add session/CSRF/body helpers**
 
 ```python
 _csrf_secret = secrets.token_bytes(32)
@@ -612,7 +612,7 @@ class H(BaseHTTPRequestHandler):
 
 Reject `Transfer-Encoding`; missing length with 411; malformed/negative with 400; `limit + 1` with 413. Authenticate, then check CSRF, then read authenticated mutation bodies. `/login` alone reads its limited body before auth.
 
-- [ ] **Step 4: Replace prefix/fallback routing with exact parsed paths**
+- [x] **Step 4: Replace prefix/fallback routing with exact parsed paths**
 
 Use `path = urlparse(self.path).path`. Allow only:
 
@@ -622,14 +622,14 @@ Use `path = urlparse(self.path).path`. Allow only:
 
 Unknown methods/paths return 404 and never mutate. Add `csrf` to authenticated `/api` and `/vpn`; `GET /vpn` uses `vpn_public()`. `POST /vpn` accepts only `add|enable|disable|refresh` and returns safe JSON.
 
-- [ ] **Step 5: Verify non-disclosure and security regression**
+- [x] **Step 5: Verify non-disclosure and security regression**
 
 ```bash
 python3 panel.py --selftest
 python3 singbox_sub.py --selftest
 ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add panel.py

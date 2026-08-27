@@ -147,6 +147,7 @@ _vpn_lock = threading.RLock()
 _vpn_closed = False
 _state = {"at": 0.0, "month": None, "val": None}   # the last answer /api gave
 _sessions = {}          # digest of the token -> when it expires
+_csrf_secret = secrets.token_bytes(32)
 _fails = {}             # address -> (misses, blocked until)
 _upd = {"at": 0, "new": None, "manual": 0}  # last check, the tag worth showing,
                                             # and when a hand last asked
@@ -995,6 +996,11 @@ def session_ok(token):
     return False
 
 
+def csrf_for(token):
+    return hmac.new(_csrf_secret, str(token or "").encode(),
+                    hashlib.sha256).hexdigest()
+
+
 def _load_sessions():
     """Sessions outlive the process: an update runs install.sh, which restarts
     the service, and being thrown out of the panel by its own upgrade is the
@@ -1839,6 +1845,23 @@ def public_tunnels(rows=None, runner=None):
     """Browser-safe metadata only; `runner` is used by runtime status later."""
     del runner
     return [_tunnel_row(row) for row in (load_tunnels() if rows is None else rows)]
+
+
+def vpn_public(runner=None):
+    """The settings page may see status and metadata, never profile secrets."""
+    rows = public_tunnels()
+    try:
+        backend = backend_state(rows, runner)
+        backend["error"] = "" if backend["active"] or backend["kind"] == "none" \
+            else "stopped"
+    except VpnError as e:
+        code = str(e)
+        backend = {"kind": "unknown", "active": False,
+                   "error": code if code in SAFE_VPN_ERRORS else "invalid-state"}
+    return {"profiles": rows, "backend": backend, "closed": _vpn_closed,
+            "tools": {"singbox": bool(shutil.which("sing-box")),
+                      "wireguard": bool(shutil.which("wg-quick")),
+                      "amneziawg": bool(shutil.which("awg-quick"))}}
 
 
 def _ensure_tunnel_dir():
@@ -3540,7 +3563,7 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
 <header id=hdr>
  <h1>{{t.h1}}</h1><span class=sp></span>
  <button class="btn plain" onclick=openSheet()>{{t.settingsTitle}}</button>
- <button class="btn plain" onclick="location='/logout'">{{t.logout}}</button>
+ <button class="btn plain" onclick=logout()>{{t.logout}}</button>
 </header>
 <div id=banners></div>
 <div class=sheet id=sheet hidden onclick="if(event.target===this)closeSheet()">
@@ -3705,11 +3728,17 @@ const timer = (ip, on, el) => {
 // The same idea one level up: the list itself, suspended for a while. Shorter
 // options than a device's, because this one lets in everything on the network.
 const BYP = [[5, 'tm5'], [15, 'tm15'], [60, 'tm1h']];
+const mutate = (url, method='POST', body) => fetch(url, {
+  method,
+  headers: {'Content-Type':'application/json',
+            'X-CSRF-Token': S && S.csrf || ''},
+  body: body === undefined ? '' : JSON.stringify(body)
+});
 const bypass = (v, el) => {
   if (el) el.value = '';
   if (v === '') return;
   if (+v && !confirm(T.confirmByp)) return;
-  fetch('/bypass', {method:'POST', body: JSON.stringify({for: +v})})
+  mutate('/bypass', 'POST', {for: +v})
     .then(r => r.ok ? load() : r.text().then(alert));
 };
 // Everyone at once, except whoever is looking: the button offers whichever of
@@ -4137,29 +4166,31 @@ const load = m => fetch('/api?month=' + (month = m || month || ''))
   .then(r => r.status === 401 ? location.reload()
     : r.json().then(s => { S = s; draw(); }))
   .then(() => stale(0), () => stale(1));
-const post = body => fetch('/api', {method:'POST', body: JSON.stringify(body)})
+const post = body => mutate('/api', 'POST', body)
   .then(r => r.ok ? load() : r.text().then(alert));
 const setName = (ip, name) => post({ip, name});
 const del = (ip, me) => confirm((me ? T.confirmDelMe : T.confirmDel).replace('{ip}', ip))
-  && fetch('/api?ip=' + encodeURIComponent(ip), {method:'DELETE'})
+  && mutate('/api?ip=' + encodeURIComponent(ip), 'DELETE')
      .then(r => r.ok ? load() : r.text().then(alert));
 f.onsubmit = e => { e.preventDefault();
   post({ip: f.ip.value, name: f.nm.value}).then(() => f.reset()); };
 // The answer is the new address when the port changed, and empty otherwise:
 // everything else is already live, the reload is only to redraw the labels.
-const saveCfg = () => fetch('/settings', {method:'POST', body: JSON.stringify({
+const saveCfg = () => mutate('/settings', 'POST', {
     lang: s_lang.value, update_check: s_upd.checked,
     update_notify: s_ntf.checked, poll_sec: +s_poll.value,
     keep_months: +s_keep.value, reboot: s_rb.checked, reboot_at: s_reboot_at.value,
     port: +s_port.value, iface: s_iface.value,
-    lan: s_lan.value, self_ip: s_self.value, pw: s_pw.value})})
+    lan: s_lan.value, self_ip: s_self.value, pw: s_pw.value})
   .then(r => r.text().then(x => !r.ok ? alert(x)
     : x ? alert(T.sRestart.replace('{url}', x)) : location.reload()));
 // The one button here that cannot be taken back, so it asks first. Nothing is
 // reloaded afterwards: the answer is the last thing that arrives before the
 // machine goes down, and the page is expected to sit there stale until it is back.
 const rebootHost = () => confirm(T.confirmReboot)
-  && fetch('/reboot', {method:'POST'}).then(r => r.text().then(alert));
+  && mutate('/reboot').then(r => r.text().then(alert));
+const logout = () => S && mutate('/logout').then(r =>
+  r.ok ? location.reload() : r.text().then(alert));
 
 // A new version is worth one interruption, not one per poll: a panel tab sits
 // open for days. The version told about is kept in localStorage and not in a
@@ -4187,14 +4218,14 @@ const askNotify = () => { if (s_ntf.checked && window.Notification
 // it is shown as it arrives; a found release still has to reach the page through
 // the ordinary state, hence the reload of it rather than a line written here.
 const checkUpd = () => { s_check.disabled = true;
-  fetch('/check', {method:'POST'})
+  mutate('/check')
     .then(r => r.text().then(x => { alert(x); if (r.ok) load(); }))
     .finally(() => { s_check.disabled = false; }); };
 
 // The tag goes into the question through replace, not into any address: what
 // gets downloaded is decided on the gateway, off a constant.
 const doUpdate = () => confirm(T.updateConfirm.replace('{v}', S && S.update || ''))
-  && fetch('/update', {method:'POST'}).then(r => r.text().then(alert));
+  && mutate('/update').then(r => r.text().then(alert));
 // Only the chart depends on the pixel width. Redrawing the table here would
 // take the cursor out of a name someone is in the middle of typing.
 onresize = () => { if (S) chartbox.innerHTML = chart(rows(), mode === 'day'); };
@@ -4238,6 +4269,12 @@ setInterval(() => document.hidden
 reload_conf()
 
 
+class HttpError(ValueError):
+    def __init__(self, status, message):
+        super().__init__(message)
+        self.status = status
+
+
 class H(BaseHTTPRequestHandler):
     server_version = "gateway-acl"
 
@@ -4257,93 +4294,156 @@ class H(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b)
 
+    def _session_token(self):
+        try:
+            morsel = SimpleCookie(self.headers.get("Cookie") or "").get("sess")
+            return morsel.value if morsel else ""
+        except Exception:
+            return ""
+
     def _authed(self):
-        m = SimpleCookie(self.headers.get("Cookie") or "").get("sess")
-        return session_ok(m.value if m else None)
+        return session_ok(self._session_token())
+
+    def _csrf_ok(self):
+        token = self._session_token()
+        got = self.headers.get("X-CSRF-Token") or ""
+        return bool(token) and hmac.compare_digest(got, csrf_for(token))
+
+    def _read_body(self, limit=VPN_MAX):
+        if self.headers.get("Transfer-Encoding"):
+            raise HttpError(400, "transfer encoding is not supported")
+        value = self.headers.get("Content-Length")
+        if value is None:
+            raise HttpError(411, "content length required")
+        value = str(value).strip()
+        if not re.fullmatch(r"[0-9]+", value):
+            raise HttpError(400, "invalid content length")
+        length = int(value)
+        if length > limit:
+            raise HttpError(413, "request body too large")
+        try:
+            body = self.rfile.read(length)
+        except OSError:
+            raise HttpError(400, "incomplete request body") from None
+        if len(body) != length:
+            raise HttpError(400, "incomplete request body")
+        return body
+
+    @staticmethod
+    def _json_body(raw):
+        try:
+            body = json.loads(raw or b"{}")
+        except (ValueError, TypeError):
+            raise HttpError(400, "invalid json") from None
+        if not isinstance(body, dict):
+            raise HttpError(400, "invalid json")
+        return body
 
     def _deny(self):
         """A live page gets 401, an ordinary navigation gets the login form."""
-        if self.path.startswith("/api"):
+        if urlparse(self.path).path in ("/api", "/vpn"):
             self._send(401, T["needLogin"], "text/plain")
         else:
             self._send(200, login_page())
 
     def do_GET(self):
-        if self.path == "/logout":
-            raw = self.headers.get("Cookie")
-            if raw and "sess" in SimpleCookie(raw):
-                drop_session(SimpleCookie(raw)["sess"].value)
-            self._send(200, login_page(f'<p class=hint>{T["loggedOut"]}</p>'),
-                       cookie="sess=; Path=/; Max-Age=0")
+        path = urlparse(self.path).path
+        if path not in ("/", "/api", "/vpn"):
+            self._send(404, "not found", "text/plain")
             return
         if not self._authed():
             self._deny()
             return
-        if self.path == "/":
+        if path == "/":
             self._send(200, PAGE)
-        elif self.path.startswith("/api"):
+        elif path == "/api":
             month = parse_qs(urlparse(self.path).query).get("month", [None])[0]
-            # A copy: the answer is shared between everyone asking at once, and
-            # only this one key is the asker's own.
             s = dict(state(month))
             s["you"] = self.client_address[0]
+            s["csrf"] = csrf_for(self._session_token())
             self._send(200, json.dumps(s), "application/json")
         else:
-            self._send(404, "not found", "text/plain")
+            s = vpn_public()
+            s["csrf"] = csrf_for(self._session_token())
+            self._send(200, json.dumps(s), "application/json")
 
     def do_POST(self):
-        n = int(self.headers.get("Content-Length") or 0)
-        raw = self.rfile.read(n)
-        if self.path == "/login":
-            self._login(raw)
-            return
-        if not self._authed():
-            self._deny()
-            return
-        if self.path == "/settings":
-            self._settings(raw)
-            return
-        if self.path == "/reboot":
-            self._send(200, T["rebooting"], "text/plain")
-            reboot_host()
-            return
-        if self.path == "/check":
-            # A hand asking now, so the day gate and the "tell me" switch are
-            # both out of the way — but not GitHub's own counter, which is why
-            # a second click within the minute is answered by the same sentence
-            # the form explains it with instead of another request.
-            if time.time() - _upd["manual"] < MANUAL_EVERY:
-                self._send(429, T["sCheckHint"], "text/plain")
-                return
-            _upd["manual"] = time.time()
-            if not check_update(force=True):
-                self._send(502, T["updateFail"], "text/plain")
-            elif _upd["new"]:
-                self._send(200, T["updateFound"].replace("{v}", _upd["new"]),
-                           "text/plain")
-            else:
-                self._send(200, T["updateNone"], "text/plain")
-            return
-        if self.path == "/update":
-            # Only the tag the poller itself read from GitHub, and only while it
-            # is still newer than what is running: the browser sends nothing
-            # here, so there is nothing in the request to disagree with.
-            tag = _upd["new"]
-            try:
-                tar_url(tag)
-            except ValueError:
-                tag = None
-            if not tag:
-                self._send(409, T["updateNone"], "text/plain")
-                return
-            self._send(200, T["updating"], "text/plain")
-            threading.Timer(0.7, install_update, (tag,)).start()
-            return
-        if self.path == "/bypass":
-            self._bypass(raw)
+        path = urlparse(self.path).path
+        allowed = {"/login", "/logout", "/settings", "/reboot", "/check",
+                   "/update", "/bypass", "/api", "/vpn"}
+        if path not in allowed:
+            self._send(404, "not found", "text/plain")
             return
         try:
-            body = json.loads(raw or b"{}")
+            if path == "/login":
+                self._login(self._read_body(4096))
+                return
+            if not self._authed():
+                self._deny()
+                return
+            if not self._csrf_ok():
+                self._send(403, "invalid csrf token", "text/plain")
+                return
+            raw = self._read_body()
+            if path == "/logout":
+                drop_session(self._session_token())
+                self._send(200, login_page(f'<p class=hint>{T["loggedOut"]}</p>'),
+                           cookie="sess=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict")
+                return
+            if path == "/settings":
+                self._settings(raw)
+                return
+            if path == "/reboot":
+                self._send(200, T["rebooting"], "text/plain")
+                reboot_host()
+                return
+            if path == "/check":
+                if time.time() - _upd["manual"] < MANUAL_EVERY:
+                    self._send(429, T["sCheckHint"], "text/plain")
+                    return
+                _upd["manual"] = time.time()
+                if not check_update(force=True):
+                    self._send(502, T["updateFail"], "text/plain")
+                elif _upd["new"]:
+                    self._send(200, T["updateFound"].replace("{v}", _upd["new"]),
+                               "text/plain")
+                else:
+                    self._send(200, T["updateNone"], "text/plain")
+                return
+            if path == "/update":
+                tag = _upd["new"]
+                try:
+                    tar_url(tag)
+                except ValueError:
+                    tag = None
+                if not tag:
+                    self._send(409, T["updateNone"], "text/plain")
+                    return
+                self._send(200, T["updating"], "text/plain")
+                threading.Timer(0.7, install_update, (tag,)).start()
+                return
+            if path == "/bypass":
+                self._bypass(raw)
+                return
+            if path == "/api":
+                self._api(raw)
+                return
+            body = self._json_body(raw)
+            try:
+                vpn_action(body.get("action"), body)
+                answer = vpn_public()
+                answer["csrf"] = csrf_for(self._session_token())
+                self._send(200, json.dumps(answer), "application/json")
+            except VpnError as e:
+                code = str(e) if str(e) in SAFE_VPN_ERRORS else "invalid-state"
+                self._send(409, json.dumps({"ok": False, "error": code}),
+                           "application/json")
+        except HttpError as e:
+            self._send(e.status, str(e), "text/plain")
+
+    def _api(self, raw):
+        try:
+            body = self._json_body(raw)
             devs = load()
             before = ruleset(devs)
             if "all" in body:
@@ -4365,21 +4465,16 @@ class H(BaseHTTPRequestHandler):
                 cur["on"] = bool(body["on"])
             if "vpn" in body:
                 cur["vpn"] = bool(body["vpn"])
-            # A timer says when the state just set runs out. Setting a state
-            # without one is a decision, so it drops whatever was pending —
-            # otherwise the switch would flip back by itself hours later and
-            # nothing on the page would say why.
             mins = check_minutes(body["for"]) if "for" in body else None
             if mins is not None:
                 cur["until"] = int(time.time()) + mins * 60 if mins else 0
             elif "on" in body:
                 cur["until"] = 0
             save(devs)
-            # A rename leaves the ruleset identical — nft untouched, counters intact.
             if ruleset(devs) != before:
                 apply(devs)
             self._send(200, "ok", "text/plain")
-        except ValueError as e:
+        except (ValueError, TypeError, AttributeError) as e:
             self._send(400, str(e), "text/plain")
 
     def _bypass(self, raw):
@@ -4463,14 +4558,47 @@ class H(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_DELETE(self):
+        path = urlparse(self.path).path
+        if path not in ("/api", "/vpn"):
+            self._send(404, "not found", "text/plain")
+            return
         if not self._authed():
             self._deny()
             return
-        ip = parse_qs(urlparse(self.path).query).get("ip", [""])[0]
-        devs = [d for d in load() if d["ip"] != ip]
+        if not self._csrf_ok():
+            self._send(403, "invalid csrf token", "text/plain")
+            return
+        if path == "/vpn":
+            try:
+                tid = parse_qs(urlparse(self.path).query).get("id", [""])[0]
+                vpn_delete(check_tunnel_id(tid))
+                answer = vpn_public()
+                answer["csrf"] = csrf_for(self._session_token())
+                self._send(200, json.dumps(answer), "application/json")
+            except (ValueError, VpnError) as e:
+                code = str(e) if str(e) in SAFE_VPN_ERRORS else "invalid-state"
+                self._send(409, json.dumps({"ok": False, "error": code}),
+                           "application/json")
+            return
+        try:
+            ip = validate(parse_qs(urlparse(self.path).query).get("ip", [""])[0])
+        except ValueError as e:
+            self._send(400, str(e), "text/plain")
+            return
+        old = load()
+        devs = [d for d in old if d["ip"] != ip]
+        if len(devs) == len(old):
+            self._send(404, "not found", "text/plain")
+            return
         save(devs)
         apply(devs)
         self._send(200, "ok", "text/plain")
+
+    def do_PUT(self):
+        self._send(404, "not found", "text/plain")
+
+    do_PATCH = do_PUT
+    do_OPTIONS = do_PUT
 
     def log_message(self, *a):
         pass
@@ -4496,6 +4624,78 @@ def selftest():
     global save_tunnels
     global _set_vpn_mark
     global _vpn_closed
+
+    class BombReader:
+        def read(self, *unused):
+            raise AssertionError("request body was read before authentication")
+
+    def request(path, headers=None, body=b""):
+        h = object.__new__(H)
+        h.path = path
+        h.headers = headers or {}
+        h.rfile = io.BytesIO(body)
+        h.client_address = ("127.0.0.1", 1)
+        h.replies = []
+        h._send = lambda code, text, *a, **k: h.replies.append(
+            (code, text, a, k))
+        return h
+
+    h = request("/api", {"Content-Length": "1"})
+    h.rfile = BombReader()
+    h.do_POST()
+    assert h.replies[0][0] == 401
+
+    token = "selftest-csrf-" + secrets.token_hex(8)
+    _sessions[_tok(token)] = time.time() + 60
+    cookie = {"Cookie": "sess=" + token, "Content-Length": "1"}
+    h = request("/vpn", cookie)
+    h.rfile = BombReader()
+    h.do_POST()
+    assert h.replies[0][0] == 403, "bad CSRF must fail before body read"
+    assert csrf_for(token) != token and csrf_for(token) != csrf_for(token + "x")
+
+    body_cases = [
+        ({}, 411),
+        ({"Content-Length": "wat"}, 400),
+        ({"Content-Length": "-1"}, 400),
+        ({"Content-Length": str(VPN_MAX + 1)}, 413),
+        ({"Content-Length": "0", "Transfer-Encoding": "chunked"}, 400),
+        ({"Content-Length": "2"}, 400),
+    ]
+    for headers, status in body_cases:
+        h = request("/api", headers, b"x" if headers.get("Content-Length") == "2" else b"")
+        try:
+            h._read_body()
+            raise AssertionError(f"bad request body accepted: {headers}")
+        except HttpError as e:
+            assert e.status == status, (headers, e.status)
+    h = request("/api", {"Content-Length": "3"}, b"abc")
+    assert h._read_body(3) == b"abc"
+
+    for method, path in (("do_GET", "/apiX"), ("do_GET", "/vpnX"),
+                         ("do_POST", "/apiX"), ("do_DELETE", "/vpnX")):
+        h = request(path, {"Content-Length": "1"})
+        h.rfile = BombReader()
+        getattr(h, method)()
+        assert h.replies[0][0] == 404, f"prefix route accepted: {path}"
+
+    h = request("/logout", {"Cookie": "sess=" + token})
+    h.do_GET()
+    assert h.replies[0][0] == 404 and session_ok(token), \
+        "GET logout must neither exist nor revoke the session"
+    real_save_sessions = globals()["_save_sessions"]
+    try:
+        globals()["_save_sessions"] = lambda: None
+        h = request("/logout", {"Cookie": "sess=" + token,
+                                "X-CSRF-Token": csrf_for(token),
+                                "Content-Length": "0"})
+        h.do_POST()
+        assert h.replies[0][0] == 200 and not session_ok(token), \
+            "logout must be a CSRF-protected POST"
+    finally:
+        globals()["_save_sessions"] = real_save_sessions
+        _sessions.pop(_tok(token), None)
+
     with tempfile.TemporaryDirectory() as td:
         secret = os.path.join(td, "secret.json")
         os.chmod(td, 0o755)
