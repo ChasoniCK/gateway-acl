@@ -136,6 +136,7 @@ KEEP_MONTHS = DEFAULTS["keep_months"]
 
 _lock = threading.Lock()
 _statelock = threading.Lock()
+_conf_lock = threading.RLock()
 _state = {"at": 0.0, "month": None, "val": None}   # the last answer /api gave
 _sessions = {}          # digest of the token -> when it expires
 _fails = {}             # address -> (misses, blocked until)
@@ -158,17 +159,39 @@ def conf():
         return dict(DEFAULTS)
 
 
-def write_private(path, obj):
-    """Write json so that only the owner can read it.
+def _write_private_bytes(path, data):
+    """Atomically replace one owner-only file and make the rename durable."""
+    parent = os.path.dirname(path) or "."
+    os.makedirs(parent, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=f".{os.path.basename(path)}.", dir=parent)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            fd = -1
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+        os.chmod(path, 0o600)
+        dfd = os.open(parent, os.O_RDONLY)
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(tmp)
 
-    The chmod is required: the mode given to os.open applies only when the file
-    is created, and config.json holds the password hash — it may have been left
-    at 644 by an earlier version.
-    """
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        json.dump(obj, f, indent=1)
-    os.chmod(path, 0o600)
+
+def write_private(path, obj):
+    """Write JSON so a cut leaves an old or new owner-only file, never half."""
+    _write_private_bytes(path, json.dumps(obj, indent=1).encode())
+
+
+def write_private_text(path, text):
+    _write_private_bytes(path, text.encode())
 
 
 def write_atomic(path, obj):
@@ -190,8 +213,19 @@ def write_atomic(path, obj):
 
 
 def save_conf(c):
-    write_private(CONFIG, c)
-    _state["val"] = None   # the page asks again in a moment; it must see this
+    with _conf_lock:
+        write_private(CONFIG, c)
+        _state["val"] = None   # the page asks again in a moment; it must see this
+
+
+def update_conf(change):
+    """Serialize a config read-modify-write and return the committed value."""
+    with _conf_lock:
+        c = conf()
+        changed = change(c)
+        c = changed if changed is not None else c
+        save_conf(c)
+        return c
 
 
 STRINGS = {
@@ -890,9 +924,11 @@ def set_password(password):
     if len(password) < 8:
         raise ValueError(T["pwShort"])
     salt = secrets.token_bytes(16)
-    c = conf()
-    c["pw"] = {"salt": salt.hex(), "hash": pw_hash(password, salt)}
-    save_conf(c)
+
+    def change(c):
+        c["pw"] = {"salt": salt.hex(), "hash": pw_hash(password, salt)}
+
+    update_conf(change)
 
 
 def check_password(password):
@@ -1148,8 +1184,9 @@ def bypass_until(when):
     CFG itself, not a copy: it is what ruleset() reads, and the two must not be
     able to disagree. The caller rebuilds the table.
     """
-    CFG["bypass"] = int(when)
-    save_conf(CFG)
+    when = int(when)
+    update_conf(lambda c: c.__setitem__("bypass", when))
+    CFG["bypass"] = when
 
 
 def flip_all(devs, on, mine=""):
@@ -3352,14 +3389,17 @@ class H(BaseHTTPRequestHandler):
         """
         try:
             body = json.loads(raw or b"{}")
-            base = conf()
-            c = check_settings(body, base)
             pw = str(body.get("pw") or "")
             if pw and len(pw) < 8:
                 raise ValueError(T["pwShort"])   # before anything is written
-            save_conf(c)
-            if pw:
-                set_password(pw)   # re-reads the config just written
+            with _conf_lock:
+                base = conf()
+                c = check_settings(body, base)
+                if pw:
+                    salt = secrets.token_bytes(16)
+                    c["pw"] = {"salt": salt.hex(),
+                               "hash": pw_hash(pw, salt)}
+                save_conf(c)
             reload_conf()
             refold()   # keep_months may have just come down
             # Saving the form is the one moment the user is asking about this,
@@ -3429,6 +3469,51 @@ def poller():
 
 
 def selftest():
+    global CONFIG
+    with tempfile.TemporaryDirectory() as td:
+        secret = os.path.join(td, "secret.json")
+        os.chmod(td, 0o755)
+        write_private(secret, {"value": 1})
+        assert os.stat(secret).st_mode & 0o777 == 0o600
+        first_inode = os.stat(secret).st_ino
+        write_private(secret, {"value": 2})
+        with open(secret) as f:
+            assert json.load(f) == {"value": 2}
+        assert os.stat(secret).st_ino != first_inode, \
+            "private files must be atomically replaced, not truncated"
+        assert os.stat(td).st_mode & 0o777 == 0o755, \
+            "a private file must not chmod its existing parent"
+        text_secret = os.path.join(td, "profile.conf")
+        write_private_text(text_secret, "PrivateKey = hidden\n")
+        with open(text_secret) as f:
+            assert f.read() == "PrivateKey = hidden\n"
+        assert os.stat(text_secret).st_mode & 0o777 == 0o600
+        real_replace = os.replace
+        try:
+            os.replace = lambda *unused: (_ for _ in ()).throw(OSError("cut"))
+            try:
+                write_private_text(os.path.join(td, "failed.conf"), "secret")
+                raise AssertionError("replace failure must escape")
+            except OSError:
+                pass
+        finally:
+            os.replace = real_replace
+        assert sorted(os.listdir(td)) == ["profile.conf", "secret.json"], \
+            "private temp file leaked"
+
+        old_config, CONFIG = CONFIG, os.path.join(td, "config.json")
+        try:
+            write_private(CONFIG, {"bypass": 123, "vpn_mark": 9})
+
+            def set_mark(c):
+                c["vpn_mark"] = 10
+
+            changed = update_conf(set_mark)
+            assert changed["bypass"] == 123 and changed["vpn_mark"] == 10, \
+                "a config mutation must preserve the latest unrelated values"
+        finally:
+            CONFIG = old_config
+
     assert accrue(0, 100) == 100
     assert accrue(100, 250) == 150
     assert accrue(500, 20) == 20, "a counter reset must be counted in full"
@@ -3531,7 +3616,6 @@ def selftest():
     except ValueError:
         pass
 
-    import tempfile
     with tempfile.TemporaryDirectory() as td:
         f = os.path.join(td, "config.json")
         open(f, "w").close()
@@ -3888,7 +3972,6 @@ def selftest():
         # The gateway held open, and shutting itself again afterwards. The
         # config goes to the scratch directory: --selftest must not write to
         # /etc, and as a plain user it could not anyway.
-        global CONFIG
         keep_cfg, CONFIG = CONFIG, os.path.join(td, "config.json")
         save([{"ip": a, "on": True}])
         applied.clear()

@@ -118,7 +118,7 @@ git commit -m "Поддержать несколько источников по
 - Modify: `panel.py:70-190`
 - Test: `panel.py:3420-4060`
 
-- [ ] **Step 1: Write failing storage asserts in a scratch directory**
+- [x] **Step 1: Write failing storage asserts in a scratch directory**
 
 Temporarily redirect module paths in `selftest()` and assert mode, replacement and cleanup:
 
@@ -134,13 +134,13 @@ with tempfile.TemporaryDirectory() as td:
     assert not os.path.exists(p + ".tmp")
 ```
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run: `python3 panel.py --selftest`
 
 Expected: inode replacement assertion fails because current `write_private()` truncates in place.
 
-- [ ] **Step 3: Implement one private-atomic primitive**
+- [x] **Step 3: Implement one private-atomic primitive**
 
 Add `_write_private_bytes(path, data)` and make JSON/text wrappers use it:
 
@@ -178,7 +178,7 @@ def write_private_text(path, text):
 Generic writing must not chmod an existing parent such as `/etc/gateway-acl`.
 Catalog setup separately creates/chmods only `TUNNEL_DIR` to `0700`.
 
-- [ ] **Step 4: Serialize read-modify-write of `config.json`**
+- [x] **Step 4: Serialize read-modify-write of `config.json`**
 
 Add `_conf_lock = threading.RLock()` and:
 
@@ -193,7 +193,7 @@ def update_conf(change):
 
 Move settings saving and future `vpn_mark` saving through this function; do not bind reloadable globals as default arguments.
 
-- [ ] **Step 5: Verify and commit**
+- [x] **Step 5: Verify and commit**
 
 ```bash
 python3 panel.py --selftest
