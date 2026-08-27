@@ -2342,12 +2342,17 @@ def switch_backend(old_rows, new_rows, runner=None, applier=None,
     new_backend = _prepare_backend(new_rows, runner, secrets_map)
     if _unmanaged_tunnel(old_backend, runner):
         raise VpnError("conflict")
+    same_backend = bool(old_backend and new_backend
+        and old_backend["kind"] == new_backend["kind"]
+        and (old_backend.get("id") == new_backend.get("id")
+             if old_backend["kind"] != "singbox"
+             else old_backend.get("ids") == new_backend.get("ids")))
     old_mark = int(conf().get("vpn_mark") or 0)
     old_singbox = _file_snapshot(SINGBOX_CONFIG)
     set_transit_closed(True, applier)
     attempted = False
     try:
-        _stop_backend(old_backend, runner)
+        _stop_backend(old_backend, runner, quiet=same_backend)
         if new_backend:
             attempted = True
             _start_backend(new_backend, runner)
@@ -2491,7 +2496,12 @@ def vpn_action(action, body, runner=None, applier=None, fetcher=None):
         call = actions[action]
     except (KeyError, TypeError):
         raise VpnError("validation-failed") from None
-    return call()
+    try:
+        return call()
+    except VpnError:
+        raise
+    except (ValueError, TypeError, AttributeError):
+        raise VpnError("validation-failed") from None
 
 
 def _clean_tunnel_orphans(rows):
@@ -2698,6 +2708,13 @@ def check_quick_config(kind, value, runner=None, tid=None):
     table = interface.get("table", "auto").lower()
     if table != "auto":
         raise ValueError("only automatic tunnel routing is supported")
+    if "mtu" in interface:
+        try:
+            mtu = int(interface["mtu"])
+        except ValueError:
+            raise ValueError("invalid tunnel MTU") from None
+        if not 576 <= mtu <= 65535:
+            raise ValueError("invalid tunnel MTU")
 
     awg = AWG_KEYS.intersection(interface)
     if kind == "wireguard" and awg:
@@ -4988,7 +5005,6 @@ def selftest():
             raise AssertionError(f"unsafe tunnel suffix accepted: {bad_suffix!r}")
         except ValueError:
             pass
-
     with tempfile.TemporaryDirectory() as td:
         old_paths = (TUNNELS, TUNNEL_DIR, LEGACY_SUB_URL,
                      LEGACY_SUB_EXCLUDE)
@@ -4997,6 +5013,11 @@ def selftest():
         LEGACY_SUB_URL = os.path.join(td, "sub.url")
         LEGACY_SUB_EXCLUDE = os.path.join(td, "sub.exclude")
         try:
+            try:
+                vpn_action("enable", {"id": "../x"})
+                raise AssertionError("unsafe POST tunnel id accepted")
+            except VpnError as e:
+                assert str(e) == "validation-failed"
             rows = [{"id": tid, "name": "Secret profile",
                      "kind": "subscription", "enabled": False,
                      "error": "", "nodes": 0,
@@ -5110,7 +5131,8 @@ PersistentKeepalive = 25
     awg = wg.replace(
         f"PrivateKey = {key}\n",
         f"PrivateKey = {key}\nJc = 10\nJmin = 47\nJmax = 129\n"
-        "S1 = 46\nS2 = 30\nH1 = 1035708199\n")
+        "S1 = 46\nS2 = 30\nS3 = 17\nS4 = 13\n"
+        "H1 = 1035708199\nH2 = 256240833\nH3 = 197207975\nH4 = 556935419\n")
     quick_calls = []
 
     def quick_ok(argv, **kwargs):
@@ -5145,6 +5167,8 @@ PersistentKeepalive = 25
         "split route": wg.replace("0.0.0.0/0, ::/0", "10.0.0.0/8"),
         "table off": wg.replace("Table = auto", "Table = off"),
         "custom table": wg.replace("Table = auto", "Table = 51820"),
+        "mtu too small": wg.replace("Table = auto", "MTU = 575"),
+        "mtu too large": wg.replace("Table = auto", "MTU = 999999"),
         "hook": wg.replace("DNS = 1.1.1.1, 8.8.8.8",
                            "pOsTuP = touch /tmp/x"),
         "save config": wg.replace("Table = auto", "SaveConfig = false"),
@@ -5309,6 +5333,8 @@ PersistentKeepalive = 25
                 if argv[1] == "strip":
                     return subprocess.CompletedProcess(argv, 0, "", "")
                 tid = os.path.basename(argv[2]).removesuffix(".conf")
+                if argv[1] == "down" and self.active != tid:
+                    return subprocess.CompletedProcess(argv, 1, "", "not running")
                 self.active = tid if argv[1] == "up" else None
             elif argv[:5] == ["ip", "-j", "route", "show", "default"]:
                 return subprocess.CompletedProcess(
@@ -5525,8 +5551,14 @@ PersistentKeepalive = 25
                        for argv, _ in fake.commands)
             assert any(argv[0] == "awg" and argv[-1] == "fwmark"
                        for argv, _ in fake.commands)
+            assert key not in json.dumps(vpn_public(runner=fake)), \
+                "the AmneziaWG secret reached the browser projection"
             vpn_disable(amz["id"], runner=fake, applier=gate_apply)
             assert fake.active is None and not _vpn_closed
+            amz_secret = tunnel_path(amz["id"], ".conf")
+            vpn_delete(amz["id"], runner=fake, applier=gate_apply)
+            assert not os.path.exists(amz_secret), \
+                "deleting an AmneziaWG profile left its config behind"
 
             fake.unmanaged = True
             gates_before = list(gate_states)
@@ -5631,6 +5663,18 @@ PersistentKeepalive = 25
                            or argv[:3] == ["systemctl", "restart", "sing-box"]
                            for argv, _ in fake.commands), \
                 "legacy migration must not rebuild the working service"
+
+            stopped_quick = {"id": "t000000000013", "name": "stopped quick",
+                             "kind": "wireguard", "enabled": True,
+                             "error": "", "nodes": 0}
+            write_private_text(tunnel_path(stopped_quick["id"], ".conf"), wg)
+            save_tunnels([stopped_quick])
+            fake.active = None
+            set_transit_closed(True, startup_gate)
+            vpn_enable(stopped_quick["id"], runner=fake, applier=startup_gate)
+            assert fake.active == stopped_quick["id"] and not _vpn_closed
+            assert _find_tunnel(load_tunnels(), stopped_quick["id"])["error"] == "", \
+                "an enabled quick profile must recover after an external stop"
         finally:
             (CONFIG, TUNNELS, TUNNEL_DIR, SINGBOX_CONFIG) = old_paths
             CFG["vpn_mark"], _vpn_closed = old_mark, old_closed

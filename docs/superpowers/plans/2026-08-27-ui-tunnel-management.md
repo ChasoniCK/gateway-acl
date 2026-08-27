@@ -746,7 +746,7 @@ git commit -m "Документировать управление VPN из па
 - Inspect: all changed files
 - Do not commit: screenshot-derived config or any generated secret/log
 
-- [ ] **Step 1: Run the complete local suite from `AGENTS.md`**
+- [x] **Step 1: Run the complete local suite from `AGENTS.md`**
 
 ```bash
 python3 panel.py --selftest
@@ -766,23 +766,45 @@ GWACL_DIR="$tmp/etc" python3 panel.py --dump > "$tmp/gwacl.nft"
 nft -c -f "$tmp/gwacl.nft"
 ```
 
-- [ ] **Step 2: Inspect environment without mutating the Mac network**
+Result: both Python selftests, compile, dump, version, `bash -n`, rendered JS
+syntax and diff checks passed on macOS. Alpine also passed `shellcheck`, actual
+`nft -c`, table apply/delete and `sing-box check`.
+
+- [x] **Step 2: Inspect environment without mutating the Mac network**
 
 Record before/after read-only snapshots with `route -n get default`, `netstat -rn -f inet`, `scutil --nc list`, and `ifconfig`. Determine whether a separate Linux VM with `awg-quick`, `wg-quick`, sing-box, nft and NET_ADMIN is already available. Do not install or start a host VPN.
 
-- [ ] **Step 3: Run screenshot config through parser/UI only**
+Result: an ephemeral ARM64 Alpine/QEMU guest with user-mode NAT was used. The
+Mac default route, configured VPN services and relevant interfaces were unchanged;
+no host VPN or firewall command was run.
+
+- [x] **Step 3: Resolve the screenshot parser/UI check without exposing it**
 
 Extract it to a `mktemp` file mode 0600 outside the repo without printing content. Validate add/render/delete against scratch storage, then remove the temp file. Do not start it: the same peer key may roam and disconnect the laptop. A live handshake requires a disposable peer with different keys.
 
-- [ ] **Step 4: Run live tests only in a qualifying Linux guest**
+Environment block: the clipboard attachment's temporary file had already vanished,
+so the exact secret-bearing bytes could not be read safely. The same AmneziaWG field
+shape (`Jc/Jmin/Jmax`, `S1`–`S4`, `H1`–`H4`) was exercised with generated keys through
+parser, add, browser projection and delete; no screenshot key or endpoint entered git.
+
+- [x] **Step 4: Run available live tests only in a qualifying Linux guest**
 
 Inside the guest verify `awg-quick strip`, enable, interface/routes, handshake/transfer, DNS, IPv4 HTTPS, optional IPv6, disable/re-enable, failed candidate rollback, and transit closure after simulated crash. Use a user-provided subscription URL or controlled local fixture only.
 
-- [ ] **Step 5: If isolation/tools/peer are absent, record an environment block**
+Result: a disposable WireGuard peer completed handshake and transfer; DNS, IPv4
+HTTPS, disable/re-enable, failed-candidate rollback, crash detection, guarded
+recovery and direct routing after disable passed. A controlled multi-source fixture
+passed the real `sing-box check`. No external subscription URL was invented.
+
+- [x] **Step 5: If isolation/tools/peer are absent, record an environment block**
 
 Do not weaken the safety constraint. Report exactly which binary/capability/disposable peer is missing and which automatic/parser/rollback tests passed instead.
 
-- [ ] **Step 6: Perform two final reviews**
+Block: Alpine had no usable `awg-quick`/AmneziaWG package and there was no disposable
+AWG peer, so a live AWG handshake was not run. Structural AWG, fixed-command,
+rollback and secret non-disclosure paths passed automatically instead.
+
+- [x] **Step 6: Perform two final reviews**
 
 Run a spec-compliance review and a code-quality/security review. Fix findings with a new failing assert first, rerun the full suite, then inspect:
 
@@ -794,7 +816,11 @@ git log --oneline -12
 
 Confirm `AGENTS.md` remains untracked and no secret-bearing file is tracked.
 
-- [ ] **Step 7: Final commit if review produced fixes**
+Result: the spec review and security/code review added MTU bounds, recovery of an
+already-enabled backend even before the poll records `stopped`, and API-safe handling
+of malformed POST tunnel ids. Each finding was reproduced failing before its fix.
+
+- [x] **Step 7: Final commit if review produced fixes**
 
 ```bash
 git add panel.py singbox_sub.py install.sh README.md README.ru.md docs/design.md docs/singbox.md
