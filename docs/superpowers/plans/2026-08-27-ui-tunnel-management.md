@@ -540,15 +540,15 @@ git commit -m "Переключать VPN с закрытым транзитом
 - Modify: `panel.py` tunnels section
 - Test: `panel.py:selftest()`
 
-- [ ] **Step 1: Write failing reconciliation asserts**
+- [x] **Step 1: Write failing reconciliation asserts**
 
 Cover missing secret, owned orphan `.tmp`, saved active backend that starts, saved active backend that fails without killing HTTP initialization, and runtime disappearance that closes transit.
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run: `python3 panel.py --selftest`
 
-- [ ] **Step 3: Implement bounded reconciliation**
+- [x] **Step 3: Implement bounded reconciliation**
 
 ```python
 def reconcile_tunnels(runner=None):
@@ -566,7 +566,7 @@ def vpn_poll(runner=None):
 
 `main()` calls reconciliation inside `try/except` after configuration load and before serving; failure records a safe status and leaves the panel reachable. `poller()` calls `vpn_poll()` once per existing tick.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 ```bash
 python3 panel.py --selftest

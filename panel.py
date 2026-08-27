@@ -2200,7 +2200,11 @@ def _set_vpn_mark(mark):
     mark = int(mark or 0)
     if not 0 <= mark <= 0xffffffff:
         mark = 0
-    update_conf(lambda c: c.__setitem__("vpn_mark", mark))
+    with _conf_lock:
+        current = conf()
+        if int(current.get("vpn_mark") or 0) != mark:
+            current["vpn_mark"] = mark
+            save_conf(current)
     CFG["vpn_mark"] = mark
 
 
@@ -2362,6 +2366,124 @@ def vpn_action(action, body, runner=None, applier=None, fetcher=None):
     except (KeyError, TypeError):
         raise VpnError("validation-failed") from None
     return call()
+
+
+def _clean_tunnel_orphans(rows):
+    if not os.path.isdir(TUNNEL_DIR):
+        return
+    expected = {row["id"] + (".json" if row["kind"] == "subscription" else ".conf")
+                for row in rows}
+    for name in os.listdir(TUNNEL_DIR):
+        path = os.path.join(TUNNEL_DIR, name)
+        if re.fullmatch(r"t[0-9a-f]{12}\.(?:json|conf)", name):
+            if name not in expected:
+                with contextlib.suppress(OSError):
+                    os.unlink(path)
+        elif re.fullmatch(r"\.t[0-9a-f]{12}\.(?:json|conf)\..+", name):
+            with contextlib.suppress(OSError):
+                os.unlink(path)
+        elif name.startswith(".singbox-") and os.path.isdir(path):
+            shutil.rmtree(path, ignore_errors=True)
+
+
+def _has_tunnel_secret(row):
+    suffix = ".json" if row["kind"] == "subscription" else ".conf"
+    return os.path.isfile(tunnel_path(row["id"], suffix))
+
+
+def reconcile_tunnels(runner=None, applier=None):
+    """Reconcile disk and managed runtime without making HTTP depend on it."""
+    with _vpn_lock:
+        migrate_legacy_subscription()
+        rows = load_tunnels()
+        _clean_tunnel_orphans(rows)
+        broken = False
+        for row in rows:
+            if not _has_tunnel_secret(row):
+                broken |= row["enabled"]
+                row["enabled"], row["error"] = False, "missing-secret"
+        try:
+            backend = active_backend(rows)
+        except VpnError:
+            for row in rows:
+                if row["enabled"]:
+                    row["error"] = "invalid-state"
+            save_tunnels(rows)
+            _set_vpn_mark(0)
+            set_transit_closed(True, applier)
+            return False
+        if backend is None:
+            save_tunnels(rows)
+            _set_vpn_mark(0)
+            set_transit_closed(broken, applier)
+            return not broken
+
+        legacy = (backend["kind"] == "singbox" and any(
+            row["enabled"] and row["error"] == "legacy/no-cache" for row in rows))
+        try:
+            try:
+                _check_backend(backend, runner)
+            except VpnError:
+                if legacy:
+                    raise
+                if _unmanaged_tunnel(None, runner):
+                    raise VpnError("conflict")
+                prepared = _prepare_backend(rows, runner)
+                _start_backend(prepared, runner)
+                _check_backend(prepared, runner)
+                backend = prepared
+            _set_vpn_mark(backend_mark(backend, runner))
+            if not legacy:
+                for row in rows:
+                    if row["enabled"]:
+                        row["error"] = ""
+            save_tunnels(rows)
+            set_transit_closed(False, applier)
+            return True
+        except VpnError as e:
+            code = str(e) if str(e) in SAFE_VPN_ERRORS else "start-failed"
+            for row in rows:
+                if row["enabled"]:
+                    row["error"] = code
+            with contextlib.suppress(Exception):
+                _set_vpn_mark(0)
+                save_tunnels(rows)
+            set_transit_closed(True, applier)
+            return False
+
+
+def vpn_poll(runner=None, applier=None):
+    with _vpn_lock:
+        rows = load_tunnels()
+        try:
+            backend = active_backend(rows)
+            if backend is None:
+                failed_managed = any(
+                    row.get("error") == "missing-secret"
+                    or (row.get("enabled") and row.get("error")) for row in rows)
+                set_transit_closed(failed_managed, applier)
+                return
+            _check_backend(backend, runner)
+            _set_vpn_mark(backend_mark(backend, runner))
+            dirty = False
+            for row in rows:
+                if (row["enabled"] and row["error"]
+                        and row["error"] != "legacy/no-cache"):
+                    row["error"] = ""
+                    dirty = True
+            if dirty:
+                save_tunnels(rows)
+            set_transit_closed(False, applier)
+        except Exception:
+            dirty = False
+            for row in rows:
+                if row.get("enabled") and row.get("error") != "stopped":
+                    row["error"] = "stopped"
+                    dirty = True
+            with contextlib.suppress(Exception):
+                if dirty:
+                    save_tunnels(rows)
+                set_transit_closed(True, applier)
 
 
 def _quick_text(value):
@@ -4282,6 +4404,7 @@ def poller():
         poll()
         expire()        # a timer that has run out
         track_macs()    # a device DHCP has moved to another address
+        vpn_poll()      # a managed tunnel that vanished closes forwarded traffic
         check_update()
         # A minute of slack so two ticks cannot leave a gap between windows.
         if reboot_due(CFG["reboot"] and CFG["reboot_at"],
@@ -4921,6 +5044,81 @@ PersistentKeepalive = 25
             assert _vpn_closed, "rollback failure must keep transit closed"
             assert next(r for r in load_tunnels() if r["id"] == last["id"])[
                 "error"] == "rollback-failed"
+        finally:
+            (CONFIG, TUNNELS, TUNNEL_DIR, SINGBOX_CONFIG) = old_paths
+            CFG["vpn_mark"], _vpn_closed = old_mark, old_closed
+
+    with tempfile.TemporaryDirectory() as td:
+        old_paths = CONFIG, TUNNELS, TUNNEL_DIR, SINGBOX_CONFIG
+        old_mark, old_closed = CFG.get("vpn_mark"), _vpn_closed
+        CONFIG = os.path.join(td, "config.json")
+        TUNNELS = os.path.join(td, "tunnels.json")
+        TUNNEL_DIR = os.path.join(td, "tunnels")
+        SINGBOX_CONFIG = os.path.join(td, "sing-box.json")
+        fake, gates = FakeVpn(), []
+
+        def startup_gate(devs):
+            gates.append(_vpn_closed)
+
+        try:
+            write_private(CONFIG, dict(DEFAULTS, vpn_mark=0, bypass=0))
+            CFG["vpn_mark"] = 0
+            _ensure_tunnel_dir()
+            missing = {"id": "t000000000011", "name": "missing",
+                       "kind": "wireguard", "enabled": True,
+                       "error": "", "nodes": 0}
+            save_tunnels([missing])
+            orphan = tunnel_path("t000000000012", ".conf")
+            write_private_text(orphan, wg)
+            keep = os.path.join(TUNNEL_DIR, "keep.txt")
+            write_private_text(keep, "not owned by the catalog")
+            reconcile_tunnels(runner=fake, applier=startup_gate)
+            row = load_tunnels()[0]
+            assert not row["enabled"] and row["error"] == "missing-secret"
+            assert _vpn_closed and gates[-1]
+            assert not os.path.exists(orphan) and os.path.exists(keep)
+            vpn_poll(runner=fake, applier=startup_gate)
+            assert _vpn_closed, "poll must not reopen a missing managed backend"
+
+            set_transit_closed(False, startup_gate)
+            save_tunnels([])
+            uid = "5eb99d66-0000-0000-0000-000000000000"
+            body = f"vless://{uid}@a.example:443?security=tls#startup"
+            sub = vpn_add({"kind": "subscription", "name": "startup",
+                           "url": "https://provider.example/startup"},
+                          fetcher=lambda url: body)
+            rows = load_tunnels()
+            _find_tunnel(rows, sub["id"])["enabled"] = True
+            save_tunnels(rows)
+            reconcile_tunnels(runner=fake, applier=startup_gate)
+            assert fake.active == "singbox" and not _vpn_closed
+            assert json.load(open(CONFIG))["vpn_mark"] == 0x2024
+
+            fake.active = None
+            vpn_poll(runner=fake, applier=startup_gate)
+            assert _vpn_closed
+            assert _find_tunnel(load_tunnels(), sub["id"])["error"] == "stopped"
+            fake.active = "singbox"
+            vpn_poll(runner=fake, applier=startup_gate)
+            assert not _vpn_closed
+            assert _find_tunnel(load_tunnels(), sub["id"])["error"] == ""
+            catalog_mtime = os.stat(TUNNELS).st_mtime_ns
+            vpn_poll(runner=fake, applier=startup_gate)
+            assert os.stat(TUNNELS).st_mtime_ns == catalog_mtime, \
+                "a healthy poll must not rewrite flash"
+
+            legacy = load_tunnels()
+            legacy[0]["error"] = "legacy/no-cache"
+            write_private(tunnel_path(sub["id"], ".json"),
+                          {"url": "https://legacy.example/sub", "exclude": ""})
+            save_tunnels(legacy)
+            fake.commands.clear()
+            reconcile_tunnels(runner=fake, applier=startup_gate)
+            assert fake.active == "singbox" and not _vpn_closed
+            assert not any(argv[:2] == ["sing-box", "check"]
+                           or argv[:3] == ["systemctl", "restart", "sing-box"]
+                           for argv, _ in fake.commands), \
+                "legacy migration must not rebuild the working service"
         finally:
             (CONFIG, TUNNELS, TUNNEL_DIR, SINGBOX_CONFIG) = old_paths
             CFG["vpn_mark"], _vpn_closed = old_mark, old_closed
@@ -5567,6 +5765,14 @@ def main():
             sys.exit(T["noIface"].replace("{iface}", IFACE).replace("{cfg}", CONFIG))
         if not conf()["pw"]:
             print(T["noPwWarn"].replace("{cmd}", sys.argv[0]), file=sys.stderr)
+        # Reconciliation is allowed to fail; the HTTP panel is how the broken
+        # profile is repaired. Its only startup side effect here is the guard
+        # flag — the real table is installed once, just below.
+        try:
+            reconcile_tunnels(applier=lambda devs: None)
+        except Exception:
+            if any(row.get("enabled") for row in load_tunnels()):
+                set_transit_closed(True, lambda devs: None)
         apply(load())  # on start (a reboot included) raise the table from disk
         # systemd stops the service on every update; the buffered counters go
         # out with it rather than waiting for a flush that never comes.
