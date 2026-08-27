@@ -211,7 +211,7 @@ git commit -m "Писать приватные настройки атомарн
 - Modify: `panel.py` new section `# --- tunnels ---` before machine/system information
 - Test: `panel.py:selftest()`
 
-- [ ] **Step 1: Write failing catalog and non-disclosure asserts**
+- [x] **Step 1: Write failing catalog and non-disclosure asserts**
 
 Cover exact server IDs, traversal rejection, modes, public projection and one-shot migration:
 
@@ -231,13 +231,13 @@ assert "PrivateKey" not in json.dumps(public)
 
 In a temporary `GWACL_DIR`, create `sub.url`/`sub.exclude`, call migration twice, then assert one profile, `legacy=True`, no cache, unchanged sing-box runtime fixture, and legacy files removed only after catalog+secret exist.
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run: `python3 panel.py --selftest`
 
 Expected: `NameError` for the new catalog helpers.
 
-- [ ] **Step 3: Add constants and strict storage helpers**
+- [x] **Step 3: Add constants and strict storage helpers**
 
 ```python
 TUNNELS = os.path.join(DIR, "tunnels.json")
@@ -258,7 +258,7 @@ def migrate_legacy_subscription(): ...
 
 Normalize catalog records to exactly `id,name,kind,enabled,error,nodes` plus internal migration state. Never copy a secret field into metadata or public output.
 
-- [ ] **Step 4: Add subscription form validation**
+- [x] **Step 4: Add subscription form validation**
 
 ```python
 def check_subscription(url, exclude):
@@ -275,7 +275,7 @@ def check_subscription(url, exclude):
     return p.geturl(), exclude
 ```
 
-- [ ] **Step 5: Implement one-shot migration and verify**
+- [x] **Step 5: Implement one-shot migration and verify**
 
 Migration order is secret → catalog → remove legacy files. It must not rebuild/restart sing-box.
 
@@ -286,7 +286,7 @@ python3 panel.py --selftest
 python3 singbox_sub.py --selftest
 ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add panel.py

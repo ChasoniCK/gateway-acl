@@ -79,6 +79,10 @@ TRAFFIC = f"{ETC}/traffic.json"
 TODAY = f"{ETC}/today.json"
 SESSIONS = f"{ETC}/sessions.json"
 UPDATE_LOG = f"{ETC}/update.log"
+TUNNELS = f"{ETC}/tunnels.json"
+TUNNEL_DIR = f"{ETC}/tunnels"
+LEGACY_SUB_URL = f"{ETC}/sub.url"
+LEGACY_SUB_EXCLUDE = f"{ETC}/sub.exclude"
 
 DEFAULTS = {"iface": "eno1", "lan": "192.168.1.0/24", "self_ip": "192.168.1.10",
             "port": 8080, "poll_sec": 60, "pw": None, "lang": "ru",
@@ -137,6 +141,7 @@ KEEP_MONTHS = DEFAULTS["keep_months"]
 _lock = threading.Lock()
 _statelock = threading.Lock()
 _conf_lock = threading.RLock()
+_vpn_lock = threading.RLock()
 _state = {"at": 0.0, "month": None, "val": None}   # the last answer /api gave
 _sessions = {}          # digest of the token -> when it expires
 _fails = {}             # address -> (misses, blocked until)
@@ -1707,6 +1712,156 @@ def install_update(tag):
         if tmp:
             shutil.rmtree(tmp, ignore_errors=True)
         _updating.release()
+
+
+# --- tunnels ----------------------------------------------------------------
+
+VPN_MAX = 128 << 10
+SUB_URL_MAX = 4096
+TUNNEL_ID_RE = re.compile(r"t[0-9a-f]{12}\Z")
+TUNNEL_KINDS = ("subscription", "wireguard", "amneziawg")
+TUNNEL_SUFFIXES = (".json", ".conf")
+SAFE_VPN_ERRORS = {
+    "", "legacy/no-cache", "missing-secret", "tool-missing", "stopped",
+    "start-failed", "validation-failed", "rollback-failed", "conflict",
+    "invalid-state",
+}
+
+
+def check_tunnel_id(value):
+    value = str(value or "")
+    if not TUNNEL_ID_RE.fullmatch(value):
+        raise ValueError("invalid tunnel id")
+    return value
+
+
+def tunnel_path(tid, suffix):
+    tid = check_tunnel_id(tid)
+    if suffix not in TUNNEL_SUFFIXES:
+        raise ValueError("invalid tunnel file type")
+    return os.path.join(TUNNEL_DIR, tid + suffix)
+
+
+def _tunnel_row(row):
+    if not isinstance(row, dict):
+        raise ValueError("invalid tunnel record")
+    tid = check_tunnel_id(row.get("id"))
+    kind = str(row.get("kind") or "")
+    if kind not in TUNNEL_KINDS:
+        raise ValueError("invalid tunnel type")
+    name = " ".join(str(row.get("name") or "").split())[:40]
+    if not name:
+        raise ValueError("empty tunnel name")
+    error = str(row.get("error") or "")
+    if error not in SAFE_VPN_ERRORS:
+        error = "invalid-state"
+    try:
+        nodes = max(0, int(row.get("nodes") or 0))
+    except (TypeError, ValueError):
+        nodes = 0
+    clean = {"id": tid, "name": name, "kind": kind,
+             "enabled": bool(row.get("enabled")), "error": error,
+             "nodes": nodes}
+    for key in ("verified", "ipv6"):
+        if key in row:
+            clean[key] = bool(row[key])
+    return clean
+
+
+def load_tunnels():
+    rows = _load_json(TUNNELS, [])
+    if not isinstance(rows, list):
+        return []
+    clean, used = [], set()
+    for row in rows:
+        try:
+            row = _tunnel_row(row)
+        except ValueError:
+            continue
+        if row["id"] in used:
+            continue
+        used.add(row["id"])
+        clean.append(row)
+    return clean
+
+
+def save_tunnels(rows):
+    clean = [_tunnel_row(row) for row in rows]
+    if len({row["id"] for row in clean}) != len(clean):
+        raise ValueError("duplicate tunnel id")
+    write_private(TUNNELS, clean)
+
+
+def new_tunnel_id(rows):
+    used = {row.get("id") for row in rows if isinstance(row, dict)}
+    while True:
+        tid = "t" + secrets.token_hex(6)
+        if tid not in used:
+            return tid
+
+
+def public_tunnels(rows=None, runner=None):
+    """Browser-safe metadata only; `runner` is used by runtime status later."""
+    del runner
+    return [_tunnel_row(row) for row in (load_tunnels() if rows is None else rows)]
+
+
+def _ensure_tunnel_dir():
+    os.makedirs(TUNNEL_DIR, mode=0o700, exist_ok=True)
+    os.chmod(TUNNEL_DIR, 0o700)
+
+
+def check_subscription(url, exclude):
+    url = str(url or "").strip()
+    p = urlparse(url)
+    if (len(url) > SUB_URL_MAX or any(ord(c) < 32 or ord(c) == 127 for c in url)
+            or p.scheme != "https" or not p.hostname):
+        raise ValueError("subscription URL must use HTTPS")
+    exclude = str(exclude or "")
+    if len(exclude) > 128:
+        raise ValueError("subscription exclusion is too long")
+    try:
+        re.compile(exclude, re.I)
+    except re.error:
+        raise ValueError("invalid subscription exclusion") from None
+    return url, exclude
+
+
+def migrate_legacy_subscription():
+    """Move the old secret once without rebuilding or restarting sing-box."""
+    if os.path.exists(TUNNELS) or not os.path.isfile(LEGACY_SUB_URL):
+        return False
+    try:
+        with open(LEGACY_SUB_URL) as f:
+            url = f.read(VPN_MAX + 1).strip()
+        if not url or len(url.encode()) > VPN_MAX:
+            return False
+        try:
+            with open(LEGACY_SUB_EXCLUDE) as f:
+                exclude = f.read(129).strip()
+        except FileNotFoundError:
+            exclude = ""
+        if len(exclude) > 128:
+            exclude = ""
+    except OSError:
+        return False
+
+    rows = []
+    tid = new_tunnel_id(rows)
+    _ensure_tunnel_dir()
+    write_private(tunnel_path(tid, ".json"),
+                  {"url": url, "exclude": exclude})
+    save_tunnels([{"id": tid, "name": "Подписка", "kind": "subscription",
+                   "enabled": True, "error": "legacy/no-cache", "nodes": 0}])
+    for path in (LEGACY_SUB_URL, LEGACY_SUB_EXCLUDE):
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(path)
+    dfd = os.open(os.path.dirname(TUNNELS) or ".", os.O_RDONLY)
+    try:
+        os.fsync(dfd)
+    finally:
+        os.close(dfd)
+    return True
 
 
 # --- the machine itself -----------------------------------------------------
@@ -3469,7 +3624,8 @@ def poller():
 
 
 def selftest():
-    global CONFIG
+    global CONFIG, TUNNELS, TUNNEL_DIR, LEGACY_SUB_URL, LEGACY_SUB_EXCLUDE
+    global save_tunnels
     with tempfile.TemporaryDirectory() as td:
         secret = os.path.join(td, "secret.json")
         os.chmod(td, 0o755)
@@ -3513,6 +3669,124 @@ def selftest():
                 "a config mutation must preserve the latest unrelated values"
         finally:
             CONFIG = old_config
+
+    tid = new_tunnel_id([])
+    assert re.fullmatch(r"t[0-9a-f]{12}", tid), tid
+    for bad in ("", "../x", "t1/../x", "t" + "0" * 11, "t" + "0" * 13,
+                "T" + "0" * 12):
+        try:
+            check_tunnel_id(bad)
+            raise AssertionError(f"unsafe tunnel id accepted: {bad!r}")
+        except ValueError:
+            pass
+    for bad_suffix in ("json", "/x", "../x", ".service"):
+        try:
+            tunnel_path(tid, bad_suffix)
+            raise AssertionError(f"unsafe tunnel suffix accepted: {bad_suffix!r}")
+        except ValueError:
+            pass
+
+    with tempfile.TemporaryDirectory() as td:
+        old_paths = (TUNNELS, TUNNEL_DIR, LEGACY_SUB_URL,
+                     LEGACY_SUB_EXCLUDE)
+        TUNNELS = os.path.join(td, "tunnels.json")
+        TUNNEL_DIR = os.path.join(td, "tunnels")
+        LEGACY_SUB_URL = os.path.join(td, "sub.url")
+        LEGACY_SUB_EXCLUDE = os.path.join(td, "sub.exclude")
+        try:
+            rows = [{"id": tid, "name": "Secret profile",
+                     "kind": "subscription", "enabled": False,
+                     "error": "", "nodes": 0,
+                     "url": "https://provider.example/private-token",
+                     "body": "vless://private", "PrivateKey": "hidden",
+                     "Endpoint": "198.51.100.1:51820"}]
+            save_tunnels(rows)
+            assert os.stat(TUNNELS).st_mode & 0o777 == 0o600
+            loaded = load_tunnels()
+            assert loaded[0]["id"] == tid
+            stored = open(TUNNELS).read()
+            assert "private-token" not in stored and "PrivateKey" not in stored
+            public = json.dumps(public_tunnels(loaded), sort_keys=True)
+            for secret_value in ("private-token", "vless://", "hidden",
+                                 "198.51.100.1"):
+                assert secret_value not in public
+            try:
+                save_tunnels(loaded + loaded)
+                raise AssertionError("duplicate tunnel ids must be rejected")
+            except ValueError:
+                pass
+
+            with open(LEGACY_SUB_URL, "w") as f:
+                f.write("https://legacy.example/private-token\n")
+            with open(LEGACY_SUB_EXCLUDE, "w") as f:
+                f.write("Russia\n")
+            os.unlink(TUNNELS)  # migration is only for a host with no catalog
+            real_run = subprocess.run
+            subprocess.run = lambda *a, **k: (_ for _ in ()).throw(
+                AssertionError("migration must not touch the running tunnel"))
+            try:
+                assert migrate_legacy_subscription()
+            finally:
+                subprocess.run = real_run
+            migrated = load_tunnels()
+            assert len(migrated) == 1 and migrated[0]["kind"] == "subscription"
+            assert migrated[0]["enabled"] and migrated[0]["error"] == "legacy/no-cache"
+            secret_path = tunnel_path(migrated[0]["id"], ".json")
+            assert os.stat(TUNNEL_DIR).st_mode & 0o777 == 0o700
+            assert os.stat(secret_path).st_mode & 0o777 == 0o600
+            with open(secret_path) as f:
+                migrated_secret = json.load(f)
+            assert migrated_secret == {
+                "url": "https://legacy.example/private-token",
+                "exclude": "Russia"}
+            assert not os.path.exists(LEGACY_SUB_URL)
+            assert not os.path.exists(LEGACY_SUB_EXCLUDE)
+            assert not migrate_legacy_subscription(), "legacy migration ran twice"
+            assert len(load_tunnels()) == 1
+            assert "private-token" not in open(TUNNELS).read()
+        finally:
+            (TUNNELS, TUNNEL_DIR, LEGACY_SUB_URL,
+             LEGACY_SUB_EXCLUDE) = old_paths
+
+    with tempfile.TemporaryDirectory() as td:
+        old_paths = (TUNNELS, TUNNEL_DIR, LEGACY_SUB_URL,
+                     LEGACY_SUB_EXCLUDE)
+        TUNNELS = os.path.join(td, "tunnels.json")
+        TUNNEL_DIR = os.path.join(td, "tunnels")
+        LEGACY_SUB_URL = os.path.join(td, "sub.url")
+        LEGACY_SUB_EXCLUDE = os.path.join(td, "sub.exclude")
+        with open(LEGACY_SUB_URL, "w") as f:
+            f.write("https://legacy.example/private-token\n")
+        real_save_tunnels = save_tunnels
+        try:
+            save_tunnels = lambda rows: (_ for _ in ()).throw(OSError("cut"))
+            try:
+                migrate_legacy_subscription()
+                raise AssertionError("catalog failure must escape migration")
+            except OSError:
+                pass
+        finally:
+            save_tunnels = real_save_tunnels
+            (TUNNELS, TUNNEL_DIR, LEGACY_SUB_URL,
+             LEGACY_SUB_EXCLUDE) = old_paths
+        assert os.path.exists(os.path.join(td, "sub.url")), \
+            "legacy secret was deleted before catalog commit"
+        assert not os.path.exists(os.path.join(td, "tunnels.json"))
+
+    for url, exclude in (("http://provider.example/sub", ""),
+                         ("file:///etc/passwd", ""),
+                         ("https:///missing-host", ""),
+                         ("https://provider.example/sub\nX-Test: bad", ""),
+                         ("https://provider.example/" + "x" * 4097, ""),
+                         ("https://provider.example/sub", "["),
+                         ("https://provider.example/sub", "x" * 129)):
+        try:
+            check_subscription(url, exclude)
+            raise AssertionError("bad subscription input accepted")
+        except ValueError:
+            pass
+    assert check_subscription(" https://provider.example/sub ", "Russia") == \
+        ("https://provider.example/sub", "Russia")
 
     assert accrue(0, 100) == 100
     assert accrue(100, 250) == 150
