@@ -430,7 +430,7 @@ git commit -m "Собирать единый backend из подписок"
 - Modify: `panel.py` tunnels section
 - Test: `panel.py:selftest()`
 
-- [ ] **Step 1: Write failing nft gate asserts**
+- [x] **Step 1: Write failing nft gate asserts**
 
 ```python
 closed = ruleset(d, vpn_closed=True)
@@ -441,13 +441,13 @@ assert "hook forward" in closed
 assert "hook input" not in closed
 ```
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run: `python3 panel.py --selftest`
 
 Expected: `ruleset()` rejects `vpn_closed` or lacks the guard.
 
-- [ ] **Step 3: Add the minimal forward-only gate**
+- [x] **Step 3: Add the minimal forward-only gate**
 
 Extend `ruleset(devs, bypass=None, vpn_closed=None)`; when closed, emit one base chain in `inet gwacl`:
 
@@ -460,7 +460,7 @@ chain vpn_guard {
 
 `set_transit_closed(closed)` updates `_vpn_closed` under the lifecycle lock and applies the full existing ruleset. It never changes host routes, input hooks, macOS state or unmanaged nft tables.
 
-- [ ] **Step 4: Write lifecycle success and rollback asserts**
+- [x] **Step 4: Write lifecycle success and rollback asserts**
 
 Use a stateful fake runner and real scratch files/catalog. Cover `none→sing-box`, `sing-box→WG`, `WG→sing-box`, disable/delete last. For failpoints at stop-old, start-new, health, mark, config replace and final apply, assert:
 
@@ -477,7 +477,7 @@ Also simulate failure while restoring the old backend. In that case the old
 catalog/config remains authoritative, the safe error is recorded, and
 `_vpn_closed` must remain true; never open direct transit after a failed rollback.
 
-- [ ] **Step 5: Implement `switch_backend` in the tested order**
+- [x] **Step 5: Implement `switch_backend` in the tested order**
 
 ```python
 def switch_backend(current, candidate, runner=None):
@@ -504,7 +504,7 @@ them back before restarting the old backend. Refuse the operation, without
 stopping anything, when runtime inspection finds an unmanaged default-route
 tunnel.
 
-- [ ] **Step 6: Implement fixed public operations under one lock**
+- [x] **Step 6: Implement fixed public operations under one lock**
 
 ```python
 def vpn_add(body, runner=None): ...
@@ -521,7 +521,7 @@ def vpn_action(action, body, runner=None):
 
 Add operations save new profiles disabled; active subscription refresh commits cache only after candidate check/restart; deleting one subscription rebuilds from remaining caches; stopping the last backend opens direct transit only after successful stop and catalog commit.
 
-- [ ] **Step 7: Verify all rollback fixtures and commit**
+- [x] **Step 7: Verify all rollback fixtures and commit**
 
 ```bash
 python3 panel.py --selftest

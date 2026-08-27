@@ -144,6 +144,7 @@ _lock = threading.Lock()
 _statelock = threading.Lock()
 _conf_lock = threading.RLock()
 _vpn_lock = threading.RLock()
+_vpn_closed = False
 _state = {"at": 0.0, "month": None, "val": None}   # the last answer /api gave
 _sessions = {}          # digest of the token -> when it expires
 _fails = {}             # address -> (misses, blocked until)
@@ -1006,7 +1007,7 @@ def fail_blocked(ip):
 
 # --- nftables ---------------------------------------------------------------
 
-def ruleset(devs, bypass=None):
+def ruleset(devs, bypass=None, vpn_closed=None):
     """The whole table as one string. `bypass` is the moment the gateway stops
     letting everyone through — resolved from the config when it is not given,
     because a reload_conf()-managed value must never be frozen into a default.
@@ -1016,7 +1017,12 @@ def ruleset(devs, bypass=None):
     # records every address that came in past the list — so when the window
     # shuts, who used it is on the page rather than lost.
     open_now = (CFG["bypass"] if bypass is None else bypass) > time.time()
+    closed = _vpn_closed if vpn_closed is None else bool(vpn_closed)
     verdict = "" if open_now else "\n    drop"
+    guard = f'''\n  chain vpn_guard {{
+    type filter hook forward priority raw; policy accept;
+    iifname "{IFACE}" drop
+  }}''' if closed else ""
     on = [d for d in devs if d.get("on", True)]
     ips = ", ".join(d["ip"] for d in on)
     elems = f"\n    elements = {{ {ips} }}" if ips else ""
@@ -1074,7 +1080,7 @@ table inet gwacl {{
     type ipv4_addr
     flags dynamic,timeout
     timeout {BLOCK_TTL}s
-  }}
+  }}{guard}
   chain prerouting {{
     type filter hook prerouting priority raw; policy accept;
     iifname != "{IFACE}" accept{novpn}
@@ -1960,6 +1966,402 @@ def backend_state(rows, runner=None):
         result = vpn_exec(["ip", "link", "show", "dev", backend["id"]],
                           runner=runner)
     return {"kind": backend["kind"], "active": result.returncode == 0}
+
+
+def set_transit_closed(closed, applier=None):
+    global _vpn_closed
+    closed = bool(closed)
+    if closed == _vpn_closed:
+        return
+    before, _vpn_closed = _vpn_closed, closed
+    try:
+        (applier or apply)(load())
+    except Exception:
+        _vpn_closed = before
+        raise
+
+
+def _profile_name(value):
+    name = " ".join(str(value or "").split())[:40]
+    if not name:
+        raise VpnError("validation-failed")
+    return name
+
+
+def vpn_add(body, runner=None, fetcher=None):
+    with _vpn_lock:
+        rows = load_tunnels()
+        kind = str(body.get("kind") or "")
+        if kind not in TUNNEL_KINDS:
+            raise VpnError("validation-failed")
+        tid = new_tunnel_id(rows)
+        row = {"id": tid, "name": _profile_name(body.get("name")),
+               "kind": kind, "enabled": False, "error": "", "nodes": 0}
+        _ensure_tunnel_dir()
+        if kind == "subscription":
+            try:
+                url, exclude = check_subscription(body.get("url"),
+                                                  body.get("exclude"))
+                content = (fetcher or singbox_sub.fetch)(url)
+                if (not isinstance(content, str)
+                        or len(content.encode("utf-8")) > singbox_sub.SUB_BODY_MAX):
+                    raise ValueError
+                outs = singbox_sub.convert(content, exclude=exclude,
+                                            prefix=f"sub-{tid}-")
+            except Exception:
+                raise VpnError("validation-failed") from None
+            if not outs:
+                raise VpnError("validation-failed")
+            row["nodes"] = len(outs)
+            write_private(tunnel_path(tid, ".json"),
+                          {"url": url, "exclude": exclude, "body": content})
+        else:
+            config = body.get("config")
+            try:
+                checked = check_quick_config(kind, config, runner, tid)
+            except ValueError:
+                raise VpnError("validation-failed") from None
+            row.update(checked)
+            if not checked["verified"]:
+                row["error"] = "tool-missing"
+            write_private_text(tunnel_path(tid, ".conf"), _quick_text(config))
+        save_tunnels(rows + [row])
+        return _tunnel_row(row)
+
+
+def _find_tunnel(rows, tid):
+    tid = check_tunnel_id(tid)
+    row = next((row for row in rows if row["id"] == tid), None)
+    if row is None:
+        raise VpnError("validation-failed")
+    return row
+
+
+def _read_quick_config(row):
+    try:
+        with open(tunnel_path(row["id"], ".conf"), "rb") as f:
+            data = f.read(VPN_MAX + 1)
+    except OSError:
+        raise VpnError("missing-secret") from None
+    if len(data) > VPN_MAX:
+        raise VpnError("validation-failed")
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise VpnError("validation-failed") from None
+
+
+def _check_singbox_candidate(config, runner=None):
+    try:
+        text = json.dumps(config, ensure_ascii=False, indent=2)
+    except (TypeError, ValueError):
+        raise VpnError("validation-failed") from None
+    _ensure_tunnel_dir()
+    with tempfile.TemporaryDirectory(prefix=".singbox-", dir=TUNNEL_DIR) as td:
+        os.chmod(td, 0o700)
+        path = os.path.join(td, "candidate.json")
+        write_private_text(path, text)
+        result = vpn_exec(["sing-box", "check", "-c", path], runner=runner)
+    if result.returncode:
+        raise VpnError("validation-failed")
+    return text
+
+
+def _prepare_backend(rows, runner=None, secrets_map=None):
+    backend = active_backend(rows)
+    if backend is None:
+        return None
+    if backend["kind"] == "singbox":
+        config, counts = build_singbox(rows, secrets_map=secrets_map)
+        for row in rows:
+            if row["id"] in counts:
+                row["nodes"], row["error"] = counts[row["id"]], ""
+        return dict(backend, config_text=_check_singbox_candidate(config, runner))
+    row = _find_tunnel(rows, backend["id"])
+    config = _read_quick_config(row)
+    try:
+        checked = check_quick_config(row["kind"], config, runner, row["id"])
+    except ValueError:
+        raise VpnError("validation-failed") from None
+    if not checked["verified"]:
+        raise VpnError("tool-missing")
+    row.update(checked)
+    row["error"] = ""
+    return dict(row, path=tunnel_path(row["id"], ".conf"))
+
+
+def _default_route_devs(runner=None):
+    main = vpn_exec(["ip", "-j", "route", "show", "default"], runner=runner)
+    all_routes = vpn_exec(
+        ["ip", "-j", "route", "show", "table", "all", "default"], runner=runner)
+    if main.returncode or all_routes.returncode:
+        raise VpnError("conflict")
+    try:
+        main_routes = json.loads(main.stdout or "[]")
+        routes = json.loads(all_routes.stdout or "[]")
+    except (TypeError, ValueError):
+        raise VpnError("conflict") from None
+
+    def devices(items):
+        return {dev for route in items
+                for dev in ([route.get("dev")] +
+                            [hop.get("dev") for hop in route.get("nexthops", [])])
+                if dev}
+
+    main_devs = devices(main_routes)
+    return main_devs, devices(routes) - main_devs
+
+
+def _unmanaged_tunnel(current, runner=None):
+    """Conservative default-route conflict check before touching a backend."""
+    _, extras = _default_route_devs(runner)
+    if current and current.get("id"):
+        extras.discard(current["id"])
+    # A managed sing-box contributes one policy-table default whose interface
+    # name is owned by sing-box, not by this panel. A second extra is foreign.
+    if current and current.get("kind") == "singbox":
+        return len(extras) > 1
+    return bool(extras)
+
+
+def _file_snapshot(path):
+    try:
+        with open(path, "rb") as f:
+            return f.read(), os.stat(path).st_mode & 0o777
+    except FileNotFoundError:
+        return None
+
+
+def _restore_file(path, snapshot):
+    if snapshot is None:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(path)
+        return
+    data, mode = snapshot
+    _write_private_bytes(path, data)
+    os.chmod(path, mode)
+
+
+def _stop_backend(backend, runner=None, quiet=False):
+    if not backend:
+        return
+    if backend["kind"] == "singbox":
+        argv = ["systemctl", "stop", "sing-box"]
+    else:
+        argv = [QUICK_TOOLS[backend["kind"]], "down",
+                tunnel_path(backend["id"], ".conf")]
+    result = vpn_exec(argv, runner=runner)
+    if result.returncode and not quiet:
+        raise VpnError("start-failed")
+
+
+def _start_backend(backend, runner=None):
+    if not backend:
+        return
+    if backend["kind"] == "singbox":
+        if "config_text" in backend:
+            write_private_text(SINGBOX_CONFIG, backend["config_text"])
+        argv = ["systemctl", "restart", "sing-box"]
+    else:
+        argv = [QUICK_TOOLS[backend["kind"]], "up",
+                tunnel_path(backend["id"], ".conf")]
+    if vpn_exec(argv, runner=runner).returncode:
+        raise VpnError("start-failed")
+
+
+def _check_backend(backend, runner=None):
+    if not backend:
+        return
+    if backend["kind"] == "singbox":
+        result = vpn_exec(["systemctl", "is-active", "sing-box"], runner=runner)
+        try:
+            _, policy_devs = _default_route_devs(runner)
+        except VpnError:
+            policy_devs = set()
+        if result.returncode or not policy_devs:
+            raise VpnError("start-failed")
+        return
+    tid = check_tunnel_id(backend["id"])
+    if vpn_exec(["ip", "link", "show", "dev", tid], runner=runner).returncode:
+        raise VpnError("start-failed")
+    routes = vpn_exec(
+        ["ip", "-j", "route", "show", "table", "all", "dev", tid],
+        runner=runner)
+    try:
+        has_default = any(route.get("dst") in ("default", "0.0.0.0/0")
+                          for route in json.loads(routes.stdout or "[]"))
+    except (TypeError, ValueError):
+        has_default = False
+    if routes.returncode or not has_default:
+        raise VpnError("start-failed")
+
+
+def _set_vpn_mark(mark):
+    mark = int(mark or 0)
+    if not 0 <= mark <= 0xffffffff:
+        mark = 0
+    update_conf(lambda c: c.__setitem__("vpn_mark", mark))
+    CFG["vpn_mark"] = mark
+
+
+def switch_backend(old_rows, new_rows, runner=None, applier=None,
+                   secrets_map=None, before_commit=None, on_rollback=None):
+    old_rows = [dict(row) for row in old_rows]
+    new_rows = [dict(row) for row in new_rows]
+    old_backend = active_backend(old_rows)
+    new_backend = _prepare_backend(new_rows, runner, secrets_map)
+    if _unmanaged_tunnel(old_backend, runner):
+        raise VpnError("conflict")
+    old_mark = int(conf().get("vpn_mark") or 0)
+    old_singbox = _file_snapshot(SINGBOX_CONFIG)
+    set_transit_closed(True, applier)
+    attempted = False
+    try:
+        _stop_backend(old_backend, runner)
+        if new_backend:
+            attempted = True
+            _start_backend(new_backend, runner)
+            _check_backend(new_backend, runner)
+        mark = backend_mark(new_backend, runner)
+        if before_commit:
+            before_commit()
+        _set_vpn_mark(mark)
+        save_tunnels(new_rows)
+        set_transit_closed(False, applier)
+        return new_rows
+    except Exception as original:
+        try:
+            if attempted:
+                _stop_backend(new_backend, runner, quiet=True)
+            _restore_file(SINGBOX_CONFIG, old_singbox)
+            if on_rollback:
+                on_rollback()
+            if old_backend:
+                _start_backend(old_backend, runner)
+                _check_backend(old_backend, runner)
+            _set_vpn_mark(old_mark)
+            save_tunnels(old_rows)
+            set_transit_closed(False, applier)
+        except Exception:
+            for row in old_rows:
+                if row.get("enabled"):
+                    row["error"] = "rollback-failed"
+            with contextlib.suppress(Exception):
+                save_tunnels(old_rows)
+            raise VpnError("rollback-failed") from None
+        if isinstance(original, VpnError):
+            raise VpnError(str(original)) from None
+        raise VpnError("start-failed") from None
+
+
+def vpn_enable(tid, runner=None, applier=None):
+    with _vpn_lock:
+        rows = load_tunnels()
+        target = _find_tunnel(rows, tid)
+        if target["kind"] == "subscription":
+            for row in rows:
+                if row["kind"] in QUICK_TOOLS:
+                    row["enabled"] = False
+            target["enabled"] = True
+        else:
+            for row in rows:
+                row["enabled"] = row["id"] == target["id"]
+        target["error"] = ""
+        committed = switch_backend(load_tunnels(), rows, runner, applier)
+        return _find_tunnel(committed, tid)
+
+
+def vpn_disable(tid, runner=None, applier=None):
+    with _vpn_lock:
+        old_rows = load_tunnels()
+        rows = [dict(row) for row in old_rows]
+        target = _find_tunnel(rows, tid)
+        if not target["enabled"]:
+            return target
+        target["enabled"], target["error"] = False, ""
+        committed = switch_backend(old_rows, rows, runner, applier)
+        return _find_tunnel(committed, tid)
+
+
+def _unlink_tunnel_secret(row):
+    suffix = ".json" if row["kind"] == "subscription" else ".conf"
+    # A failed unlink leaves a 0600 orphan for startup reconciliation; the
+    # committed catalog no longer names it, which is safer than undoing runtime.
+    with contextlib.suppress(OSError):
+        os.unlink(tunnel_path(row["id"], suffix))
+
+
+def vpn_delete(tid, runner=None, applier=None):
+    with _vpn_lock:
+        old_rows = load_tunnels()
+        target = _find_tunnel(old_rows, tid)
+        rows = [dict(row) for row in old_rows if row["id"] != target["id"]]
+        if target["enabled"]:
+            switch_backend(old_rows, rows, runner, applier)
+        else:
+            save_tunnels(rows)
+        _unlink_tunnel_secret(target)
+        return True
+
+
+def vpn_refresh(tid, runner=None, applier=None, fetcher=None):
+    with _vpn_lock:
+        old_rows = load_tunnels()
+        rows = [dict(row) for row in old_rows]
+        target = _find_tunnel(rows, tid)
+        if target["kind"] != "subscription":
+            raise VpnError("validation-failed")
+        path = tunnel_path(target["id"], ".json")
+        snapshot = _file_snapshot(path)
+        if snapshot is None:
+            raise VpnError("missing-secret")
+        try:
+            old_secret = json.loads(snapshot[0])
+            url, exclude = check_subscription(old_secret.get("url"),
+                                              old_secret.get("exclude"))
+            content = (fetcher or singbox_sub.fetch)(url)
+            if (not isinstance(content, str)
+                    or len(content.encode("utf-8")) > singbox_sub.SUB_BODY_MAX):
+                raise ValueError
+            outs = singbox_sub.convert(content, exclude=exclude,
+                                        prefix=f"sub-{target['id']}-")
+        except Exception:
+            raise VpnError("validation-failed") from None
+        if not outs:
+            raise VpnError("validation-failed")
+        secret = {"url": url, "exclude": exclude, "body": content}
+        target["nodes"], target["error"] = len(outs), ""
+        if not target["enabled"]:
+            try:
+                write_private(path, secret)
+                save_tunnels(rows)
+            except Exception:
+                _restore_file(path, snapshot)
+                raise VpnError("start-failed") from None
+            return target
+
+        def secrets_for(profile_id):
+            return secret if profile_id == target["id"] else \
+                load_subscription_secret(profile_id)
+
+        committed = switch_backend(
+            old_rows, rows, runner, applier, secrets_for,
+            before_commit=lambda: write_private(path, secret),
+            on_rollback=lambda: _restore_file(path, snapshot))
+        return _find_tunnel(committed, tid)
+
+
+def vpn_action(action, body, runner=None, applier=None, fetcher=None):
+    actions = {"add": lambda: vpn_add(body, runner, fetcher),
+               "enable": lambda: vpn_enable(body.get("id"), runner, applier),
+               "disable": lambda: vpn_disable(body.get("id"), runner, applier),
+               "refresh": lambda: vpn_refresh(body.get("id"), runner, applier,
+                                                fetcher)}
+    try:
+        call = actions[action]
+    except (KeyError, TypeError):
+        raise VpnError("validation-failed") from None
+    return call()
 
 
 def _quick_text(value):
@@ -3891,6 +4293,8 @@ def selftest():
     global CONFIG, TUNNELS, TUNNEL_DIR, LEGACY_SUB_URL, LEGACY_SUB_EXCLUDE
     global SINGBOX_CONFIG
     global save_tunnels
+    global _set_vpn_mark
+    global _vpn_closed
     with tempfile.TemporaryDirectory() as td:
         secret = os.path.join(td, "secret.json")
         os.chmod(td, 0o755)
@@ -4124,6 +4528,34 @@ PersistentKeepalive = 25
         pass
 
     with tempfile.TemporaryDirectory() as td:
+        old_paths = TUNNELS, TUNNEL_DIR
+        TUNNELS, TUNNEL_DIR = (os.path.join(td, "tunnels.json"),
+                               os.path.join(td, "tunnels"))
+        try:
+            save_tunnels([])
+            uid = "5eb99d66-0000-0000-0000-000000000000"
+            subscription_body = f"vless://{uid}@a.example:443?security=tls#A"
+            added_sub = vpn_add(
+                {"kind": "subscription", "name": "Provider A",
+                 "url": "https://provider.example/private-token",
+                 "exclude": "Russia"}, fetcher=lambda url: subscription_body)
+            assert not added_sub["enabled"] and added_sub["nodes"] == 1
+            added_wg = vpn_add({"kind": "wireguard", "name": "Frankfurt",
+                                "config": wg}, runner=quick_ok)
+            assert not added_wg["enabled"] and added_wg["verified"]
+            added_awg = vpn_add({"kind": "amneziawg", "name": "Amnezia",
+                                 "config": awg}, runner=no_tool)
+            assert added_awg["error"] == "tool-missing"
+            catalog = load_tunnels()
+            assert len(catalog) == 3 and not any(row["enabled"] for row in catalog)
+            metadata = open(TUNNELS).read()
+            for secret_value in ("private-token", "PrivateKey", key,
+                                 "vpn.example:51820"):
+                assert secret_value not in metadata
+        finally:
+            TUNNELS, TUNNEL_DIR = old_paths
+
+    with tempfile.TemporaryDirectory() as td:
         old_tunnel_dir, TUNNEL_DIR = TUNNEL_DIR, os.path.join(td, "tunnels")
         old_singbox, SINGBOX_CONFIG = SINGBOX_CONFIG, os.path.join(td, "sing-box.json")
         try:
@@ -4214,6 +4646,285 @@ PersistentKeepalive = 25
     except VpnError:
         pass
 
+    class FakeVpn:
+        def __init__(self):
+            self.active = None
+            self.fail = set()
+            self.commands = []
+            self.unmanaged = False
+            self.no_tunnel_route = False
+
+        def __call__(self, argv, **kwargs):
+            self.commands.append((list(argv), kwargs))
+            label = tuple(argv[:2])
+            if label in self.fail:
+                self.fail.remove(label)
+                return subprocess.CompletedProcess(argv, 1, "", "failed-secret")
+            if label == ("sing-box", "check"):
+                return subprocess.CompletedProcess(argv, 0, "", "")
+            if argv[:3] == ["systemctl", "stop", "sing-box"]:
+                self.active = None
+            elif argv[:3] == ["systemctl", "restart", "sing-box"]:
+                self.active = "singbox"
+            elif argv[:3] == ["systemctl", "is-active", "sing-box"]:
+                code = 0 if self.active == "singbox" else 3
+                return subprocess.CompletedProcess(argv, code,
+                                                   "active\n" if not code else "", "")
+            elif len(argv) > 2 and argv[0] in ("wg-quick", "awg-quick"):
+                if argv[1] == "strip":
+                    return subprocess.CompletedProcess(argv, 0, "", "")
+                tid = os.path.basename(argv[2]).removesuffix(".conf")
+                self.active = tid if argv[1] == "up" else None
+            elif argv[:5] == ["ip", "-j", "route", "show", "default"]:
+                return subprocess.CompletedProcess(
+                    argv, 0, json.dumps([{"dst": "default", "dev": "eth0"}]), "")
+            elif argv[:7] == ["ip", "-j", "route", "show", "table", "all", "default"]:
+                routes = [{"dst": "default", "dev": "eth0"}]
+                if self.active == "singbox" and not self.no_tunnel_route:
+                    routes.append({"dst": "default", "dev": "tun0",
+                                   "table": 2022})
+                elif self.active and self.active != "singbox":
+                    routes.append({"dst": "default", "dev": self.active,
+                                   "table": 51820})
+                if self.unmanaged:
+                    routes.append({"dst": "default", "dev": "wg-unmanaged",
+                                   "table": 1234})
+                return subprocess.CompletedProcess(argv, 0, json.dumps(routes), "")
+            elif argv[:6] == ["ip", "-j", "route", "show", "table", "all"]:
+                return subprocess.CompletedProcess(
+                    argv, 0, json.dumps([{"dst": "default", "dev": argv[-1]}]), "")
+            elif argv[:5] == ["ip", "link", "show", "dev"]:
+                code = 0 if self.active == argv[4] else 1
+                return subprocess.CompletedProcess(argv, code, "link\n" if not code else "", "")
+            elif len(argv) == 4 and argv[0] in ("wg", "awg") and argv[3] == "fwmark":
+                return subprocess.CompletedProcess(argv, 0, "0xca6c\n", "")
+            elif argv[0] == "nft":
+                return subprocess.CompletedProcess(argv, 0,
+                                                   "meta mark 0x2024 return\n", "")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+    with tempfile.TemporaryDirectory() as td:
+        old_paths = CONFIG, TUNNELS, TUNNEL_DIR, SINGBOX_CONFIG
+        old_mark, old_closed = CFG.get("vpn_mark"), _vpn_closed
+        CONFIG = os.path.join(td, "config.json")
+        TUNNELS = os.path.join(td, "tunnels.json")
+        TUNNEL_DIR = os.path.join(td, "tunnels")
+        SINGBOX_CONFIG = os.path.join(td, "sing-box.json")
+        fake, gate_states, fail_open = FakeVpn(), [], [False]
+
+        def gate_apply(devs):
+            gate_states.append(_vpn_closed)
+            assert ("chain vpn_guard" in ruleset(devs)) == _vpn_closed
+            if fail_open[0] and not _vpn_closed:
+                fail_open[0] = False
+                raise OSError("nft apply failed")
+
+        try:
+            write_private(CONFIG, dict(DEFAULTS, vpn_mark=0, bypass=0))
+            CFG["vpn_mark"] = 0
+            save_tunnels([])
+            uid = "5eb99d66-0000-0000-0000-000000000000"
+            body = f"vless://{uid}@a.example:443?security=tls#A"
+            sub = vpn_add({"kind": "subscription", "name": "A",
+                           "url": "https://provider.example/token"},
+                          fetcher=lambda url: body)
+            wire = vpn_add({"kind": "wireguard", "name": "WG",
+                            "config": wg}, runner=fake)
+
+            vpn_enable(sub["id"], runner=fake, applier=gate_apply)
+            assert fake.active == "singbox" and not _vpn_closed
+            assert gate_states[-2:] == [True, False]
+            assert next(r for r in load_tunnels() if r["id"] == sub["id"])["enabled"]
+            assert json.load(open(CONFIG))["vpn_mark"] == 0x2024
+            assert os.path.exists(SINGBOX_CONFIG)
+            fake.no_tunnel_route = True
+            try:
+                _check_backend({"kind": "singbox", "ids": [sub["id"]]}, fake)
+                raise AssertionError("sing-box without policy route was healthy")
+            except VpnError:
+                pass
+            fake.no_tunnel_route = False
+            assert not _unmanaged_tunnel(
+                {"kind": "singbox", "ids": [sub["id"]]}, fake)
+            fake.unmanaged = True
+            assert _unmanaged_tunnel(
+                {"kind": "singbox", "ids": [sub["id"]]}, fake)
+            fake.unmanaged = False
+
+            vpn_enable(wire["id"], runner=fake, applier=gate_apply)
+            assert fake.active == wire["id"] and not _vpn_closed
+            enabled = [r for r in load_tunnels() if r["enabled"]]
+            assert [r["id"] for r in enabled] == [wire["id"]]
+            assert json.load(open(CONFIG))["vpn_mark"] == 0xca6c
+
+            before_rows = load_tunnels()
+            before_config = open(SINGBOX_CONFIG, "rb").read()
+            fake.fail.add(("systemctl", "restart"))
+            try:
+                vpn_enable(sub["id"], runner=fake, applier=gate_apply)
+                raise AssertionError("failed sing-box candidate was committed")
+            except VpnError:
+                pass
+            assert fake.active == wire["id"] and not _vpn_closed
+            assert load_tunnels() == before_rows
+            assert open(SINGBOX_CONFIG, "rb").read() == before_config
+
+            vpn_enable(sub["id"], runner=fake, applier=gate_apply)
+            before_rows = load_tunnels()
+            before_config = open(SINGBOX_CONFIG, "rb").read()
+            before_mark = json.load(open(CONFIG))["vpn_mark"]
+            fake.fail.add(("systemctl", "stop"))
+            try:
+                vpn_enable(wire["id"], runner=fake, applier=gate_apply)
+                raise AssertionError("failed old-backend stop was committed")
+            except VpnError:
+                pass
+            assert fake.active == "singbox" and not _vpn_closed
+            assert load_tunnels() == before_rows
+            fake.fail.add(("ip", "link"))
+            try:
+                vpn_enable(wire["id"], runner=fake, applier=gate_apply)
+                raise AssertionError("unhealthy candidate was committed")
+            except VpnError:
+                pass
+            assert fake.active == "singbox" and not _vpn_closed
+            assert load_tunnels() == before_rows
+            real_set_mark = _set_vpn_mark
+            fail_mark_write = [True]
+
+            def set_mark_once_then_work(mark):
+                if fail_mark_write[0]:
+                    fail_mark_write[0] = False
+                    raise OSError("config write failed")
+                return real_set_mark(mark)
+
+            _set_vpn_mark = set_mark_once_then_work
+            try:
+                try:
+                    vpn_enable(wire["id"], runner=fake, applier=gate_apply)
+                    raise AssertionError("failed mark write was committed")
+                except VpnError:
+                    pass
+            finally:
+                _set_vpn_mark = real_set_mark
+            assert fake.active == "singbox" and not _vpn_closed
+            assert load_tunnels() == before_rows
+            real_save_tunnels = save_tunnels
+            fail_catalog = [True]
+
+            def save_once_then_work(rows):
+                if fail_catalog[0]:
+                    fail_catalog[0] = False
+                    raise OSError("catalog write failed")
+                return real_save_tunnels(rows)
+
+            save_tunnels = save_once_then_work
+            try:
+                try:
+                    vpn_enable(wire["id"], runner=fake, applier=gate_apply)
+                    raise AssertionError("failed catalog write was committed")
+                except VpnError:
+                    pass
+            finally:
+                save_tunnels = real_save_tunnels
+            assert fake.active == "singbox" and not _vpn_closed
+            assert load_tunnels() == before_rows
+            fail_open[0] = True
+            try:
+                vpn_enable(wire["id"], runner=fake, applier=gate_apply)
+                raise AssertionError("failed final ruleset was committed")
+            except VpnError:
+                pass
+            assert fake.active == "singbox" and not _vpn_closed
+            assert load_tunnels() == before_rows
+            fake.fail.add(("wg-quick", "up"))
+            try:
+                vpn_enable(wire["id"], runner=fake, applier=gate_apply)
+                raise AssertionError("failed candidate was committed")
+            except VpnError:
+                pass
+            assert fake.active == "singbox" and not _vpn_closed
+            assert load_tunnels() == before_rows
+            assert open(SINGBOX_CONFIG, "rb").read() == before_config
+            assert json.load(open(CONFIG))["vpn_mark"] == before_mark
+            assert "failed-secret" not in json.dumps(public_tunnels())
+
+            sub2 = vpn_add({"kind": "subscription", "name": "B",
+                            "url": "https://provider.example/two"},
+                           fetcher=lambda url: body.replace("#A", "#B"))
+            vpn_enable(sub2["id"], runner=fake, applier=gate_apply)
+            assert len([r for r in load_tunnels()
+                        if r["kind"] == "subscription" and r["enabled"]]) == 2
+            first_secret = tunnel_path(sub["id"], ".json")
+            vpn_delete(sub["id"], runner=fake, applier=gate_apply)
+            assert fake.active == "singbox" and not os.path.exists(first_secret)
+            assert [r["id"] for r in load_tunnels()
+                    if r["kind"] == "subscription"] == [sub2["id"]]
+
+            second_secret = tunnel_path(sub2["id"], ".json")
+            old_secret = open(second_secret, "rb").read()
+            old_runtime = open(SINGBOX_CONFIG, "rb").read()
+            fake.fail.add(("sing-box", "check"))
+            try:
+                vpn_refresh(sub2["id"], runner=fake, applier=gate_apply,
+                            fetcher=lambda url: body.replace("a.example", "bad.example"))
+                raise AssertionError("failed refresh replaced a working cache")
+            except VpnError:
+                pass
+            assert open(second_secret, "rb").read() == old_secret
+            assert open(SINGBOX_CONFIG, "rb").read() == old_runtime
+            assert fake.active == "singbox" and not _vpn_closed
+
+            vpn_refresh(sub2["id"], runner=fake, applier=gate_apply,
+                        fetcher=lambda url: body.replace("a.example", "new.example"))
+            assert b"new.example" in open(second_secret, "rb").read()
+            vpn_disable(sub2["id"], runner=fake, applier=gate_apply)
+            assert fake.active is None and not _vpn_closed
+            assert json.load(open(CONFIG))["vpn_mark"] == 0
+
+            amz = vpn_add({"kind": "amneziawg", "name": "AWG",
+                           "config": awg}, runner=fake)
+            vpn_enable(amz["id"], runner=fake, applier=gate_apply)
+            assert fake.active == amz["id"]
+            assert any(argv[:2] == ["awg-quick", "up"]
+                       for argv, _ in fake.commands)
+            assert any(argv[0] == "awg" and argv[-1] == "fwmark"
+                       for argv, _ in fake.commands)
+            vpn_disable(amz["id"], runner=fake, applier=gate_apply)
+            assert fake.active is None and not _vpn_closed
+
+            fake.unmanaged = True
+            gates_before = list(gate_states)
+            try:
+                vpn_enable(wire["id"], runner=fake, applier=gate_apply)
+                raise AssertionError("unmanaged default-route tunnel was stopped")
+            except VpnError as e:
+                assert str(e) == "conflict"
+            assert gate_states == gates_before and fake.active is None
+            fake.unmanaged = False
+
+            vpn_delete(sub2["id"], runner=fake, applier=gate_apply)
+            assert not os.path.exists(second_secret)
+            assert not any(r["id"] == sub2["id"] for r in load_tunnels())
+
+            last = vpn_add({"kind": "subscription", "name": "rollback",
+                            "url": "https://provider.example/last"},
+                           fetcher=lambda url: body)
+            vpn_enable(last["id"], runner=fake, applier=gate_apply)
+            fake.fail.update({("wg-quick", "up"),
+                              ("systemctl", "restart")})
+            try:
+                vpn_enable(wire["id"], runner=fake, applier=gate_apply)
+                raise AssertionError("failed rollback opened transit")
+            except VpnError as e:
+                assert str(e) == "rollback-failed"
+            assert _vpn_closed, "rollback failure must keep transit closed"
+            assert next(r for r in load_tunnels() if r["id"] == last["id"])[
+                "error"] == "rollback-failed"
+        finally:
+            (CONFIG, TUNNELS, TUNNEL_DIR, SINGBOX_CONFIG) = old_paths
+            CFG["vpn_mark"], _vpn_closed = old_mark, old_closed
+
     assert accrue(0, 100) == 100
     assert accrue(100, 250) == 150
     assert accrue(500, 20) == 20, "a counter reset must be counted in full"
@@ -4244,6 +4955,16 @@ PersistentKeepalive = 25
     assert f"counter {cname('up', b)} {{ }}" in ruleset(d, bypass=soon), \
         "and the accounting does not pause with it"
     assert "drop" in ruleset(d, bypass=time.time() - 1), "a window that has closed"
+
+    guarded = ruleset(d, vpn_closed=True)
+    assert "chain vpn_guard" in guarded and "hook forward" in guarded
+    assert f'iifname "{IFACE}" drop' in guarded
+    assert "hook input" not in guarded, "the tunnel gate must not cut panel or SSH"
+    assert "chain vpn_guard" not in ruleset(d, vpn_closed=False)
+    gates = []
+    set_transit_closed(True, lambda devs: gates.append(ruleset(devs)))
+    set_transit_closed(False, lambda devs: gates.append(ruleset(devs)))
+    assert "chain vpn_guard" in gates[0] and "chain vpn_guard" not in gates[1]
 
     # Past the tunnel is not off the network: the device keeps its place in the
     # allowed set, and the mark is stamped before the rule that accepts it away.
