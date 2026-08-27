@@ -91,16 +91,6 @@ if [ "$UILANG" = en ]; then
   M_PWKEPT="already set, left unchanged"
   M_PWNEW="    new password (8+ chars): "; M_PWAGAIN="    again: "
   M_PWMISMATCH="did not match, try again"; M_PWTOOSHORT="too short, try again"
-  M_SUB="Tunnel";                M_SUBASK="subscription link"
-  M_SUBHINT="Pasted here it is stored in $ETC/sub.url (0600) and reused on the next run."
-  M_SUBHINT2="Empty means sing-box is not touched at all."
-  M_EXASK="exclude nodes named"
-  M_EXHINT="A regular expression. The group picks the fastest node, so a domestic one always wins and the tunnel exits at home; name it here and it is left out."
-  M_SUBNOSB="sing-box is not installed — the link is remembered, the config is not written"
-  M_SUBFETCH="reading the subscription"
-  M_SUBFAIL="the subscription was not applied, the previous config is back"
-  M_SUBSAME="unchanged, sing-box was not restarted"
-  M_SUBOK="nodes written:"
   M_ONLYLIST="After this, ONLY the devices on the list will route through this host."
   M_SEEN="Currently visible on the network:"
   M_NOARP="ARP table is empty — add devices from the panel later."
@@ -146,16 +136,6 @@ else
   M_PWKEPT="уже задан, оставлен без изменений"
   M_PWNEW="    новый пароль (от 8 символов): "; M_PWAGAIN="    ещё раз: "
   M_PWMISMATCH="не совпали, ещё раз";  M_PWTOOSHORT="слишком короткий, ещё раз"
-  M_SUB="Туннель";               M_SUBASK="ссылка подписки"
-  M_SUBHINT="Введённая здесь ложится в $ETC/sub.url (0600) и подставится при следующем запуске."
-  M_SUBHINT2="Пусто — sing-box не трогается вовсе."
-  M_EXASK="исключить узлы с именем"
-  M_EXHINT="Регулярное выражение. Группа выбирает быстрейший узел, поэтому домашний побеждает всегда и туннель выходит дома; названный здесь в конфиг не попадёт."
-  M_SUBNOSB="sing-box не установлен — ссылка запомнена, конфиг не пишется"
-  M_SUBFETCH="читаю подписку"
-  M_SUBFAIL="подписка не применена, прежний конфиг возвращён"
-  M_SUBSAME="без изменений, sing-box не перезапускался"
-  M_SUBOK="узлов записано:"
   M_ONLYLIST="После установки через этот хост пойдут ТОЛЬКО те, кто в списке."
   M_SEEN="Сейчас в сети видно:"
   M_NOARP="ARP-таблица пуста — добавите устройства через панель."
@@ -312,99 +292,6 @@ else
   done
 fi
 
-# --- sing-box subscription --------------------------------------------------
-
-# The one place this repository knows anything about a tunnel. The panel does
-# not: it neither reads nor writes a sing-box config, and the link never reaches
-# panel.py or any page it serves. Nothing here can abort the install — a
-# subscription server that is down must not stop a panel upgrade.
-
-SUBFILE="$ETC/sub.url"
-EXFILE="$ETC/sub.exclude"
-SB=/etc/sing-box/config.json
-OLDSUB=""
-OLDEX=""
-if [ -f "$SUBFILE" ]; then OLDSUB=$(cat "$SUBFILE"); fi
-if [ -f "$EXFILE" ]; then OLDEX=$(cat "$EXFILE"); fi
-
-step "$M_SUB"
-say "$M_SUBHINT"
-say "$M_SUBHINT2"
-if [ "$YES" = 1 ]; then
-  SUB="$OLDSUB"
-else
-  # The stored link is shown cut short, never whole: this scrolls back in a
-  # terminal and over somebody's shoulder. Enter keeps it.
-  MASK=$(printf '%s' "$OLDSUB" | sed -E 's#^(https?://[^/]{1,40}/.{0,3}).*#\1…#')
-  read -r -p "    $M_SUBASK [$MASK] " SUB </dev/tty || true
-  SUB="${SUB:-$OLDSUB}"
-fi
-
-# Not masked and not private: it is a word like "Россия", and seeing the stored
-# one is the only way to notice it is why a node vanished.
-if [ "$YES" = 1 ] || [ -z "$SUB" ]; then
-  EX="$OLDEX"
-else
-  say "$M_EXHINT"
-  read -r -p "    $M_EXASK [$OLDEX] " EX </dev/tty || true
-  # Enter keeps the old one; a single "-" is how you get back to no filter at all.
-  EX="${EX:-$OLDEX}"
-  if [ "$EX" = "-" ]; then EX=""; fi
-fi
-
-if [ -n "$SUB" ]; then
-  install -d -m 755 "$ETC"
-  ( umask 077; printf '%s\n' "$SUB" > "$SUBFILE" )
-  chmod 600 "$SUBFILE"
-  if [ -n "$EX" ]; then printf '%s\n' "$EX" > "$EXFILE"; else rm -f "$EXFILE"; fi
-
-  if ! command -v sing-box >/dev/null; then
-    SBPKG=""
-    if   command -v pacman  >/dev/null; then SBPKG="pacman -S --needed --noconfirm sing-box"
-    elif command -v apt-get >/dev/null; then SBPKG="apt-get install -y sing-box"; fi
-    if [ -n "$SBPKG" ] && yesno "$M_INSTALLNFT $SBPKG ?"; then
-      # shellcheck disable=SC2086
-      $SBPKG >/dev/null 2>&1 || true
-    fi
-  fi
-
-  if ! command -v sing-box >/dev/null; then
-    ok "sing-box" "$M_SUBNOSB"
-  else
-    ok "sing-box" "$M_SUBFETCH"
-    NEWCFG=$(mktemp)
-    SBARGS=(--iface "$IFACE")
-    if [ -f "$SB" ]; then SBARGS=(--base "$SB"); fi
-    if [ -n "$EX" ]; then SBARGS+=(--exclude "$EX"); fi
-    if python3 "$SRC/singbox_sub.py" --url "$SUB" "${SBARGS[@]}" > "$NEWCFG"; then
-      if [ -f "$SB" ] && cmp -s "$NEWCFG" "$SB"; then
-        ok "$SB" "$M_SUBSAME"
-      else
-        install -d -m 755 /etc/sing-box
-        BAK=""
-        if [ -f "$SB" ]; then BAK="$SB.bak.$(date +%s)"; cp -a "$SB" "$BAK"; fi
-        install -m 600 "$NEWCFG" "$SB"
-        if sing-box check -c "$SB" >/dev/null 2>&1; then
-          systemctl enable sing-box >/dev/null 2>&1 || true
-          systemctl restart sing-box >/dev/null 2>&1 || true
-          ok "$SB" "$M_SUBOK $(python3 -c 'import json,sys
-print(sum(1 for o in json.load(open(sys.argv[1]))["outbounds"]
-          if str(o.get("tag","")).startswith("sub-")))' "$SB")"
-        else
-          # Only a config this script wrote is rolled back, and only onto the
-          # backup it took four lines above — never onto whatever backup happens
-          # to be newest in the directory.
-          if [ -n "$BAK" ]; then cp -a "$BAK" "$SB"; else rm -f "$SB"; fi
-          say "$M_SUBFAIL"
-        fi
-      fi
-    else
-      say "$M_SUBFAIL"
-    fi
-    rm -f "$NEWCFG"
-  fi
-fi
-
 # --- device list ------------------------------------------------------------
 
 FRESH=0
@@ -486,7 +373,10 @@ if [ -n "$PW" ]; then
 fi
 unset PW PW2 2>/dev/null || true
 
-python3 "$ETC/panel.py" --selftest >/dev/null || die "$M_SELFTEST_FAIL"
+if ! python3 "$ETC/panel.py" --selftest >/dev/null \
+    || ! python3 "$ETC/singbox_sub.py" --selftest >/dev/null; then
+  die "$M_SELFTEST_FAIL"
+fi
 ok "selftest" "ok"
 python3 "$ETC/panel.py" --dump | nft -c -f - || die "$M_RULEFAIL"
 ok "ruleset" "ok"

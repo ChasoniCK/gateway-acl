@@ -1,13 +1,14 @@
 # Using this with sing-box
 
-gateway-acl does not configure, install or read your sing-box config. It only
-decides who is allowed to use the route sing-box provides. This page records the
-things that actually bite when the two run on the same host — learned from a
-working setup, not from documentation.
+gateway-acl can either use a sing-box route managed elsewhere or build its
+subscription-owned outbounds from the panel. It never installs sing-box. This
+page records the things that actually bite when the two run on the same host —
+learned from a working setup, not from documentation.
 
 No credentials, server addresses or subscription links belong in this repository,
-and none are here. The installer can be *given* a link — see below — and keeps it
-in `/etc/gateway-acl/sub.url`, mode 0600, on your host and nowhere else.
+and none are here. Links and cached subscription bodies are owner-only files in
+`/etc/gateway-acl/tunnels/`; the browser receives only names, node counts and
+safe status codes.
 
 ## The shape of the setup
 
@@ -234,12 +235,13 @@ sing-box are untouched. A device sent past the tunnel resolves and connects on
 its own, so a domain rule-set that was doing the deciding for it no longer
 applies to anything it does.
 
-## The subscription the installer asks for
+## Subscriptions managed by the panel
 
-`install.sh` asks for a subscription link, and `singbox_sub.py` turns it into
-outbounds. This is the installer's doing, not the panel's: `panel.py` neither
-imports that file nor reads a sing-box config, and the link never reaches the
-panel or any page it serves.
+Each source added under **Settings → Tunnels** has its own HTTPS link, exclusion
+expression and cached body. Several sources may be enabled together;
+`singbox_sub.py` converts each with a `sub-<profile-id>-` prefix and the panel
+checks one merged candidate before restarting sing-box. The link and body never
+enter catalog JSON or an HTTP response.
 
 The tool owns exactly two things in an existing config: outbounds whose tag
 starts with `sub-`, and the member list of the `proxy` group. Everything else —
@@ -249,9 +251,16 @@ months can survive a subscription refresh. Hand-written outbounds are dropped
 from the group but never deleted from the file: a route rule may still name one,
 and sing-box would refuse to start if it disappeared.
 
-The prefix is the whole basis of that ownership. Rename a `sub-` outbound and the
+The outer `sub-` prefix is the whole basis of that ownership. Rename such an outbound and the
 next refresh will treat it as yours and leave it alone; that is the supported way
 to keep a node the subscription has stopped listing.
+
+The installer only copies and self-tests the converter. It does not fetch a
+source, rewrite `/etc/sing-box/config.json` or restart sing-box during an update.
+On the first v1.6 start, old `sub.url` and `sub.exclude` files are moved into one
+enabled `legacy/no-cache` profile without touching the working config or
+service. Its first successful refresh creates the cache and begins panel
+ownership.
 
 ### A urltest group always picks the node nearest home
 
@@ -267,8 +276,8 @@ outbound/vless[sub-RU node]: outbound connection to 160.79.104.10:443
 ```
 
 Nothing in the config can tell where a node is; only the name the provider gave
-it can. So the installer asks for a regular expression, keeps it in
-`/etc/gateway-acl/sub.exclude`, and `singbox_sub.py --exclude` leaves the
+it can. So every source has an exclusion regular expression, and
+`singbox_sub.py --exclude` leaves the
 matching nodes out of the file altogether — not merely out of the group, since
 an outbound nothing points at is one a hand-written rule can still fall onto.
 
@@ -341,9 +350,8 @@ template cannot quietly regress to the older shape:
 
 A generated fresh config is otherwise the shape at the top of this page: `tun`
 with `auto_route`, `auto_redirect` and `strict_route`, DNS hijacked into the
-tunnel, `ip_is_private` sent out `direct`, and `direct` bound to the interface
-the installer was given — the `bind_interface` whose absence loops UDP against
-the tun.
+tunnel, `ip_is_private` sent out `direct`, and `direct` bound to the panel's LAN
+interface — the `bind_interface` whose absence loops UDP against the tun.
 
 ## Where gateway-acl fits
 

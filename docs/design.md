@@ -474,16 +474,60 @@ the tunnel there is no route for it, so it fails at once and the device falls
 back to v4 — which is also the honest answer, and the one thing that must not
 happen is what happened before: a device quietly still in the tunnel.
 
-The mark is `vpn_mark` in `config.json` and not on the settings form, for the
-same reason `bypass` is not: it is a number that belongs to the *other* program,
-and whoever needs to change it is already editing that program's config. `0`
-means there is no such mark on this host, and then the panel does not draw the
-button at all rather than offering one that does nothing.
+The mark is `vpn_mark` in `config.json` and not a hand-editable settings field.
+For a panel-managed backend it is read from live nftables or the quick interface
+and committed as part of the switch. On a host whose tunnel is managed
+elsewhere it remains an administrator-set contract. `0` means no usable mark,
+and then the panel does not draw a button that would do nothing.
 
 What this cannot do is verify any of it. If the mark is wrong the ruleset is
 still valid, the button still lights, and the traffic still goes through the
 tunnel — the failure is entirely on the other side of a contract nftables cannot
 check. One look at the address the device reports for itself settles it.
+
+## Managed tunnel state
+
+The catalog is `/etc/gateway-acl/tunnels.json`; it contains only an id, display
+name, type, enabled state, node count and browser-safe status code. Secrets live
+in owner-only files under `/etc/gateway-acl/tunnels/`: JSON for a subscription's
+URL, exclusion and cached body, `.conf` for WireGuard or AmneziaWG. The HTTP
+response is built from catalog rows and runtime status only. Neither an API
+error nor a page ever contains the secret file.
+
+Enabled subscription rows form one sing-box backend. Each source gets its own
+`sub-<profile-id>-` tag prefix, so refreshing or deleting it cannot capture a
+neighbour's nodes. One WireGuard or AmneziaWG row is a backend by itself. Those
+classes are exclusive: subscriptions may coexist with subscriptions, but no
+quick profile may coexist with them or with another quick profile.
+
+A switch is one serialized transaction. `ruleset()` first adds a forward-only
+drop chain at filter priority while host-bound traffic remains reachable. The
+old managed backend is stopped, the candidate is checked and started, its real
+fwmark is read, and only then are config and catalog committed and the guard
+removed. Every candidate path has the inverse rollback: restore the sing-box
+bytes and mode if they changed, restart the previous backend, restore its mark
+and catalog, then remove the guard. If rollback itself fails, the guard stays.
+An unrelated default-route tunnel is a conflict, not something the panel stops.
+
+Quick configs are parsed before `wg-quick strip` or `awg-quick strip` is called.
+They must have `[Interface]`, a peer and full `0.0.0.0/0` routing. Hooks,
+`SaveConfig`, `Table = off` and custom tables are rejected because they either
+execute text as root or escape the transaction's routing model. Missing `::/0`
+is metadata for a warning, not a silent claim that IPv6 is protected.
+
+Startup reconciliation removes only validated panel-owned orphan files and
+attempts to restore the catalog's backend without making HTTP availability
+depend on success. The normal poll checks the active backend. If it vanished,
+the guard is installed no later than the next `POLL_SEC`; that bounds a crash
+window but is not an early-boot kill-switch. A deliberate disable of the last
+backend is different: after the stop and catalog commit, direct forwarding is
+opened intentionally.
+
+Old `sub.url` and `sub.exclude` files are imported once as an enabled
+`legacy/no-cache` subscription. Its running sing-box service is not rebuilt;
+the first successful refresh creates the private cache and moves ownership to
+the panel. The installer therefore copies and self-tests the converter but does
+not fetch a subscription or restart a tunnel during an update.
 
 ## The version constant
 

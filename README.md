@@ -57,6 +57,10 @@ device ──► this Linux host ──► uplink or tunnel (sing-box / WireGuar
   why something will not connect. The accounting carries on and the kernel goes
   on recording who came, so when the window shuts, everything that used it is
   listed below and one click from being allowed for good.
+- **Manage tunnels from Settings.** Add or remove any number of HTTPS
+  subscriptions, or save WireGuard and AmneziaWG `.conf` profiles. Profiles are
+  created disabled; enabling one validates it and switches the managed backend
+  with rollback if the candidate does not come up.
 - **Turn everyone off at once**, except the address that pressed the button.
   The same button brings them back.
 - **A warning when an address is answering as somebody else** — the entry is
@@ -107,8 +111,9 @@ the panel works with no internet at all.
 
 - Linux with systemd and `nftables`
 - Python 3.9+ (standard library only)
-- The host already routes traffic somehow — a VPN tunnel, plain NAT, whatever.
-  **gateway-acl decides who may use that route; it does not create one.**
+- For managed tunnels, install the tool you intend to use: `sing-box`,
+  `wg-quick`, or `awg-quick`. The installer does not install them. Plain NAT or
+  another already configured route still works without any of them.
 
 ## Install
 
@@ -132,16 +137,15 @@ devices currently visible in the ARP table so you can allow them before the rule
 takes effect. It refuses to enable anything until `panel.py --selftest` passes
 and the kernel accepts the generated ruleset.
 
-Give it a subscription link and it sets up the tunnel as well. The link is kept
-in `/etc/gateway-acl/sub.url` (mode 0600) and offered back on the next run, so an
-upgrade is one Enter. Leave the answer empty and sing-box is not touched at all.
+Tunnel setup is under **Settings → Tunnels**. The installer neither installs a
+VPN program nor fetches, rewrites or restarts a tunnel, including during
+`--yes` upgrades.
 
-The second question is which nodes to leave out, as a regular expression matched
-against the names the provider gave them, kept in `/etc/gateway-acl/sub.exclude`.
-It matters more than it looks: the `proxy` group is a `urltest`, it picks by
-latency, and a node in your own country is always the fastest — so a
-subscription that includes one sends every device out at home, which is the one
-thing the tunnel existed to avoid. A single `-` clears the filter.
+Each subscription has its own HTTPS link and optional exclusion regular
+expression. Several may be enabled together: their nodes are merged into the
+single sing-box `proxy` group, while each source can be refreshed or deleted
+independently. The group is a `urltest`, so excluding domestic nodes still
+matters — a nearby node otherwise wins on latency and the tunnel exits at home.
 
 Read the names before writing the expression. A provider's name says where the
 node is *entered*, not where it leaves: `Россия (Reality)` comes out in Russia
@@ -150,15 +154,34 @@ kind is often the only kind that works, because the direct foreign addresses are
 what the ISP blocks. `Россия \(` excludes the first and keeps the second; `Росс`
 excludes both and can leave you with nothing that connects.
 
-What it writes is deliberately narrow: outbounds tagged `sub-*` and the member
+What the panel writes is deliberately narrow: outbounds tagged for their
+subscription profile and the member
 list of the `proxy` group. Routing rules, DNS, inbounds and any outbound you
 wrote by hand survive a refresh unchanged, and the config it replaces is kept
 beside the new one. A node this sing-box cannot use — an `xhttp` transport, say —
 is reported and skipped, never written. On a host with no config at all a working
 one is generated: `tun` with `auto_route` and `auto_redirect`, DNS hijacked into
-the tunnel, private destinations going out `direct`. A subscription server that
-is down cannot fail an install: the step warns and the panel goes on being
-installed. See [docs/singbox.md](docs/singbox.md).
+the tunnel, private destinations going out `direct`.
+
+WireGuard and AmneziaWG profiles must carry a full IPv4 route. `Table = off`, a
+custom table and all `PreUp`/`PostUp`/`PreDown`/`PostDown` hooks are refused;
+`SaveConfig` is refused too. Missing `::/0` is shown as an IPv6 warning. The
+panel uses fixed `wg-quick`/`awg-quick` commands and never runs text from a
+profile as a shell command.
+
+Only one backend class is active at a time: the aggregate sing-box subscriptions,
+one WireGuard profile, one AmneziaWG profile, or direct routing. A switch first
+closes forwarded traffic, checks the candidate, records the real fwmark, and
+then reopens it. Failure restores the previous config, service and mark; if that
+rollback fails, forwarding stays closed. A crash outside a managed switch is
+noticed on the next panel poll, not instantly.
+
+Metadata is stored in `/etc/gateway-acl/tunnels.json`; subscription links,
+cached bodies and quick configs stay in owner-only files under
+`/etc/gateway-acl/tunnels/` and are never returned to the browser. An existing
+`sub.url`/`sub.exclude` installation is migrated once without touching its
+running sing-box service; press *refresh* in the panel when you are ready to let
+the panel take ownership. See [docs/singbox.md](docs/singbox.md).
 
 Re-running it upgrades the code in place; your device list and statistics are
 left alone. It re-uses every answer already in `config.json` rather than
@@ -243,6 +266,10 @@ immediately. A changed network rebuilds the nftables rules on the spot. Only a
 changed port needs the process replaced — the panel does that itself and tells
 you the new address.
 
+Tunnel profiles are a separate owner-only catalog, not fields in `config.json`.
+Their controls load only when Settings is opened; the live device page never
+receives a subscription URL, cached body, private key or preshared key.
+
 ## How it works
 
 One nftables table, `inet gwacl`, on the `prerouting` hook at priority `raw`
@@ -257,6 +284,14 @@ test a ruleset without touching your host: [docs/design.md](docs/design.md).
 ## Limitations
 
 - IPv4 only. IPv6 is passed through untouched.
+- Managed quick profiles require a full IPv4 default route and the matching
+  tool already installed. The panel does not install `sing-box`, WireGuard or
+  AmneziaWG, does not support profile hooks or custom routing tables, and
+  deliberately refuses a switch while an unmanaged default-route tunnel is
+  present.
+- The forwarding guard is transactional during a panel-managed switch. A
+  backend that crashes by itself can leak direct traffic until the next poll;
+  there is no claim of an early-boot kill-switch before gateway-acl starts.
 - Traffic to the host itself (SSH, the panel) is counted too.
 - A timer is as precise as the counter poll — a device set to come back at 07:00
   comes back at the first poll past it. Same for a device that DHCP has moved:

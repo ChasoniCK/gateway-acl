@@ -704,29 +704,29 @@ git commit -m "Добавить управление туннелями в ин�
 - Modify: `panel.py:62`
 - Test: `panel.py:selftest()` and shell checks
 
-- [ ] **Step 1: Record a failing installer ownership check**
+- [x] **Step 1: Record a failing installer ownership check**
 
 Run a focused `rg`/shell check proving the unattended update branch still fetches
 a subscription or restarts sing-box. Do not put a source-tree-dependent check in
 `panel.py --selftest`, because installed copies do not contain `install.sh`.
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run: `python3 panel.py --selftest`
 
-- [ ] **Step 3: Remove installer-owned refresh after migration**
+- [x] **Step 3: Remove installer-owned refresh after migration**
 
 Keep copying `singbox_sub.py` and existing legacy data. Remove the update path that fetches/merges/restarts sing-box on every `--yes`; the panel owns post-migration refresh. Do not install WG/AWG packages from the installer.
 
-- [ ] **Step 4: Document the exact behavior and limits in both languages**
+- [x] **Step 4: Document the exact behavior and limits in both languages**
 
 Document CRUD, multiple subscriptions, one backend class, required tools, secrets, no hook support, direct-route warning, transactional rollback, poll-window crash limitation, and isolated live-test rule. Keep README EN/RU semantically identical. Update design/sing-box ownership rules.
 
-- [ ] **Step 5: Bump version**
+- [x] **Step 5: Bump version**
 
 Change `VERSION = "1.5.0"` to `VERSION = "1.6.0"` and mention that a release tag must be exactly `v1.6.0`/`1.6.0` according to existing CI convention.
 
-- [ ] **Step 6: Verify and commit**
+- [x] **Step 6: Verify and commit**
 
 ```bash
 python3 panel.py --selftest
