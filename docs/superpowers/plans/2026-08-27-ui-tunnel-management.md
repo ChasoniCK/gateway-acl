@@ -301,7 +301,7 @@ git commit -m "Добавить защищенный каталог VPN-проф
 - Modify: `panel.py` tunnels section
 - Test: `panel.py:selftest()`
 
-- [ ] **Step 1: Add a table of failing parser cases**
+- [x] **Step 1: Add a table of failing parser cases**
 
 Use one minimal WG and one minimal AWG fixture containing fake keys. Assert rejection of NUL, `VPN_MAX + 1`, duplicate/missing sections, missing required fields, hooks, `SaveConfig`, missing `0.0.0.0/0`, `Table=off/custom`, WG with AWG-only keys, and AWG without AWG-only keys.
 
@@ -319,13 +319,13 @@ for why, text in bad.items():
         pass
 ```
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run: `python3 panel.py --selftest`
 
 Expected: `NameError: check_quick_config`.
 
-- [ ] **Step 3: Implement a small INI-aware structural parser**
+- [x] **Step 3: Implement a small INI-aware structural parser**
 
 Do not use `configparser` interpolation or merge duplicate sections. Parse lines into ordered `(section,key,value)` triples, strip comments, compare keys case-insensitively, and reject forbidden keys before any command.
 
@@ -346,14 +346,14 @@ valid), then call fixed argv `[tool, "strip", path]`. Missing tool permits
 disabled save but sets `verified=False`; any non-zero strip rejects
 activation/save as appropriate without returning raw stderr.
 
-- [ ] **Step 4: Verify GREEN and run both selftests**
+- [x] **Step 4: Verify GREEN and run both selftests**
 
 ```bash
 python3 panel.py --selftest
 python3 singbox_sub.py --selftest
 ```
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add panel.py

@@ -1721,6 +1721,10 @@ SUB_URL_MAX = 4096
 TUNNEL_ID_RE = re.compile(r"t[0-9a-f]{12}\Z")
 TUNNEL_KINDS = ("subscription", "wireguard", "amneziawg")
 TUNNEL_SUFFIXES = (".json", ".conf")
+QUICK_TOOLS = {"wireguard": "wg-quick", "amneziawg": "awg-quick"}
+AWG_KEYS = {"jc", "jmin", "jmax", "s1", "s2", "s3", "s4",
+            "h1", "h2", "h3", "h4"}
+FORBIDDEN_QUICK = {"preup", "postup", "predown", "postdown", "saveconfig"}
 SAFE_VPN_ERRORS = {
     "", "legacy/no-cache", "missing-secret", "tool-missing", "stopped",
     "start-failed", "validation-failed", "rollback-failed", "conflict",
@@ -1825,6 +1829,129 @@ def check_subscription(url, exclude):
     except re.error:
         raise ValueError("invalid subscription exclusion") from None
     return url, exclude
+
+
+def _quick_text(value):
+    try:
+        text = value.decode("utf-8") if isinstance(value, bytes) else str(value)
+        raw = text.encode("utf-8")
+    except (UnicodeDecodeError, UnicodeEncodeError):
+        raise ValueError("tunnel config must be UTF-8") from None
+    if len(raw) > VPN_MAX:
+        raise ValueError("tunnel config is too large")
+    if "\x00" in text:
+        raise ValueError("tunnel config contains NUL")
+    return text
+
+
+def _quick_sections(text):
+    sections, current = [], None
+    for source in text.splitlines():
+        line = source.strip()
+        if not line or line.startswith(("#", ";")):
+            continue
+        match = re.fullmatch(r"\[\s*(Interface|Peer)\s*\]", line, re.I)
+        if match:
+            current = {"section": match.group(1).lower(), "values": {}}
+            sections.append(current)
+            continue
+        if current is None or "=" not in line:
+            raise ValueError("invalid tunnel config structure")
+        key, value = (part.strip() for part in line.split("=", 1))
+        key = key.lower()
+        if not key or not value or key in current["values"]:
+            raise ValueError("invalid tunnel config field")
+        if key in FORBIDDEN_QUICK:
+            raise ValueError("tunnel config hooks are not allowed")
+        current["values"][key] = value
+    return sections
+
+
+def _valid_wg_key(value):
+    try:
+        return len(base64.b64decode(value, validate=True)) == 32
+    except (ValueError, TypeError):
+        return False
+
+
+def _strip_quick(kind, text, runner, tid):
+    tool = QUICK_TOOLS[kind]
+    if runner is None:
+        if shutil.which(tool) is None:
+            return False
+        runner = subprocess.run
+    tid = check_tunnel_id(tid or "t000000000000")
+    try:
+        with tempfile.TemporaryDirectory(prefix="gwacl-quick-") as td:
+            os.chmod(td, 0o700)
+            path = os.path.join(td, tid + ".conf")
+            write_private_text(path, text)
+            result = runner([tool, "strip", path], capture_output=True,
+                            text=True, timeout=10, shell=False)
+    except FileNotFoundError:
+        return False
+    except (OSError, subprocess.TimeoutExpired):
+        raise ValueError("quick tool could not validate tunnel config") from None
+    if result.returncode:
+        raise ValueError("quick tool rejected tunnel config")
+    return True
+
+
+def check_quick_config(kind, value, runner=None, tid=None):
+    if kind not in QUICK_TOOLS:
+        raise ValueError("invalid tunnel type")
+    text = _quick_text(value)
+    sections = _quick_sections(text)
+    interfaces = [s["values"] for s in sections if s["section"] == "interface"]
+    peers = [s["values"] for s in sections if s["section"] == "peer"]
+    if len(interfaces) != 1 or not peers:
+        raise ValueError("tunnel config needs one interface and a peer")
+    interface = interfaces[0]
+    if not _valid_wg_key(interface.get("privatekey")) or not interface.get("address"):
+        raise ValueError("tunnel interface is incomplete")
+    try:
+        for address in interface["address"].split(","):
+            ipaddress.ip_interface(address.strip())
+    except ValueError:
+        raise ValueError("invalid tunnel address") from None
+    table = interface.get("table", "auto").lower()
+    if table != "auto":
+        raise ValueError("only automatic tunnel routing is supported")
+
+    awg = AWG_KEYS.intersection(interface)
+    if kind == "wireguard" and awg:
+        raise ValueError("AmneziaWG parameters in WireGuard config")
+    if kind == "amneziawg" and not awg:
+        raise ValueError("AmneziaWG parameters are missing")
+    try:
+        for key in awg:
+            int(interface[key])
+    except ValueError:
+        raise ValueError("invalid AmneziaWG parameter") from None
+
+    has_v4 = has_v6 = False
+    for peer in peers:
+        if (not _valid_wg_key(peer.get("publickey"))
+                or not peer.get("allowedips") or not peer.get("endpoint")):
+            raise ValueError("tunnel peer is incomplete")
+        if "presharedkey" in peer and not _valid_wg_key(peer["presharedkey"]):
+            raise ValueError("invalid tunnel peer key")
+        endpoint = peer["endpoint"]
+        match = re.fullmatch(r"(?:\[[^]]+\]|[^:]+):([0-9]+)", endpoint)
+        if not match or not 1 <= int(match.group(1)) <= 65535:
+            raise ValueError("invalid tunnel endpoint")
+        for value in peer["allowedips"].split(","):
+            try:
+                network = ipaddress.ip_network(value.strip(), strict=False)
+            except ValueError:
+                raise ValueError("invalid tunnel routes") from None
+            has_v4 |= network.version == 4 and network.prefixlen == 0
+            has_v6 |= network.version == 6 and network.prefixlen == 0
+    if not has_v4:
+        raise ValueError("tunnel must carry the IPv4 default route")
+
+    return {"ipv6": has_v6,
+            "verified": _strip_quick(kind, text, runner, tid)}
 
 
 def migrate_legacy_subscription():
@@ -3787,6 +3914,76 @@ def selftest():
             pass
     assert check_subscription(" https://provider.example/sub ", "Russia") == \
         ("https://provider.example/sub", "Russia")
+
+    key = base64.b64encode(b"k" * 32).decode()
+    wg = f"""# ordinary WireGuard client
+[Interface]
+PrivateKey = {key}
+Address = 10.66.66.5/32, fd42:42:42::5/128
+DNS = 1.1.1.1, 8.8.8.8
+Table = auto
+
+[Peer]
+PublicKey = {key}
+PresharedKey = {key}
+AllowedIPs = 0.0.0.0/0, ::/0
+Endpoint = vpn.example:51820
+PersistentKeepalive = 25
+"""
+    awg = wg.replace(
+        f"PrivateKey = {key}\n",
+        f"PrivateKey = {key}\nJc = 10\nJmin = 47\nJmax = 129\n"
+        "S1 = 46\nS2 = 30\nH1 = 1035708199\n")
+    quick_calls = []
+
+    def quick_ok(argv, **kwargs):
+        quick_calls.append((argv, kwargs))
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    checked = check_quick_config("wireguard", wg, quick_ok, "t000000000001")
+    assert checked == {"ipv6": True, "verified": True}
+    assert quick_calls[-1][0][:2] == ["wg-quick", "strip"]
+    assert quick_calls[-1][1]["shell"] is False
+    assert "PrivateKey" not in " ".join(quick_calls[-1][0])
+    assert not os.path.exists(quick_calls[-1][0][2]), "strip temp config leaked"
+    checked = check_quick_config("amneziawg", awg, quick_ok, "t000000000002")
+    assert checked["verified"] and quick_calls[-1][0][0] == "awg-quick"
+    no_tool = lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError())
+    assert not check_quick_config("wireguard", wg, no_tool)["verified"]
+    assert not check_quick_config(
+        "wireguard", wg.replace(", ::/0", ""), no_tool)["ipv6"]
+
+    bad_quick = {
+        "nul": wg + "\x00",
+        "too large": wg + "#" * VPN_MAX,
+        "invalid utf8": b"[Interface]\nPrivateKey = \xff",
+        "second interface": wg + f"\n[Interface]\nPrivateKey = {key}\n",
+        "no private key": wg.replace(f"PrivateKey = {key}\n", "", 1),
+        "no address": wg.replace(
+            "Address = 10.66.66.5/32, fd42:42:42::5/128\n", ""),
+        "no peer": wg.split("[Peer]", 1)[0],
+        "no public key": wg.replace(f"PublicKey = {key}\n", ""),
+        "no allowed ips": wg.replace("AllowedIPs = 0.0.0.0/0, ::/0\n", ""),
+        "no endpoint": wg.replace("Endpoint = vpn.example:51820\n", ""),
+        "split route": wg.replace("0.0.0.0/0, ::/0", "10.0.0.0/8"),
+        "table off": wg.replace("Table = auto", "Table = off"),
+        "custom table": wg.replace("Table = auto", "Table = 51820"),
+        "hook": wg.replace("DNS = 1.1.1.1, 8.8.8.8",
+                           "pOsTuP = touch /tmp/x"),
+        "save config": wg.replace("Table = auto", "SaveConfig = false"),
+        "awg fields in wg": awg,
+    }
+    for why, config in bad_quick.items():
+        try:
+            check_quick_config("wireguard", config, no_tool)
+            raise AssertionError(f"bad quick config accepted: {why}")
+        except ValueError as e:
+            assert key not in str(e), "a key escaped in a validation error"
+    try:
+        check_quick_config("amneziawg", wg, no_tool)
+        raise AssertionError("plain WireGuard config accepted as AmneziaWG")
+    except ValueError:
+        pass
 
     assert accrue(0, 100) == 100
     assert accrue(100, 250) == 150
