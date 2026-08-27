@@ -358,6 +358,49 @@ STRINGS = {
         "settingsTitle": "Настройки",
         "groupGeneral": "Основное",
         "groupNet": "Сеть",
+        "groupVpn": "Туннели",
+        "vpnSubscription": "Подписка",
+        "vpnWireGuard": "WireGuard",
+        "vpnAmneziaWG": "AmneziaWG",
+        "vpnName": "название",
+        "vpnNamePh": "например, Франкфурт",
+        "vpnUrl": "ссылка HTTPS",
+        "vpnExclude": "исключить узлы",
+        "vpnExcludePh": "необязательное регулярное выражение",
+        "vpnConfig": "конфиг",
+        "vpnConfigPh": "вставьте весь файл .conf",
+        "vpnAdd": "добавить туннель",
+        "vpnEmpty": "туннелей ещё нет",
+        "vpnLoading": "загрузка…",
+        "vpnDirect": "Сейчас трафик идёт напрямую",
+        "vpnClosed": "Транзит закрыт: активный туннель не работает",
+        "vpnRunning": "Активен: {kind}",
+        "vpnStopped": "туннель остановлен",
+        "vpnEnabled": "включён",
+        "vpnDisabled": "выключен",
+        "vpnNodes": "узлов: {n}",
+        "vpnEnable": "включить",
+        "vpnDisable": "выключить",
+        "vpnRefresh": "обновить",
+        "vpnDelete": "удалить",
+        "vpnConfirmDisable": "Выключить последний активный туннель? Трафик пойдёт напрямую.",
+        "vpnConfirmDelete": "Удалить этот туннель и его сохранённые данные? Если он активен, подключение будет переключено.",
+        "vpnIpv6": "В конфиге нет полного маршрута IPv6",
+        "vpnHint": "Новый туннель сначала сохраняется выключенным. Подписки можно "
+                   "включать вместе; WireGuard или AmneziaWG заменяет их как "
+                   "единственный активный backend. Команды из хуков конфигов запрещены.",
+        "vpnBusy": "Применяю…",
+        "vpnSaved": "Готово",
+        "vpnBadForm": "Заполните название и данные выбранного типа.",
+        "vpnErrMissing": "файл профиля отсутствует",
+        "vpnErrTool": "нужная программа не установлена",
+        "vpnErrStopped": "туннель остановлен",
+        "vpnErrStart": "не удалось запустить туннель",
+        "vpnErrValidation": "конфиг или подписка не прошли проверку",
+        "vpnErrRollback": "откат не завершён; транзит оставлен закрытым",
+        "vpnErrConflict": "найден другой активный туннель; операция отменена",
+        "vpnErrInvalid": "состояние туннелей повреждено",
+        "vpnErrLegacy": "старая подписка работает, но ещё не обновлена панелью",
         "groupMaint": "Обслуживание",
         "groupPw": "Пароль",
         "theme": "Тема",
@@ -580,6 +623,49 @@ STRINGS = {
         "settingsTitle": "Settings",
         "groupGeneral": "General",
         "groupNet": "Network",
+        "groupVpn": "Tunnels",
+        "vpnSubscription": "Subscription",
+        "vpnWireGuard": "WireGuard",
+        "vpnAmneziaWG": "AmneziaWG",
+        "vpnName": "name",
+        "vpnNamePh": "for example, Frankfurt",
+        "vpnUrl": "HTTPS link",
+        "vpnExclude": "exclude nodes",
+        "vpnExcludePh": "optional regular expression",
+        "vpnConfig": "configuration",
+        "vpnConfigPh": "paste the complete .conf file",
+        "vpnAdd": "add tunnel",
+        "vpnEmpty": "no tunnels yet",
+        "vpnLoading": "loading…",
+        "vpnDirect": "Traffic is currently going direct",
+        "vpnClosed": "Forwarding is closed: the active tunnel is down",
+        "vpnRunning": "Active: {kind}",
+        "vpnStopped": "tunnel stopped",
+        "vpnEnabled": "enabled",
+        "vpnDisabled": "disabled",
+        "vpnNodes": "nodes: {n}",
+        "vpnEnable": "enable",
+        "vpnDisable": "disable",
+        "vpnRefresh": "refresh",
+        "vpnDelete": "delete",
+        "vpnConfirmDisable": "Disable the last active tunnel? Traffic will go direct.",
+        "vpnConfirmDelete": "Delete this tunnel and its saved data? If it is active, the connection will switch.",
+        "vpnIpv6": "The configuration has no full IPv6 route",
+        "vpnHint": "A new tunnel is saved disabled first. Subscriptions may be "
+                   "enabled together; WireGuard or AmneziaWG replaces them as "
+                   "the only active backend. Configuration hooks are forbidden.",
+        "vpnBusy": "Applying…",
+        "vpnSaved": "Done",
+        "vpnBadForm": "Fill in the name and the data required for this type.",
+        "vpnErrMissing": "the profile file is missing",
+        "vpnErrTool": "the required program is not installed",
+        "vpnErrStopped": "the tunnel is stopped",
+        "vpnErrStart": "the tunnel could not be started",
+        "vpnErrValidation": "the configuration or subscription failed validation",
+        "vpnErrRollback": "rollback did not finish; forwarding remains closed",
+        "vpnErrConflict": "another tunnel is active; the operation was cancelled",
+        "vpnErrInvalid": "the tunnel state is damaged",
+        "vpnErrLegacy": "the old subscription works but has not been refreshed by the panel",
         "groupMaint": "Maintenance",
         "groupPw": "Password",
         "theme": "Theme",
@@ -3269,7 +3355,7 @@ CSS = TOKENS + """
  .list.inset .row>:first-child{margin-left:calc(-1 * var(--s6))}
  .row .sp{flex:1}
 
- button,select,input{font:inherit;color:inherit}
+ button,select,input,textarea{font:inherit;color:inherit}
  .btn{background:none;border:0;border-radius:var(--r-ctl);cursor:pointer;
       padding:var(--s1) var(--s2);color:var(--blue)}
  .btn:hover{background:var(--fill)}
@@ -3550,6 +3636,12 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  .srow2{display:flex;align-items:center;gap:var(--s2);margin-top:var(--s4)}
  .srow2 .sp{flex:1}
  .sheet .field{max-width:11rem}
+ .vpnform{display:flex;flex-direction:column;gap:var(--s2);margin-top:var(--s3)}
+ .vpnform .field{width:100%;max-width:none}
+ .vpnform textarea{min-height:9rem;resize:vertical}
+ .vpnlist .row{align-items:flex-start;flex-wrap:wrap}
+ .vpnmeta{min-width:12rem;flex:1}
+ .vpnacts{display:flex;gap:var(--s1);flex-wrap:wrap;justify-content:flex-end}
  .sheet input:disabled{opacity:1;color:var(--dim);-webkit-text-fill-color:var(--dim);
    cursor:not-allowed}
  a{color:var(--blue)}
@@ -3596,6 +3688,39 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
    <div class=row><span class=sp>{{t.sSelfIp}}</span>
     <input id=s_self class=field value="{{GW}}"></div>
    <p class=hint>{{t.sNetHint}}</p>
+  </div>
+
+  <h2 class=grp>{{t.groupVpn}}</h2>
+  <div class="list inset panel">
+   <div class=row><span id="vpnSummary" class=sp>{{t.vpnLoading}}</span></div>
+   <div id="vpnList" class=vpnlist></div>
+   <div class=vpnform>
+    <div class=row><label for=vpnKind>{{t.groupVpn}}</label><span class=sp></span>
+     <select id="vpnKind" class=field onchange=vpnFields()>
+      <option value=subscription>{{t.vpnSubscription}}</option>
+      <option value=wireguard>{{t.vpnWireGuard}}</option>
+      <option value=amneziawg>{{t.vpnAmneziaWG}}</option></select></div>
+    <div class=row><label for=vpnName>{{t.vpnName}}</label><span class=sp></span>
+     <input id="vpnName" class=field maxlength=40 autocomplete="off"
+       placeholder="{{t.vpnNamePh}}"></div>
+    <div id="vpnSubFields">
+     <div class=row><label for=vpnUrl>{{t.vpnUrl}}</label><span class=sp></span>
+      <input id="vpnUrl" class=field type=url autocomplete="off"
+        placeholder=https:// required></div>
+     <div class=row><label for=vpnExclude>{{t.vpnExclude}}</label><span class=sp></span>
+      <input id="vpnExclude" class=field maxlength=128 autocomplete="off"
+        placeholder="{{t.vpnExcludePh}}"></div>
+    </div>
+    <div id="vpnQuickFields" hidden>
+     <label for=vpnSecret>{{t.vpnConfig}}</label>
+     <textarea id="vpnSecret" class=field autocomplete="off" spellcheck=false
+       placeholder="{{t.vpnConfigPh}}"></textarea>
+    </div>
+    <div class=srow2><span id="vpnStatus" class="hint sp" role="status"
+      aria-live="polite"></span>
+     <button id="vpnAdd" class="btn tinted" onclick=vpnAddProfile()>{{t.vpnAdd}}</button></div>
+   </div>
+   <p class=hint>{{t.vpnHint}}</p>
   </div>
 
   <h2 class=grp>{{t.groupMaint}}</h2>
@@ -3683,6 +3808,7 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
 
 <script>
 const T = {{T_JSON}};
+let csrf = '';
 const esc = s => (s||'').replace(/[<&">]/g, c => ({'<':'&lt;','&':'&amp;','"':'&quot;','>':'&gt;'}[c]));
 // Строки подсказок писались для HTML и несут <code> вокруг имён команд.
 // В нативном атрибуте разметка не парсится — там нужен голый текст.
@@ -3731,7 +3857,7 @@ const BYP = [[5, 'tm5'], [15, 'tm15'], [60, 'tm1h']];
 const mutate = (url, method='POST', body) => fetch(url, {
   method,
   headers: {'Content-Type':'application/json',
-            'X-CSRF-Token': S && S.csrf || ''},
+            'X-CSRF-Token': csrf},
   body: body === undefined ? '' : JSON.stringify(body)
 });
 const bypass = (v, el) => {
@@ -3762,6 +3888,7 @@ const upfmt = s => {
 // на весь скрипт, поэтому openIp.
 let S = null, month = null, sel = null, mode = 'day', sortk = 'ip', sortd = 1,
     oth = 0, mtot = 0, openIp = null;
+let VPN = null, vpnBusy = false;
 
 // [short label, up, down, full label, other] — the chart draws whatever this
 // returns, so the month, the last 24 hours and one device's slice are the same
@@ -3954,9 +4081,115 @@ const setTheme = v => {
 };
 try { s_theme.value = localStorage.gwacl_theme || 'auto'; } catch (e) {}
 
+const VPN_TYPES = {subscription:T.vpnSubscription, wireguard:T.vpnWireGuard,
+                   amneziawg:T.vpnAmneziaWG, singbox:T.vpnSubscription,
+                   none:T.vpnDirect};
+const VPN_ERRORS = {'legacy/no-cache':T.vpnErrLegacy,
+  'missing-secret':T.vpnErrMissing, 'tool-missing':T.vpnErrTool,
+  stopped:T.vpnErrStopped, 'start-failed':T.vpnErrStart,
+  'validation-failed':T.vpnErrValidation, 'rollback-failed':T.vpnErrRollback,
+  conflict:T.vpnErrConflict, 'invalid-state':T.vpnErrInvalid};
+const vpnError = code => VPN_ERRORS[code] || T.vpnErrInvalid;
+const vpnNode = (tag, cls, text) => {
+  const el = document.createElement(tag);
+  if (cls) el.className = cls;
+  if (text !== undefined) el.textContent = text;
+  return el;
+};
+const vpnButton = (text, action, bad=false) => {
+  const b = vpnNode('button', 'btn' + (bad ? ' bad' : ''), text);
+  b.type = 'button'; b.disabled = vpnBusy; b.onclick = action;
+  return b;
+};
+const vpnFields = () => {
+  const sub = vpnKind.value === 'subscription';
+  vpnSubFields.hidden = !sub; vpnQuickFields.hidden = sub;
+};
+const renderVpn = () => {
+  vpnList.replaceChildren();
+  if (!VPN) { vpnSummary.textContent = T.vpnLoading; return; }
+  const backend = VPN.backend || {kind:'none', active:false};
+  vpnSummary.textContent = VPN.closed ? T.vpnClosed
+    : backend.kind === 'none' ? T.vpnDirect
+    : backend.active ? T.vpnRunning.replace('{kind}', VPN_TYPES[backend.kind] || backend.kind)
+    : vpnError(backend.error || 'stopped');
+  if (!VPN.profiles.length) vpnList.append(vpnNode('p', 'hint', T.vpnEmpty));
+  VPN.profiles.forEach(p => {
+    const row = vpnNode('div', 'row');
+    const dot = vpnNode('i', 'dot' + (p.enabled ? ' live' : ''));
+    dot.setAttribute('aria-hidden', 'true'); row.append(dot);
+    const meta = vpnNode('div', 'vpnmeta');
+    meta.append(vpnNode('b', '', p.name));
+    const details = [VPN_TYPES[p.kind] || p.kind,
+      p.enabled ? T.vpnEnabled : T.vpnDisabled];
+    if (p.kind === 'subscription') details.push(T.vpnNodes.replace('{n}', p.nodes));
+    meta.append(vpnNode('div', 'sec', details.join(' · ')));
+    if (p.ipv6 === false) meta.append(vpnNode('div', 'sec', T.vpnIpv6));
+    if (p.error) meta.append(vpnNode('div', 'bad sec', vpnError(p.error)));
+    row.append(meta);
+    const acts = vpnNode('div', 'vpnacts');
+    if (p.enabled) acts.append(vpnButton(T.vpnDisable, () => {
+      const subs = VPN.profiles.filter(x => x.enabled && x.kind === 'subscription');
+      if ((p.kind !== 'subscription' || subs.length === 1)
+          && !confirm(T.vpnConfirmDisable)) return;
+      vpnCall('disable', {id:p.id});
+    }));
+    else acts.append(vpnButton(T.vpnEnable, () => vpnCall('enable', {id:p.id})));
+    if (p.kind === 'subscription')
+      acts.append(vpnButton(T.vpnRefresh, () => vpnCall('refresh', {id:p.id})));
+    acts.append(vpnButton(T.vpnDelete, () => vpnDeleteProfile(p), true));
+    row.append(acts); vpnList.append(row);
+  });
+  vpnAdd.disabled = vpnBusy;
+  vpnFields();
+};
+const loadVpn = async () => {
+  vpnStatus.textContent = T.vpnLoading;
+  try {
+    const r = await fetch('/vpn');
+    if (r.status === 401) { location.reload(); return; }
+    if (!r.ok) throw new Error(T.vpnErrStart);
+    VPN = await r.json(); csrf = VPN.csrf || csrf; renderVpn();
+    vpnStatus.textContent = '';
+  } catch (e) { vpnStatus.textContent = e.message || T.vpnErrStart; }
+};
+const vpnRequest = async (method, url, body) => {
+  vpnBusy = true; renderVpn(); vpnStatus.textContent = T.vpnBusy;
+  let ok = false;
+  try {
+    const r = await mutate(url, method, body);
+    const data = await r.json();
+    if (!r.ok) throw new Error(vpnError(data.error));
+    VPN = data; csrf = data.csrf || csrf; renderVpn();
+    vpnStatus.textContent = T.vpnSaved; ok = true;
+  } catch (e) { vpnStatus.textContent = e.message || T.vpnErrStart; }
+  finally {
+    vpnUrl.value = ''; vpnSecret.value = '';
+    vpnBusy = false; renderVpn();
+  }
+  return ok;
+};
+const vpnCall = (action, body={}) => vpnRequest('POST', '/vpn', {action, ...body});
+const vpnAddProfile = () => {
+  const kind = vpnKind.value, name = vpnName.value.trim();
+  const body = {kind, name, exclude:vpnExclude.value};
+  if (kind === 'subscription') body.url = vpnUrl.value.trim();
+  else body.config = vpnSecret.value;
+  if (!name || (kind === 'subscription' ? !body.url : !body.config)) {
+    vpnStatus.textContent = T.vpnBadForm; return;
+  }
+  vpnCall('add', body).then(ok => { if (ok) vpnName.value = ''; });
+};
+const vpnDeleteProfile = p => {
+  if (!confirm(T.vpnConfirmDelete)) return;
+  vpnRequest('DELETE', '/vpn?id=' + encodeURIComponent(p.id));
+};
+
 // details закрывался сам; шит — нет, поэтому Esc и клик мимо пишутся руками.
-const openSheet = () => { sheet.hidden = false; s_lang.focus(); };
-const closeSheet = () => { sheet.hidden = true; };
+const openSheet = () => { sheet.hidden = false; s_lang.focus(); loadVpn(); };
+const closeSheet = () => {
+  sheet.hidden = true; vpnUrl.value = ''; vpnSecret.value = '';
+};
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && !sheet.hidden) closeSheet();
 });
@@ -4164,7 +4397,7 @@ const stale = bad => {
 };
 const load = m => fetch('/api?month=' + (month = m || month || ''))
   .then(r => r.status === 401 ? location.reload()
-    : r.json().then(s => { S = s; draw(); }))
+    : r.json().then(s => { csrf = s.csrf || csrf; S = s; draw(); }))
   .then(() => stale(0), () => stale(1));
 const post = body => mutate('/api', 'POST', body)
   .then(r => r.ok ? load() : r.text().then(alert));
@@ -4777,6 +5010,7 @@ def selftest():
             stored = open(TUNNELS).read()
             assert "private-token" not in stored and "PrivateKey" not in stored
             public = json.dumps(public_tunnels(loaded), sort_keys=True)
+            public += json.dumps(vpn_public(), sort_keys=True)
             for secret_value in ("private-token", "vless://", "hidden",
                                  "198.51.100.1"):
                 assert secret_value not in public
@@ -6036,6 +6270,11 @@ PersistentKeepalive = 25
     # The script drives the page by id. A rename on one side only leaves a card
     # silently empty in the browser, which no other check here would notice.
     page = render(PAGE_T)
+    for needle in ('id="vpnList"', 'id="vpnKind"', 'id="vpnSecret"',
+                   'aria-live="polite"', 'autocomplete="off"'):
+        assert needle in page, f"the tunnel form has no {needle}"
+    assert "PrivateKey" not in page and "PresharedKey" not in page, \
+        "a tunnel secret leaked into the rendered page"
     for el in ("banners", "kt", "kdelta", "mtitle", "ksum", "seg",
                "chartbox", "mstrip", "sysbox", "tb",
                "unk", "ub",

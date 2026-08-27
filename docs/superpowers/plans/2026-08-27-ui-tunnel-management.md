@@ -645,7 +645,7 @@ git commit -m "Защитить API туннелей точной маршрут
 - Modify: `panel.py:1800-3170` CSS/HTML/JS templates
 - Test: `panel.py:selftest()`
 
-- [ ] **Step 1: Write failing render/accessibility asserts**
+- [x] **Step 1: Write failing render/accessibility asserts**
 
 ```python
 assert set(STRINGS["ru"]) == set(STRINGS["en"])
@@ -655,15 +655,15 @@ for needle in ('id="vpnList"', 'id="vpnKind"', 'id="vpnSecret"',
 assert "PrivateKey" not in PAGE and "PresharedKey" not in PAGE
 ```
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run: `python3 panel.py --selftest`
 
-- [ ] **Step 3: Add native controls using existing styles**
+- [x] **Step 3: Add native controls using existing styles**
 
 Inside Settings after Network add one `.group` with list rows, explicit type `<select>`, name input, HTTPS URL/exclude fields, config `<textarea>`, add button and `role="status" aria-live="polite"`. Reuse existing `.row`, `.btn`, `.dot`, `.hint`, `.sheet` styles; add only selectors that are missing.
 
-- [ ] **Step 4: Add lazy `/vpn` loading and fixed UI actions**
+- [x] **Step 4: Add lazy `/vpn` loading and fixed UI actions**
 
 Fetch `/vpn` only when Settings opens. Keep current CSRF token from `/api`; send it on every mutation. Render with `textContent`, never `innerHTML` for server data. After every response clear URL/config secret inputs. Confirm disabling the last active backend before POST.
 
@@ -682,7 +682,7 @@ async function vpnCall(action, body = {}) {
 
 Convert logout to a form/button that sends CSRF-protected POST.
 
-- [ ] **Step 5: Verify and commit**
+- [x] **Step 5: Verify and commit**
 
 ```bash
 python3 panel.py --selftest
