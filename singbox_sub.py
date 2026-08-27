@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Turn a subscription link into sing-box outbounds.
+"""Turn subscription links into sing-box outbounds.
 
-This is the installer's tool, not the panel's: `install.sh` runs it, `panel.py`
-never imports it. The panel still does not read, write or care about a sing-box
-config — see docs/singbox.md. The link itself is kept in $GWACL_DIR/sub.url,
-mode 0600, and is never copied into the panel's own config or its pages.
+The installer uses the CLI for legacy setup and the panel imports the same
+parser for managed profiles. A URL is passed directly only by the legacy CLI;
+the panel keeps it in its private tunnel storage and never puts it in argv.
 
 It prints a complete config to stdout and touches nothing on disk, so the caller
 keeps the backup, the `sing-box check` and the rollback. Given `--base`, only two
@@ -24,6 +23,7 @@ import base64
 import json
 import re
 import sys
+import time
 import urllib.request
 from urllib.parse import parse_qsl, unquote, urlsplit
 
@@ -31,6 +31,7 @@ GROUP = "proxy"          # the tag every route rule in a generated config points
 DIRECT = "direct"
 OWNED = "sub-"           # what this program is allowed to delete and rewrite
 TIMEOUT = 20
+SUB_BODY_MAX = 128 << 10
 
 # sing-box does not implement Xray's xhttp transport and shows no sign of
 # starting to: 1.13 and the 1.14 betas both know exactly five (http, ws, quic,
@@ -44,6 +45,20 @@ class Unsupported(Exception):
     """A node this sing-box cannot be told to use. Carries the reason shown."""
 
 
+class SameHostRedirect(urllib.request.HTTPRedirectHandler):
+    """Keep a secret subscription request on its original HTTPS host."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        old, new = urlsplit(req.full_url), urlsplit(newurl)
+        if new.scheme != "https" or new.hostname != old.hostname:
+            raise ValueError("unsafe subscription redirect")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _open(req, timeout):
+    return urllib.request.build_opener(SameHostRedirect()).open(req, timeout=timeout)
+
+
 def _b64(s):
     """Base64 in any of the four shapes a subscription uses: standard or
     URL-safe alphabet, padded or not."""
@@ -54,12 +69,38 @@ def _b64(s):
     return base64.b64decode(s + "=" * (-len(s) % 4), validate=True)
 
 
-def fetch(url, timeout=TIMEOUT):
+def fetch(url, timeout=TIMEOUT, limit=SUB_BODY_MAX):
     """The subscription body. The User-Agent matters: providers hand out Clash
     YAML to some clients and the plain list to others."""
+    p = urlsplit(url)
+    if p.scheme != "https" or not p.hostname:
+        raise ValueError("subscription URL must use HTTPS")
+    if timeout <= 0 or limit < 1:
+        raise ValueError("invalid subscription fetch limits")
+    deadline = time.monotonic() + timeout
     req = urllib.request.Request(url, headers={"User-Agent": "sing-box/1.13"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return r.read(1 << 22).decode("utf-8", "replace")
+    try:
+        with _open(req, max(0.001, deadline - time.monotonic())) as r:
+            final = urlsplit(r.geturl())
+            if final.scheme != "https" or final.hostname != p.hostname:
+                raise ValueError("unsafe subscription redirect")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ValueError("subscription download timed out")
+            sock = getattr(getattr(getattr(r, "fp", None), "raw", None),
+                           "_sock", None)
+            if sock is not None:
+                sock.settimeout(remaining)
+            body = r.read(limit + 1)
+            if time.monotonic() > deadline:
+                raise ValueError("subscription download timed out")
+            if len(body) > limit:
+                raise ValueError("subscription response is too large")
+            return body.decode("utf-8", "replace")
+    except ValueError:
+        raise
+    except Exception:
+        raise ValueError("subscription download failed") from None
 
 
 def links(body):
@@ -148,23 +189,23 @@ def node_name(link):
     return " ".join((unquote(p.fragment).strip() or p.hostname or "node").split())
 
 
-def tag_for(link, taken):
-    """`sub-` plus the name the provider gave the node, made unique.
+def tag_for(link, taken, prefix=OWNED):
+    """An ownership prefix plus the provider's node name, made unique.
 
     The prefix is the ownership mark — it is the whole basis on which a refresh
     knows which outbounds are its own to delete. The name is kept because it is
     what shows up in the journal when a node misbehaves.
     """
     name = node_name(link)
-    tag = OWNED + name
+    tag = prefix + name
     n = 2
     while tag in taken:
-        tag, n = f"{OWNED}{name} {n}", n + 1
+        tag, n = f"{prefix}{name} {n}", n + 1
     taken.add(tag)
     return tag
 
 
-def convert(body, warn=lambda s: None, exclude=None):
+def convert(body, warn=lambda s: None, exclude=None, prefix=OWNED, taken=None):
     """Every usable node of a subscription, in the order the provider listed.
 
     `exclude` is a regular expression matched against the provider's name for
@@ -177,16 +218,17 @@ def convert(body, warn=lambda s: None, exclude=None):
     try:
         rx = re.compile(exclude, re.I) if exclude else None
     except re.error as e:  # the caller typed it; a traceback is not an answer
-        raise SystemExit(f"--exclude: неверное регулярное выражение / "
-                         f"bad regular expression: {e}")
-    outs, taken = [], set()
+        raise ValueError(f"--exclude: неверное регулярное выражение / "
+                         f"bad regular expression: {e}") from None
+    outs = []
+    taken = taken if taken is not None else set()
     for link in links(body):
         name = node_name(link)
         if rx and rx.search(name):
             warn(f"{name}: исключён / excluded")
             continue
         try:
-            outs.append(outbound(link, tag_for(link, taken)))
+            outs.append(outbound(link, tag_for(link, taken, prefix)))
         except Unsupported as e:
             warn(f"{urlsplit(link).scheme}://{urlsplit(link).hostname}: {e}")
         except Exception as e:  # a malformed link is one node, not the run
@@ -276,10 +318,11 @@ def fresh(outs, iface, group=GROUP):
     }
 
 
-def build(body, base=None, iface=None, warn=lambda s: None, exclude=None):
-    outs = convert(body, warn, exclude)
+def build(body, base=None, iface=None, warn=lambda s: None, exclude=None,
+          prefix=OWNED, taken=None):
+    outs = convert(body, warn, exclude, prefix, taken)
     if not outs:
-        raise SystemExit("подписка не дала ни одного пригодного узла / "
+        raise ValueError("подписка не дала ни одного пригодного узла / "
                          "the subscription yielded no usable node")
     return merge(base, outs) if base is not None else fresh(outs, iface or "eth0"), outs
 
@@ -288,6 +331,77 @@ def build(body, base=None, iface=None, warn=lambda s: None, exclude=None):
 
 def selftest():
     """Bare asserts, no network. Same shape as panel.py's."""
+    global _open
+    for bad_url in ("data:text/plain,vless://secret", "file:///etc/passwd",
+                    "http://provider.example/sub"):
+        try:
+            fetch(bad_url)
+            raise AssertionError("subscription fetch must be HTTPS only")
+        except ValueError:
+            pass
+
+    class Response:
+        def __init__(self, body, final="https://provider.example/sub"):
+            self.body, self.final = body, final
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *unused):
+            pass
+
+        def read(self, size):
+            return self.body[:size]
+
+        def geturl(self):
+            return self.final
+
+    real_open = _open
+    real_clock = time.monotonic
+    try:
+        _open = lambda req, timeout: Response(b"123456789")
+        try:
+            fetch("https://provider.example/sub", limit=8)
+            raise AssertionError("oversized subscription must not be truncated")
+        except ValueError:
+            pass
+        _open = lambda req, timeout: Response(b"12345678")
+        assert fetch("https://provider.example/sub", limit=8) == "12345678"
+        _open = lambda req, timeout: Response(
+            b"ok", "https://redirected.example/sub")
+        try:
+            fetch("https://provider.example/sub", limit=8)
+            raise AssertionError("cross-host redirect must be rejected")
+        except ValueError:
+            pass
+        _open = lambda req, timeout: (_ for _ in ()).throw(
+            RuntimeError("https://provider.example/secret-token"))
+        try:
+            fetch("https://provider.example/secret-token", limit=8)
+            raise AssertionError("download failure must stay a failure")
+        except ValueError as e:
+            assert "secret-token" not in str(e)
+        ticks = iter((0.0, 0.0, 2.0))
+        time.monotonic = lambda: next(ticks, 2.0)
+        _open = lambda req, timeout: Response(b"ok")
+        try:
+            fetch("https://provider.example/sub", timeout=1, limit=8)
+            raise AssertionError("subscription fetch needs one overall deadline")
+        except ValueError:
+            pass
+    finally:
+        _open = real_open
+        time.monotonic = real_clock
+    for redirected in ("https://other.example/sub",
+                       "http://provider.example/sub"):
+        try:
+            SameHostRedirect().redirect_request(
+                type("Req", (), {"full_url": "https://provider.example/sub"})(),
+                None, 302, "", {}, redirected)
+            raise AssertionError("unsafe redirect must be rejected before opening")
+        except ValueError:
+            pass
+
     pbk = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
     uid = "5eb99d66-0000-0000-0000-000000000000"
     vision = (f"vless://{uid}@a.example:9443?encryption=none&flow=xtls-rprx-vision"
@@ -304,6 +418,20 @@ def selftest():
     taken = {"sub-n"}
     assert tag_for(f"vless://{uid}@a.example:443#n", taken) == "sub-n 2", \
         "two nodes of one name are two tags"
+
+    # Two enabled sources share one namespace, but each keeps an ownership
+    # prefix so refreshing or deleting one cannot rewrite the other.
+    taken = set()
+    one = convert(vision, prefix="sub-t000000000001-", taken=taken)
+    two = convert(vision, prefix="sub-t000000000002-", taken=taken)
+    assert one[0]["tag"].startswith("sub-t000000000001-")
+    assert two[0]["tag"].startswith("sub-t000000000002-")
+    assert one[0]["tag"] != two[0]["tag"]
+    try:
+        convert(vision, exclude="[")
+        raise AssertionError("bad regex must be an API-safe error")
+    except ValueError:
+        pass
 
     # sing-box has no xhttp: it must be reported, not written into the config.
     said = []
@@ -364,6 +492,15 @@ def selftest():
     assert grp["tolerance"] == 42, "the group's own settings are the user's"
     assert base["outbounds"][2]["tag"] == "sub-gone", "the caller's dict is untouched"
 
+    both = merge(base, one + two)
+    grp = next(o for o in both["outbounds"] if o["tag"] == GROUP)
+    assert grp["outbounds"] == [o["tag"] for o in one + two]
+    only_two = merge(both, two)
+    tags = [o["tag"] for o in only_two["outbounds"]]
+    assert not any(t.startswith("sub-t000000000001-") for t in tags)
+    assert all(o["tag"] in tags for o in two), \
+        "removing one source must leave the other byte-for-byte"
+
     empty = merge({"outbounds": [{"type": "direct", "tag": "direct"}]}, convert(plain))
     assert any(o["tag"] == GROUP and o["type"] == "urltest" for o in empty["outbounds"]), \
         "a config without a group gets one"
@@ -405,7 +542,10 @@ def main():
         with open(a.base) as f:
             base = json.load(f)
     warned = []
-    cfg, outs = build(fetch(a.url), base, a.iface, warned.append, a.exclude)
+    try:
+        cfg, outs = build(fetch(a.url), base, a.iface, warned.append, a.exclude)
+    except ValueError as e:
+        raise SystemExit(str(e)) from None
     for w in warned:
         print(f"  пропущен / skipped: {w}", file=sys.stderr)
     print(f"  узлов / nodes: {len(outs)}", file=sys.stderr)

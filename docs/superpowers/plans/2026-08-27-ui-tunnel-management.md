@@ -27,7 +27,7 @@
 - Modify: `singbox_sub.py:18-224`
 - Test: `singbox_sub.py:289-390`
 
-- [ ] **Step 1: Write failing multi-source and API-safe error asserts**
+- [x] **Step 1: Write failing multi-source and API-safe error asserts**
 
 Добавить в `selftest()` два body с одинаковыми именами узлов и проверить общий `taken`, разные profile-prefix и обычный `ValueError`:
 
@@ -45,13 +45,13 @@ except ValueError:
     pass
 ```
 
-- [ ] **Step 2: Run the focused selftest and verify RED**
+- [x] **Step 2: Run the focused selftest and verify RED**
 
 Run: `python3 singbox_sub.py --selftest`
 
 Expected: `TypeError` for the new `prefix`/`taken` parameters or `SystemExit` for the invalid regex.
 
-- [ ] **Step 3: Add the minimum reusable converter parameters**
+- [x] **Step 3: Add the minimum reusable converter parameters**
 
 Implement these exact signatures and reuse existing parsing:
 
@@ -76,7 +76,7 @@ def build(body, base=None, iface=None, warn=lambda s: None, exclude=None,
 
 `main()` alone catches `ValueError` and converts it to CLI `SystemExit`; imported callers receive a normal exception.
 
-- [ ] **Step 4: Harden subscription fetching**
+- [x] **Step 4: Harden subscription fetching**
 
 Implement `fetch(url, timeout=TIMEOUT, limit=SUB_BODY_MAX)` with HTTPS validation, `limit + 1`, and a redirect handler that rejects a changed hostname:
 
@@ -92,7 +92,7 @@ class SameHostRedirect(urllib.request.HTTPRedirectHandler):
 The function must reject a non-HTTPS URL before opening it, enforce a monotonic
 overall deadline while reading, and never include the URL in an error.
 
-- [ ] **Step 5: Verify GREEN and regression**
+- [x] **Step 5: Verify GREEN and regression**
 
 Run:
 
@@ -103,7 +103,7 @@ python3 panel.py --selftest
 
 Expected: both exit 0.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add singbox_sub.py
