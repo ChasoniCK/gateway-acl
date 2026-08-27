@@ -368,7 +368,7 @@ git commit -m "Проверять конфиги WireGuard и AmneziaWG"
 - Modify: `panel.py` tunnels section
 - Test: `panel.py:selftest()`
 
-- [ ] **Step 1: Write failing two-source build and mark asserts**
+- [x] **Step 1: Write failing two-source build and mark asserts**
 
 Create two private subscription fixtures in scratch storage. Assert one proxy group contains both prefix families; changing/deleting A leaves B byte-equivalent. Add mark fixtures for decimal, hex, empty and ambiguous output:
 
@@ -382,13 +382,13 @@ assert backend_mark({"kind": "wireguard", "id": tid}, fake("off")) == 0
 assert parse_singbox_mark("0x2024\n0x2023\n") == 0
 ```
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run: `python3 panel.py --selftest`
 
 Expected: missing build/mark helpers.
 
-- [ ] **Step 3: Implement candidate building with one merge**
+- [x] **Step 3: Implement candidate building with one merge**
 
 ```python
 def build_singbox(rows, base, secrets=None):
@@ -408,11 +408,11 @@ def build_singbox(rows, base, secrets=None):
 
 Use safe `VpnError` messages only. Add `vpn_exec`, `backend_state` and `backend_mark` with fixed command tables and sanitized private paths; the runner default resolves inside the function.
 
-- [ ] **Step 4: Verify commands contain no user-controlled name or secret**
+- [x] **Step 4: Verify commands contain no user-controlled name or secret**
 
 Assert every recorded argv starts with one of `sing-box`, `systemctl`, `wg`, `awg`, `wg-quick`, `awg-quick`, `ip`, `nft`, and paths contain the validated server ID but never the display name or secret content.
 
-- [ ] **Step 5: Verify and commit**
+- [x] **Step 5: Verify and commit**
 
 ```bash
 python3 panel.py --selftest

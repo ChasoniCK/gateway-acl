@@ -51,6 +51,7 @@ import threading
 import time
 import urllib.request
 import zlib
+import singbox_sub
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -83,6 +84,7 @@ TUNNELS = f"{ETC}/tunnels.json"
 TUNNEL_DIR = f"{ETC}/tunnels"
 LEGACY_SUB_URL = f"{ETC}/sub.url"
 LEGACY_SUB_EXCLUDE = f"{ETC}/sub.exclude"
+SINGBOX_CONFIG = os.environ.get("GWACL_SINGBOX_CONFIG", "/etc/sing-box/config.json")
 
 DEFAULTS = {"iface": "eno1", "lan": "192.168.1.0/24", "self_ip": "192.168.1.10",
             "port": 8080, "poll_sec": 60, "pw": None, "lang": "ru",
@@ -1730,6 +1732,12 @@ SAFE_VPN_ERRORS = {
     "start-failed", "validation-failed", "rollback-failed", "conflict",
     "invalid-state",
 }
+VPN_COMMANDS = {"sing-box", "systemctl", "wg", "awg", "wg-quick",
+                "awg-quick", "ip", "nft"}
+
+
+class VpnError(ValueError):
+    """A browser-safe tunnel failure code, never external stdout or a secret."""
 
 
 def check_tunnel_id(value):
@@ -1829,6 +1837,129 @@ def check_subscription(url, exclude):
     except re.error:
         raise ValueError("invalid subscription exclusion") from None
     return url, exclude
+
+
+def load_subscription_secret(tid):
+    try:
+        with open(tunnel_path(tid, ".json")) as f:
+            secret = json.load(f)
+    except (OSError, ValueError):
+        raise VpnError("missing-secret") from None
+    if not isinstance(secret, dict) or not isinstance(secret.get("body"), str):
+        raise VpnError("missing-secret")
+    return secret
+
+
+def build_singbox(rows, base=None, secrets_map=None):
+    taken, outs, counts = set(), [], {}
+    getter = (load_subscription_secret if secrets_map is None else
+              (secrets_map if callable(secrets_map) else secrets_map.__getitem__))
+    for row in rows:
+        if row.get("kind") != "subscription" or not row.get("enabled"):
+            continue
+        tid = check_tunnel_id(row.get("id"))
+        try:
+            secret = getter(tid)
+            one = singbox_sub.convert(
+                secret["body"], exclude=secret.get("exclude"),
+                prefix=f"sub-{tid}-", taken=taken)
+        except VpnError:
+            raise
+        except Exception:
+            raise VpnError("validation-failed") from None
+        if not one:
+            raise VpnError("validation-failed")
+        counts[tid] = len(one)
+        outs.extend(one)
+    if not outs:
+        raise VpnError("validation-failed")
+    try:
+        if base is None:
+            try:
+                with open(SINGBOX_CONFIG) as f:
+                    base = json.load(f)
+            except FileNotFoundError:
+                return singbox_sub.fresh(outs, IFACE), counts
+        return singbox_sub.merge(base, outs), counts
+    except (OSError, ValueError, TypeError):
+        raise VpnError("validation-failed") from None
+
+
+def active_backend(rows):
+    enabled = [row for row in rows if row.get("enabled")]
+    subscriptions = [row for row in enabled if row.get("kind") == "subscription"]
+    quick = [row for row in enabled if row.get("kind") in QUICK_TOOLS]
+    if (subscriptions and quick) or len(quick) > 1:
+        raise VpnError("invalid-state")
+    if quick:
+        return _tunnel_row(quick[0])
+    if subscriptions:
+        return {"kind": "singbox",
+                "ids": [check_tunnel_id(row.get("id")) for row in subscriptions]}
+    return None
+
+
+def vpn_exec(argv, input_text=None, timeout=30, runner=None):
+    if (not isinstance(argv, (list, tuple)) or not argv
+            or argv[0] not in VPN_COMMANDS
+            or any(not isinstance(part, str) or "\x00" in part for part in argv)):
+        raise VpnError("invalid-state")
+    try:
+        return (runner or subprocess.run)(
+            list(argv), input=input_text, capture_output=True, text=True,
+            timeout=timeout, shell=False)
+    except FileNotFoundError:
+        raise VpnError("tool-missing") from None
+    except (OSError, subprocess.TimeoutExpired):
+        raise VpnError("start-failed") from None
+
+
+def parse_singbox_mark(text):
+    marks = set()
+    for line in str(text or "").splitlines():
+        if "return" not in line:
+            continue
+        match = re.search(
+            r"\bmeta\s+mark(?:\s+&\s+(?:0x[0-9a-f]+|[0-9]+))?"
+            r"\s+(?:==\s+)?(0x[0-9a-f]+|[0-9]+)\b", line, re.I)
+        if match:
+            marks.add(int(match.group(1), 0))
+    return marks.pop() if len(marks) == 1 else 0
+
+
+def backend_mark(backend, runner=None):
+    if not backend:
+        return 0
+    kind = backend.get("kind")
+    if kind == "singbox":
+        result = vpn_exec(["nft", "list", "table", "inet", "sing-box"],
+                          runner=runner)
+        return parse_singbox_mark(result.stdout) if not result.returncode else 0
+    if kind in QUICK_TOOLS:
+        tool = "wg" if kind == "wireguard" else "awg"
+        result = vpn_exec([tool, "show", check_tunnel_id(backend.get("id")),
+                           "fwmark"], runner=runner)
+        values = str(result.stdout or "").strip().splitlines()
+        if result.returncode or len(values) != 1 or values[0].lower() == "off":
+            return 0
+        try:
+            mark = int(values[0], 0)
+            return mark if 0 <= mark <= 0xffffffff else 0
+        except ValueError:
+            return 0
+    return 0
+
+
+def backend_state(rows, runner=None):
+    backend = active_backend(rows)
+    if backend is None:
+        return {"kind": "none", "active": False}
+    if backend["kind"] == "singbox":
+        result = vpn_exec(["systemctl", "is-active", "sing-box"], runner=runner)
+    else:
+        result = vpn_exec(["ip", "link", "show", "dev", backend["id"]],
+                          runner=runner)
+    return {"kind": backend["kind"], "active": result.returncode == 0}
 
 
 def _quick_text(value):
@@ -2701,8 +2832,9 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  .ch{display:flex;align-items:baseline;gap:.6rem;margin-bottom:.9rem}
  .ch h2{margin:0}
  .ch .sp{flex:1}
- .chead{display:flex;align-items:center;gap:var(--s2);margin-bottom:var(--s3)}
+ .chead{display:flex;align-items:center;gap:var(--s3);margin-bottom:var(--s3)}
  .chead .sp{flex:1}
+ .sortgrp{display:flex;align-items:center;gap:2px}
  .hero{display:flex;align-items:baseline;gap:var(--s2)}
  .hero b{font-size:var(--f-hero);font-weight:600;letter-spacing:-.02em}
  .hero em{font-style:normal;font-size:var(--f-sec);color:var(--dim)}
@@ -2766,8 +2898,12 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  .dnum{text-align:right}
  .dot{flex:none;width:7px;height:7px;border-radius:50%;background:transparent}
  .dot.live{background:var(--green)}
- .chev{color:var(--dim2);transition:transform .15s;display:inline-block}
+ .chev{color:var(--dim);transition:transform .15s,color .15s;display:inline-block}
  .drow.open .chev{transform:rotate(90deg)}
+ @media (hover:hover){
+  .dmain:hover{background:var(--fill)}
+  .dmain:hover .chev{color:var(--fg)}
+ }
  .drow.off .nm,.drow.off .dnum{color:var(--dim)}
  .ddet{padding:0 0 var(--s3) var(--s5);display:flex;flex-direction:column;
        gap:var(--s2)}
@@ -2890,8 +3026,8 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  <div class=chead><h2>{{t.devicesTitle}}</h2><span class=sp></span>
   <input id=flt class=field placeholder="{{t.filter}}" aria-label="{{t.filter}}"
     oninput=draw()>
-  <select id=srt class=field title="{{t.sortBy}}" onchange=setSort(this.value)></select>
-  <button class=btn id=srtd onclick=flipSort()></button>
+  <span class=sortgrp><select id=srt class=field title="{{t.sortBy}}" onchange=setSort(this.value)></select>
+  <button class=btn id=srtd onclick=flipSort()></button></span>
   <button class=btn id=allsw onclick=toggleAll() title="{{t.allWhat}}"></button>
  </div>
  <div class="list inset" id=tb></div>
@@ -3023,26 +3159,27 @@ const chart = (rs, cum) => {
   let g = `<line x1=0 x2=${W} y1=${y(max)} y2=${y(max)} stroke="var(--line)"/>`
     + `<text x=0 y=${y(max) - 5} fill="var(--dim)" font-size=10>${fmtAx(max)}</text>`;
   const bars = rs.map((d, i) => {
-    const x = i * bw + bw * .18, w = Math.max(1, bw * .64), o = d[4];
-    const r = Math.min(2, w / 2);
+    const x = i * bw + bw * .24, w = Math.max(1, bw * .52), o = d[4];
+    const r = Math.min(3, w / 2);
     const lbl = rs.length > 20 ? (i % 5 === 0) : true;
     // Скругление только сверху: rect с rx скруглил бы и основание, поэтому
     // верхний сегмент рисуется путём, а нижние — обычными прямоугольниками.
-    const cap = (yy, hh, fill) => hh < .5 ? '' :
+    const cap = (yy, hh, fill, op) => hh < .5 ? '' :
       `<path d="M${x} ${yy + hh}V${yy + r}q0 -${r} ${r} -${r}h${w - 2 * r}`
-      + `q${r} 0 ${r} ${r}V${yy + hh}z" fill="${fill}"/>`;
-    const box = (yy, hh, fill) => hh < .5 ? '' :
-      `<rect x=${x} y=${yy} width=${w} height=${hh} fill="${fill}"/>`;
+      + `q${r} 0 ${r} ${r}V${yy + hh}z" fill="${fill}"${op ? ` opacity="${op}"` : ''}/>`;
+    const box = (yy, hh, fill, op) => hh < .5 ? '' :
+      `<rect x=${x} y=${yy} width=${w} height=${hh} fill="${fill}"${op ? ` opacity="${op}"` : ''}/>`;
     const hu = (d[1] / max) * plot, hd = (d[2] / max) * plot, ho = (o / max) * plot;
     // Скругление достаётся самому верхнему видимому сегменту, а не тому, что
     // сверху по замыслу: «прочее» высотой в полпикселя не рисуется вовсе, и
-    // столбец остался бы с плоским верхом среди скруглённых соседей.
-    const segs = [[ho, 'var(--mut)', y(d[1] + d[2] + o)],
-                  [hu, 'var(--up)', y(d[1] + d[2])],
-                  [hd, 'var(--down)', y(d[2])]];
+    // столбец остался бы с плоским верхом среди скруглённых соседей. Тише не
+    // цветом, а прозрачностью: входящий — главный — остаётся в полную силу.
+    const segs = [[ho, 'var(--mut)', y(d[1] + d[2] + o), .6],
+                  [hu, 'var(--up)', y(d[1] + d[2]), .9],
+                  [hd, 'var(--down)', y(d[2]), null]];
     const first = segs.findIndex(s => s[0] >= .5);
-    const body = segs.map(([h, f, yy], k) =>
-        h < .5 ? '' : k === first ? cap(yy, h, f) : box(yy, h, f)).join('');
+    const body = segs.map(([h, f, yy, op], k) =>
+        h < .5 ? '' : k === first ? cap(yy, h, f, op) : box(yy, h, f, op)).join('');
     return `<g data-i=${i} onmouseenter="hover(${i})" onmouseleave="hover(-1)">`
       + `<title>${d[3]}  ↓ ${fmt(d[2])}  ↑ ${fmt(d[1])}`
       + `${o ? `  ${T.other} ${fmt(o)}` : ''}</title>`
@@ -3752,6 +3889,7 @@ def poller():
 
 def selftest():
     global CONFIG, TUNNELS, TUNNEL_DIR, LEGACY_SUB_URL, LEGACY_SUB_EXCLUDE
+    global SINGBOX_CONFIG
     global save_tunnels
     with tempfile.TemporaryDirectory() as td:
         secret = os.path.join(td, "secret.json")
@@ -3983,6 +4121,97 @@ PersistentKeepalive = 25
         check_quick_config("amneziawg", wg, no_tool)
         raise AssertionError("plain WireGuard config accepted as AmneziaWG")
     except ValueError:
+        pass
+
+    with tempfile.TemporaryDirectory() as td:
+        old_tunnel_dir, TUNNEL_DIR = TUNNEL_DIR, os.path.join(td, "tunnels")
+        old_singbox, SINGBOX_CONFIG = SINGBOX_CONFIG, os.path.join(td, "sing-box.json")
+        try:
+            _ensure_tunnel_dir()
+            uid = "5eb99d66-0000-0000-0000-000000000000"
+            body_a = f"vless://{uid}@a.example:443?security=tls#same"
+            body_b = f"vless://{uid}@b.example:443?security=tls#same"
+            rows = [
+                {"id": "t000000000001", "name": "A", "kind": "subscription",
+                 "enabled": True, "error": "", "nodes": 0},
+                {"id": "t000000000002", "name": "B", "kind": "subscription",
+                 "enabled": True, "error": "", "nodes": 0},
+            ]
+            write_private(tunnel_path(rows[0]["id"], ".json"),
+                          {"url": "https://a.example/sub", "exclude": "",
+                           "body": body_a})
+            write_private(tunnel_path(rows[1]["id"], ".json"),
+                          {"url": "https://b.example/sub", "exclude": "",
+                           "body": body_b})
+            base_cfg = {"route": {"final": "proxy"}, "outbounds": [
+                {"type": "urltest", "tag": "proxy", "outbounds": [],
+                 "tolerance": 42},
+                {"type": "direct", "tag": "direct"},
+                {"type": "vless", "tag": "hand", "server": "hand.example"},
+            ]}
+            combined, counts = build_singbox(rows, base_cfg)
+            assert counts == {"t000000000001": 1, "t000000000002": 1}
+            group = next(o for o in combined["outbounds"] if o["tag"] == "proxy")
+            assert any(t.startswith("sub-t000000000001-") for t in group["outbounds"])
+            assert any(t.startswith("sub-t000000000002-") for t in group["outbounds"])
+            before_b = next(o for o in combined["outbounds"]
+                            if o["tag"].startswith("sub-t000000000002-"))
+            only_b, _ = build_singbox(rows[1:], combined)
+            assert not any(o.get("tag", "").startswith("sub-t000000000001-")
+                           for o in only_b["outbounds"])
+            assert next(o for o in only_b["outbounds"]
+                        if o["tag"].startswith("sub-t000000000002-")) == before_b
+            write_private(tunnel_path(rows[0]["id"], ".json"),
+                          {"url": "https://a.example/sub", "exclude": "",
+                           "body": body_a.replace("a.example", "new.example")})
+            refreshed, _ = build_singbox(rows, combined)
+            assert next(o for o in refreshed["outbounds"]
+                        if o["tag"].startswith("sub-t000000000002-")) == before_b
+
+            assert active_backend(rows) == {
+                "kind": "singbox", "ids": ["t000000000001", "t000000000002"]}
+            quick_row = {"id": "t000000000003", "name": "$(touch /tmp/x)",
+                         "kind": "wireguard", "enabled": True,
+                         "error": "", "nodes": 0}
+            for conflict in (rows + [quick_row], [quick_row, dict(
+                    quick_row, id="t000000000004", kind="amneziawg")]):
+                try:
+                    active_backend(conflict)
+                    raise AssertionError("more than one backend class accepted")
+                except VpnError:
+                    pass
+        finally:
+            TUNNEL_DIR, SINGBOX_CONFIG = old_tunnel_dir, old_singbox
+
+    seen_commands = []
+
+    def runtime(argv, **kwargs):
+        seen_commands.append((argv, kwargs))
+        output = {
+            "wg": "0xca6c\n",
+            "awg": "51820\n",
+            "nft": "meta mark 0x2024 return\nmeta mark 0x2023 accept\n",
+            "systemctl": "active\n",
+            "ip": "7: t000000000003: <POINTOPOINT,UP>\n",
+        }.get(argv[0], "")
+        return subprocess.CompletedProcess(argv, 0, output, "")
+
+    assert backend_mark(quick_row, runtime) == 0xca6c
+    assert backend_mark(dict(quick_row, kind="amneziawg"), runtime) == 51820
+    assert backend_mark({"kind": "singbox", "ids": []}, runtime) == 0x2024
+    assert parse_singbox_mark("meta mark 0x2024 return\nmeta mark 0x2023 accept") == 0x2024
+    assert parse_singbox_mark(
+        "meta mark & 0x0000ffff == 0x00002024 return") == 0x2024
+    assert parse_singbox_mark("meta mark 0x2024 return\nmeta mark 0x2025 return") == 0
+    assert parse_singbox_mark("no mark here") == 0
+    assert backend_state([quick_row], runtime) == {
+        "kind": "wireguard", "active": True}
+    assert all("$(touch" not in " ".join(argv) for argv, _ in seen_commands)
+    assert all(kwargs["shell"] is False for _, kwargs in seen_commands)
+    try:
+        vpn_exec(["sh", "-c", "touch /tmp/x"], runner=runtime)
+        raise AssertionError("arbitrary VPN command accepted")
+    except VpnError:
         pass
 
     assert accrue(0, 100) == 100
