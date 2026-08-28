@@ -245,11 +245,13 @@ def convert(body, warn=lambda s: None, exclude=None, prefix=OWNED, taken=None,
         if rx and rx.search(name):
             warn(f"{name}: исключён / excluded")
             continue
-        tag = tag_for(link, taken, prefix)
-        if label_of(tag, prefix) in skip:
-            warn(f"{name}: снят вручную / turned off by hand")
-            continue
         try:
+            # Inside the try, like everything else that touches one link: a
+            # malformed one is one node lost, never the whole subscription.
+            tag = tag_for(link, taken, prefix)
+            if label_of(tag, prefix) in skip:
+                warn(f"{name}: снят вручную / turned off by hand")
+                continue
             outs.append(outbound(link, tag))
         except Unsupported as e:
             warn(f"{urlsplit(link).scheme}://{urlsplit(link).hostname}: {e}")

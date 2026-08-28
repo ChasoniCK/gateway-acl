@@ -112,6 +112,7 @@ if [ "$UILANG" = en ]; then
   M_PACWAIT="pacman's database is locked — waiting up to a minute for whoever has it"
   M_PACBUSY="still locked and a pacman is running: let that one finish and run this again"
   M_PACSTALE="still locked and no pacman is running — a killed one left it behind: sudo rm /var/lib/pacman/db.lck"
+  M_PACOLD="every mirror answered 404: the package database names a version they no longer carry. Upgrade the system first — sudo pacman -Syu — then run this again. (-Sy on its own is a partial upgrade; do not.)"
   M_AWGFAIL="not installed — AmneziaWG profiles will not come up. Build: https://github.com/amnezia-vpn/amneziawg-tools ; system:"
   M_ONLYLIST="After this, ONLY the devices on the list will route through this host."
   M_SEEN="Currently visible on the network:"
@@ -180,6 +181,7 @@ else
   M_PACWAIT="база pacman заперта — жду до минуты того, кто её занял"
   M_PACBUSY="всё ещё заперта, и pacman запущен: дождитесь его и запустите установку снова"
   M_PACSTALE="всё ещё заперта, а pacman не запущен — замок остался от убитого: sudo rm /var/lib/pacman/db.lck"
+  M_PACOLD="все зеркала ответили 404: база пакетов называет версию, которой на них уже нет. Сначала обновите систему — sudo pacman -Syu — и запустите установщик снова. (Один -Sy — это частичное обновление, так не надо.)"
   M_AWGFAIL="не установлен — профили AmneziaWG не поднимутся. Собрать: https://github.com/amnezia-vpn/amneziawg-tools ; система:"
   M_ONLYLIST="После установки через этот хост пойдут ТОЛЬКО те, кто в списке."
   M_SEEN="Сейчас в сети видно:"
@@ -461,9 +463,21 @@ pac_wait() { # 0 when pacman's database is free, 1 after saying why it is not
 }
 
 pkg_install() { # pkg_install pkg... -> quietly, and never fatal
+  local out
   if   command -v pacman  >/dev/null; then
     pac_wait || return 1
-    pacman -S --needed --noconfirm "$@" >/dev/null 2>&1
+    # LC_ALL=C so the classification below reads pacman's own words and not a
+    # translation of them. The output is discarded either way.
+    if out=$(LC_ALL=C pacman -S --needed --noconfirm "$@" 2>&1); then return 0; fi
+    # Every mirror answering 404 is not a missing package: it is a sync
+    # database still naming a version the mirrors have already replaced.
+    # Nothing here may fix that — `pacman -Sy` on its own is the partial
+    # upgrade that breaks Arch systems — so it is named once, with the command
+    # that does fix it, instead of twenty-four mirror errors and a shrug.
+    case "$out" in
+      *404*|*"failed retrieving file"*|*"failed to retrieve"*) say "$M_PACOLD" ;;
+    esac
+    return 1
   elif command -v apt-get >/dev/null; then
     DEBIAN_FRONTEND=noninteractive apt-get install -y "$@" >/dev/null 2>&1
   else return 1; fi

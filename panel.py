@@ -61,7 +61,7 @@ from urllib.parse import urlparse, parse_qs
 # it against the newest tag on GitHub, so a forgotten bump makes every install
 # claim to be older than it is and show a banner that never goes away. CI
 # refuses a tag push where the two disagree.
-VERSION = "1.5.4"
+VERSION = "1.5.5"
 RELEASES_URL = "https://api.github.com/repos/ChasoniCK/gateway-acl/releases/latest"
 RELEASES_PAGE = "https://github.com/ChasoniCK/gateway-acl/releases/latest"
 # The one address the update button may ever download from. The repository is
@@ -2509,8 +2509,24 @@ def _start_backend(backend, runner=None):
     else:
         argv = [QUICK_TOOLS[backend["kind"]], "up",
                 tunnel_path(backend["id"], ".conf")]
-    if vpn_exec(argv, runner=runner).returncode:
+    result = vpn_exec(argv, runner=runner)
+    if result.returncode:
+        _log_vpn(argv, result)
         raise VpnError("start-failed")
+
+
+def _log_vpn(argv, result):
+    """Why a tunnel command failed, into the journal and nowhere else.
+
+    The browser gets a two-word code on purpose, and a two-word code is no use
+    to whoever has to fix it: "не удалось запустить туннель" is the same
+    sentence whether the unit is missing, the config was rejected or the tun
+    never appeared. The journal is root-only, so the command and its own
+    complaint go there.
+    """
+    said = " ".join(str(result.stderr or result.stdout or "").split())[:300]
+    print(f"gateway-acl: {' '.join(argv)} -> {result.returncode}: {said}",
+          file=sys.stderr, flush=True)
 
 
 def _backend_up(backend, runner=None):
@@ -2539,6 +2555,22 @@ def _backend_up(backend, runner=None):
         return False
 
 
+def _why_down(backend, runner=None):
+    """One more reading, kept only for the journal, after patience ran out."""
+    with contextlib.suppress(Exception):
+        if backend["kind"] == "singbox":
+            for argv in (["systemctl", "is-active", "sing-box"],
+                         ["systemctl", "status", "sing-box"],
+                         ["ip", "-j", "route", "show", "table", "all", "default"]):
+                _log_vpn(argv, vpn_exec(argv, runner=runner))
+        else:
+            tid = check_tunnel_id(backend["id"])
+            for argv in (["ip", "link", "show", "dev", tid],
+                         ["ip", "-j", "route", "show", "table", "all",
+                          "dev", tid]):
+                _log_vpn(argv, vpn_exec(argv, runner=runner))
+
+
 def _check_backend(backend, runner=None, wait=0):
     """`wait` seconds of patience, and only where something was just started.
 
@@ -2548,6 +2580,11 @@ def _check_backend(backend, runner=None, wait=0):
     if not backend:
         return
     if not _wait_for(lambda: _backend_up(backend, runner), wait):
+        # Only on the way to failing, and only when there was patience to
+        # spend: this is the path a switch takes, not the poll path, and a
+        # health check that ran out has nothing new to say.
+        if wait:
+            _why_down(backend, runner)
         raise VpnError("start-failed")
 
 
