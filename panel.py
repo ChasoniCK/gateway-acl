@@ -3230,14 +3230,31 @@ def vpn_action(action, body, runner=None, applier=None, fetcher=None):
 
 
 def _clean_tunnel_orphans(rows):
+    """Delete the secrets of profiles the catalog no longer names, and no others.
+
+    `rows` is what load_tunnels() could read, and it silently drops a row it
+    could not: a kind a newer version wrote, an id or a name this one rejects.
+    Going by that list alone meant such a row's file was not "expected", so it
+    was deleted — a subscription link with its token, or a WireGuard private
+    key, gone on the next start of the service, with nothing said and nothing
+    to put back. Rolling the panel back one version was enough to do it.
+
+    So the catalog is also read raw, and every id it names is spoken for
+    whether its row could be parsed or not. What is deleted is a file no line
+    of the catalog mentions at all.
+    """
     if not os.path.isdir(TUNNEL_DIR):
         return
     expected = {row["id"] + (".json" if row["kind"] == "subscription" else ".conf")
                 for row in rows}
+    catalog = _load_json(TUNNELS, [])
+    claimed = {str(row.get("id")) for row in catalog
+               if isinstance(row, dict) and row.get("id")} \
+        if isinstance(catalog, list) else set()
     for name in os.listdir(TUNNEL_DIR):
         path = os.path.join(TUNNEL_DIR, name)
         if re.fullmatch(r"t[0-9a-f]{12}\.(?:json|conf)", name):
-            if name not in expected:
+            if name not in expected and name.split(".", 1)[0] not in claimed:
                 with contextlib.suppress(OSError):
                     os.unlink(path)
         elif re.fullmatch(r"\.t[0-9a-f]{12}\.(?:json|conf)\..+", name):
@@ -7361,6 +7378,29 @@ PersistentKeepalive = 25
             assert not row["enabled"] and row["error"] == "missing-secret"
             assert _vpn_closed and gates[-1]
             assert not os.path.exists(orphan) and os.path.exists(keep)
+
+            # A row load_tunnels() cannot read is still a row that names a
+            # profile. Going by the parsed list alone deleted its secret — a
+            # subscription link with its token, or a private key — on the next
+            # start, with nothing said. Rolling the panel back one version, to
+            # one that does not know a `kind`, was enough to do it.
+            after_reconcile = _load_json(TUNNELS, [])
+            unreadable = tunnel_path("t000000000013", ".json")
+            write_private(unreadable, {"url": "https://provider.example/t",
+                                       "body": "x"})
+            gone = tunnel_path("t000000000014", ".json")
+            write_private(gone, {"url": "https://provider.example/u", "body": "x"})
+            write_private(TUNNELS, [{"id": "t000000000013", "name": "future",
+                                     "kind": "hysteria2", "enabled": True}])
+            assert load_tunnels() == [], "the row is unreadable, as intended"
+            _clean_tunnel_orphans(load_tunnels())
+            assert os.path.exists(unreadable), \
+                "a named profile's secret must survive a row that will not parse"
+            assert not os.path.exists(gone), \
+                "and a file the catalog names nowhere must still go"
+            os.unlink(unreadable)
+            write_private(TUNNELS, after_reconcile)
+
             vpn_poll(runner=fake, applier=startup_gate)
             assert _vpn_closed, "poll must not reopen a missing managed backend"
 
