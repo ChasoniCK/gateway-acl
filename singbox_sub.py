@@ -69,7 +69,7 @@ def _b64(s):
     return base64.b64decode(s + "=" * (-len(s) % 4), validate=True)
 
 
-def fetch(url, timeout=TIMEOUT, limit=SUB_BODY_MAX):
+def fetch(url, timeout=TIMEOUT, limit=SUB_BODY_MAX, with_headers=False):
     """The subscription body. The User-Agent matters, because providers hand out
     Clash YAML to some clients and the plain list to others."""
     p = urlsplit(url)
@@ -96,7 +96,10 @@ def fetch(url, timeout=TIMEOUT, limit=SUB_BODY_MAX):
                 raise ValueError("subscription download timed out")
             if len(body) > limit:
                 raise ValueError("subscription response is too large")
-            return body.decode("utf-8", "replace")
+            text = body.decode("utf-8", "replace")
+            if with_headers:
+                return text, {str(k).lower(): str(v) for k, v in r.headers.items()}
+            return text
     except ValueError:
         raise
     except Exception:

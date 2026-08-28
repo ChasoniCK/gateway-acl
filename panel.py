@@ -14,12 +14,12 @@ two are not one file.
 The kernel itself records whoever knocks without being allowed, into the
 dynamic `blocked` set with a timeout. That is the unknown-devices list.
 
-The only request this program ever makes to the internet is a check of the
-latest release tag on GitHub: once a day, once more whenever the settings are
-saved, and whenever the check button is pressed. `"update_check": false` turns
-the daily one off. The button asks anyway, but no oftener than once a minute.
-`"update_notify"` decides whether the page that finds a release also raises a
-browser notification about it.
+The program reaches out for two explicit jobs: release checks against GitHub,
+and subscription downloads/probes configured in the tunnel settings. GitHub is
+asked once a day, once more whenever the settings are saved, and whenever its
+check button is pressed. `"update_check": false` turns the daily one off. The
+button asks anyway, but no oftener than once a minute. `"update_notify"`
+decides whether the page that finds a release also raises a browser notification.
 
 Run as root: nft is required.
   --selftest        checks, never touches the network
@@ -61,7 +61,7 @@ from urllib.parse import urlparse, parse_qs
 # it against the newest tag on GitHub, so a forgotten bump makes every install
 # claim to be older than it is and show a banner that never goes away. CI
 # refuses a tag push where the two disagree.
-VERSION = "1.5.7"
+VERSION = "1.5.8"
 RELEASES_URL = "https://api.github.com/repos/ChasoniCK/gateway-acl/releases/latest"
 RELEASES_PAGE = "https://github.com/ChasoniCK/gateway-acl/releases/latest"
 # The one address the update button may ever download from. The repository is
@@ -148,6 +148,10 @@ _vpn_lock = threading.RLock()
 # One scratch interface and one temporary config serve every probe, so two at
 # once would be two halves of each. Never taken while _vpn_lock is held.
 _probe_lock = threading.Lock()
+# One support bundle at a time. It is ~20 processes and a couple of journal
+# reads, and a second click while the first is still running would only be two
+# of everything on a machine that is already being asked what is wrong with it.
+_diag_lock = threading.Lock()
 _vpn_closed = False
 _state = {"at": 0.0, "month": None, "val": None}   # the last answer /api gave
 _sessions = {}          # digest of the token -> when it expires
@@ -390,9 +394,14 @@ STRINGS = {
         "vpnDisable": "выключить",
         "vpnRefresh": "обновить",
         "vpnCheck": "проверить",
+        "vpnCheckAll": "проверить все",
+        "vpnCheckingAll": "проверяю {a} из {b}",
         "vpnDelete": "удалить",
         "vpnProbeOk": "проверка пройдена",
         "vpnProbeNodes": "проверка: отвечают {a} из {b}",
+        "vpnProbeFastest": "быстрее всего: {n} мс",
+        "vpnProbeDuration": "проверка заняла {n} мс",
+        "vpnProbeTime": "проверено {t}",
         "vpnProbeWhat": "Проверка ничего не переключает. Подписка собирается "
                         "в отдельный конфиг и отдаётся sing-box на разбор, "
                         "узлы опрашиваются по TCP. WireGuard поднимается на "
@@ -410,6 +419,7 @@ STRINGS = {
         "vpnNodesSave": "сохранить выбор",
         "vpnNodeUp": "отвечает",
         "vpnNodeDown": "молчит",
+        "vpnNodeMs": "{n} мс",
         "vpnNodesWhat": "Снятые узлы не попадают в конфиг, поэтому группа не "
                         "сможет их выбрать. Отметки «отвечает» и «молчит» "
                         "остались от последней проверки; узлы, до которых она "
@@ -417,6 +427,12 @@ STRINGS = {
                         "остаться.",
         "vpnConfirmDisable": "Выключить последний активный туннель? Трафик пойдёт напрямую.",
         "vpnConfirmDelete": "Удалить этот туннель и его сохранённые данные? Если он активен, подключение будет переключено.",
+        "vpnAuto": "автообновление, ч",
+        "vpnAutoOff": "автообновление выключено",
+        "vpnAutoEvery": "обновление каждые {n} ч",
+        "vpnProviderEvery": "сервис рекомендует {n} ч",
+        "vpnUpdated": "обновлено {t}",
+        "vpnRefreshFailed": "последнее автообновление не удалось",
         "vpnIpv6": "В конфиге нет полного маршрута IPv6",
         "vpnHint": "Новый туннель сохраняется выключенным. Подписки можно "
                    "включать вместе. WireGuard или AmneziaWG заменяет их и "
@@ -454,6 +470,10 @@ STRINGS = {
                       "не чаще раза в минуту, и всё равно пореже: GitHub "
                       "считает запросы с адреса, 60 в час. Если их выбрать, "
                       "он перестанет отвечать и суточной проверке.",
+        "diagCopy": "скопировать диагностику",
+        "diagDownload": "скачать диагностику",
+        "diagCopied": "Диагностика скопирована. Секреты удалены.",
+        "diagFailed": "Не удалось собрать диагностику.",
         "sPoll": "опрос счётчиков, с",
         "sKeep": "хранить по дням, мес.",
         "sKeepWhat": "Сколько месяцев держать разбивку по дням. Что старше, "
@@ -500,6 +520,8 @@ STRINGS = {
         "noHours": "часы копятся с запуска панели, подождите немного",
         "showAll": "показать все",
         "showInChart": "Показать в графике",
+        "sparkPeak": "пик {n} за день",
+        "sparkNone": "за эти дни трафика не было",
         "sysTitle": "Машина",
         "sCpu": "процессор",
         "sMem": "память",
@@ -680,9 +702,14 @@ STRINGS = {
         "vpnDisable": "disable",
         "vpnRefresh": "refresh",
         "vpnCheck": "check",
+        "vpnCheckAll": "check all",
+        "vpnCheckingAll": "checking {a} of {b}",
         "vpnDelete": "delete",
         "vpnProbeOk": "the check passed",
         "vpnProbeNodes": "checked: {a} of {b} answered",
+        "vpnProbeFastest": "fastest: {n} ms",
+        "vpnProbeDuration": "check took {n} ms",
+        "vpnProbeTime": "checked {t}",
         "vpnProbeWhat": "A check switches nothing. The subscription is built "
                         "into a config of its own and handed to sing-box to "
                         "read, then its nodes are knocked on over TCP. A "
@@ -701,12 +728,19 @@ STRINGS = {
         "vpnNodesSave": "save the selection",
         "vpnNodeUp": "answers",
         "vpnNodeDown": "silent",
+        "vpnNodeMs": "{n} ms",
         "vpnNodesWhat": "A node turned off here never reaches the config, so "
                         "the group cannot pick it. \"answers\" and \"silent\" "
                         "come from the last check; nodes it did not reach have "
                         "no mark. At least one node has to stay.",
         "vpnConfirmDisable": "Disable the last active tunnel? Traffic will go direct.",
         "vpnConfirmDelete": "Delete this tunnel and its saved data? If it is active, the connection will switch.",
+        "vpnAuto": "auto-refresh, h",
+        "vpnAutoOff": "auto-refresh is off",
+        "vpnAutoEvery": "refresh every {n} h",
+        "vpnProviderEvery": "provider recommends {n} h",
+        "vpnUpdated": "updated {t}",
+        "vpnRefreshFailed": "the last automatic refresh failed",
         "vpnIpv6": "The configuration has no full IPv6 route",
         "vpnHint": "A new tunnel is saved turned off. Subscriptions can be "
                    "enabled together. WireGuard or AmneziaWG replaces them and "
@@ -744,6 +778,10 @@ STRINGS = {
                       "a minute at most, and rarely even then. GitHub counts "
                       "requests per address, 60 an hour. Spend them and the "
                       "daily check stops getting an answer too.",
+        "diagCopy": "copy diagnostics",
+        "diagDownload": "download diagnostics",
+        "diagCopied": "Diagnostics copied. Secrets were removed.",
+        "diagFailed": "Diagnostics could not be collected.",
         "sPoll": "counter poll, s",
         "sKeep": "keep day by day, months",
         "sKeepWhat": "How many months keep their day-by-day breakdown. Older "
@@ -790,6 +828,8 @@ STRINGS = {
         "noHours": "hours accrue from the panel's start, give it a moment",
         "showAll": "show all",
         "showInChart": "Show in chart",
+        "sparkPeak": "peak {n} a day",
+        "sparkNone": "no traffic on these days",
         "sysTitle": "Machine",
         "sCpu": "cpu",
         "sMem": "memory",
@@ -1898,6 +1938,11 @@ VPN_MAX = 128 << 10
 SUB_URL_MAX = 4096
 SUB_LABEL_MAX = 128
 SUB_NODES_MAX = 1024
+# `Profile-Update-Interval` is an integer count of hours. A year is already a
+# manual refresh in practice, but accepting it keeps the provider convention's
+# common upper bound without letting a damaged value turn into a giant epoch.
+SUB_REFRESH_MAX = 8760
+AUTO_REFRESH_RETRY = 3600
 TUNNEL_ID_RE = re.compile(r"t[0-9a-f]{12}\Z")
 TUNNEL_KINDS = ("subscription", "wireguard", "amneziawg")
 TUNNEL_SUFFIXES = (".json", ".conf")
@@ -2006,6 +2051,28 @@ def _tunnel_row(row):
              # answered. Never a reason to change the ruleset: a profile
              # nobody enabled is allowed to be unreachable.
              "probe": probe, "reach": reach}
+    for key in ("probe_at", "probe_ms"):
+        try:
+            value = max(0, int(row.get(key) or 0))
+        except (TypeError, ValueError):
+            value = 0
+        if value:
+            clean[key] = value
+    if kind == "subscription":
+        for key in ("refresh_hours", "provider_hours"):
+            try:
+                clean[key] = check_refresh_hours(row.get(key, 0))
+            except ValueError:
+                clean[key] = 0
+        clean["refresh_manual"] = bool(row.get("refresh_manual"))
+        for key in ("updated_at", "refresh_at"):
+            try:
+                clean[key] = max(0, int(row.get(key) or 0))
+            except (TypeError, ValueError):
+                clean[key] = 0
+        refresh_error = str(row.get("refresh_error") or "")
+        clean["refresh_error"] = refresh_error \
+            if refresh_error in SAFE_VPN_ERRORS else "invalid-state"
     for key in ("verified", "ipv6"):
         if key in row:
             clean[key] = bool(row[key])
@@ -2115,6 +2182,86 @@ def check_subscription(url, exclude):
     return url, exclude
 
 
+def check_refresh_hours(value):
+    # `.strip()`, because a header value is allowed to carry the space after
+    # its colon and `"6 ".isdigit()` is False: without it a provider that
+    # writes one turns its own recommendation into "no schedule at all".
+    text = "" if isinstance(value, bool) or value is None else str(value).strip()
+    if not text.isdigit():
+        raise ValueError("invalid subscription refresh interval")
+    hours = int(text)
+    if not 0 <= hours <= SUB_REFRESH_MAX:
+        raise ValueError("invalid subscription refresh interval")
+    return hours
+
+
+def parse_refresh_hours(headers):
+    """Provider-requested refresh period, in hours; 0 when absent or invalid."""
+    try:
+        values = {str(k).lower(): v for k, v in headers.items()}
+        hours = check_refresh_hours(values.get("profile-update-interval"))
+        return hours if hours else 0
+    except (AttributeError, TypeError, ValueError):
+        return 0
+
+
+def fetch_subscription(url, fetcher=None):
+    """Body plus the only response header the panel is allowed to retain."""
+    result = fetcher(url) if fetcher else singbox_sub.fetch(url, with_headers=True)
+    if isinstance(result, tuple) and len(result) == 2:
+        body, headers = result
+    else:                              # old/test fetchers return the body alone
+        body, headers = result, {}
+    return body, parse_refresh_hours(headers)
+
+
+def refresh_schedule(row, provider_hours, now=None):
+    """Schedule after a successful download, preserving a person's override."""
+    now = int(time.time() if now is None else now)
+    old_provider = int(row.get("provider_hours") or 0)
+    provider = provider_hours or old_provider
+    manual = bool(row.get("refresh_manual"))
+    hours = int(row.get("refresh_hours") or 0) if manual else provider
+    return {"refresh_hours": hours, "provider_hours": provider,
+            "refresh_manual": manual, "updated_at": now,
+            "refresh_at": now, "refresh_error": ""}
+
+
+def refresh_due(row, now=None):
+    now = time.time() if now is None else now
+    hours = int(row.get("refresh_hours") or 0)
+    if row.get("kind") != "subscription" or not hours:
+        return False
+    delay = AUTO_REFRESH_RETRY if row.get("refresh_error") else hours * 3600
+    return now >= int(row.get("refresh_at") or row.get("updated_at") or 0) + delay
+
+
+def _probe_subject(row):
+    """What a probe is a reading *of*: the outbounds a subscription is picked
+    down to, or a quick profile's own config.
+
+    Not the file it is kept in. A refresh that only brought the cached body up
+    to date — the traffic-counter node a provider rewrites every fetch — left
+    the running config alone, and a reading of it is still true.
+    """
+    with contextlib.suppress(Exception):
+        if row["kind"] == "subscription":
+            return sub_convert(row["id"], load_subscription_secret(row["id"]))
+        return _read_quick_config(row)
+    return None
+
+
+def _forget_probe(row):
+    """Drop a reading that measured a set of nodes this profile no longer is.
+
+    All four fields together, because a summary without its timestamp, or a
+    timestamp without its summary, is a line the page has to guess at.
+    """
+    row["probe"], row["reach"] = "", 0
+    row.pop("probe_at", None)
+    row.pop("probe_ms", None)
+
+
 def _skip_list(value):
     """The stored by-hand selection, read defensively off a file on disk."""
     if not isinstance(value, list):
@@ -2180,6 +2327,7 @@ def sub_nodes(tid, secret):
     """
     skip = set(_skip_list(secret.get("skip")))
     up = secret.get("up") if isinstance(secret.get("up"), dict) else {}
+    latency = secret.get("ms") if isinstance(secret.get("ms"), dict) else {}
     prefix, nodes = sub_prefix(tid), []
     for n, out in enumerate(sub_convert(tid, secret, skip=()), 1):
         label = singbox_sub.label_of(out["tag"], prefix)
@@ -2187,7 +2335,11 @@ def sub_nodes(tid, secret):
         named = server and label.rsplit(" ", 1)[0] != server and label != server
         nodes.append({"id": node_id(label), "name": label if named else f"#{n}",
                       "on": label not in skip,
-                      "up": bool(up[label]) if label in up else None})
+                      "up": bool(up[label]) if label in up else None,
+                      "ms": (max(1, int(latency[label]))
+                             if label in latency and bool(up.get(label))
+                             and isinstance(latency[label], (int, float))
+                             and latency[label] > 0 else None)})
     return nodes
 
 
@@ -2361,7 +2513,7 @@ def vpn_add(body, runner=None, fetcher=None):
             try:
                 url, exclude = check_subscription(body.get("url"),
                                                   body.get("exclude"))
-                content = (fetcher or singbox_sub.fetch)(url)
+                content, provider_hours = fetch_subscription(url, fetcher)
                 if (not isinstance(content, str)
                         or len(content.encode("utf-8")) > singbox_sub.SUB_BODY_MAX):
                     raise ValueError
@@ -2374,6 +2526,7 @@ def vpn_add(body, runner=None, fetcher=None):
             # A new subscription starts with every node it offers turned on;
             # picking among them is a separate, deliberate act.
             row["nodes"] = len(outs)
+            row.update(refresh_schedule(row, provider_hours))
             write_private(tunnel_path(tid, ".json"),
                           {"url": url, "exclude": exclude, "body": content,
                            "skip": []})
@@ -2744,11 +2897,18 @@ def vpn_delete(tid, runner=None, applier=None):
         return True
 
 
-def vpn_refresh(tid, runner=None, applier=None, fetcher=None):
+def vpn_refresh(tid, runner=None, applier=None, fetcher=None, now=None):
+    """Download the subscription again and commit it if it turned into
+    something else.
+
+    The download is deliberately outside `_vpn_lock`. Twenty seconds of
+    somebody else's server must not be twenty seconds of a panel that answers
+    nothing, and the poller now takes this path on a tick of its own, so
+    holding the lock across it would make every button queue behind the poller
+    rather than the other way round.
+    """
     with _vpn_lock:
-        old_rows = load_tunnels()
-        rows = [dict(row) for row in old_rows]
-        target = _find_tunnel(rows, tid)
+        target = _find_tunnel(load_tunnels(), tid)
         if target["kind"] != "subscription":
             raise VpnError("validation-failed")
         path = tunnel_path(target["id"], ".json")
@@ -2756,13 +2916,32 @@ def vpn_refresh(tid, runner=None, applier=None, fetcher=None):
         if snapshot is None:
             raise VpnError("missing-secret")
         try:
+            cached = json.loads(snapshot[0])
+            url = check_subscription(cached.get("url"), cached.get("exclude"))[0]
+        except Exception:
+            raise VpnError("validation-failed") from None
+    try:
+        content, provider_hours = fetch_subscription(url, fetcher)
+        if (not isinstance(content, str)
+                or len(content.encode("utf-8")) > singbox_sub.SUB_BODY_MAX):
+            raise ValueError
+    except Exception:
+        raise VpnError("validation-failed") from None
+    with _vpn_lock:
+        # Read again, all of it: the node selection, and the profile itself,
+        # may have moved while the socket was waiting.
+        old_rows = load_tunnels()
+        rows = [dict(row) for row in old_rows]
+        target = _find_tunnel(rows, tid)
+        if target["kind"] != "subscription":
+            raise VpnError("validation-failed")
+        snapshot = _file_snapshot(path)
+        if snapshot is None:
+            raise VpnError("missing-secret")
+        try:
             old_secret = json.loads(snapshot[0])
             url, exclude = check_subscription(old_secret.get("url"),
                                               old_secret.get("exclude"))
-            content = (fetcher or singbox_sub.fetch)(url)
-            if (not isinstance(content, str)
-                    or len(content.encode("utf-8")) > singbox_sub.SUB_BODY_MAX):
-                raise ValueError
             fresh_secret = {"url": url, "exclude": exclude, "body": content}
             # The by-hand selection survives a refresh, which is the point of
             # keying it on the label rather than on a position in the list. But
@@ -2776,11 +2955,38 @@ def vpn_refresh(tid, runner=None, applier=None, fetcher=None):
             raise VpnError("validation-failed") from None
         if not outs:
             raise VpnError("validation-failed")
+        # What decides whether anything is committed is the outbounds this
+        # turned into, never the bytes they arrived as. Providers put a
+        # "traffic left" or "expires on" pseudo-node in the list, so the body
+        # differs on *every* fetch; comparing bodies meant closing transit and
+        # restarting sing-box on the provider's schedule, unattended, for a
+        # config that came out identical. A cache too damaged to convert is a
+        # change, because a refresh is how somebody repairs one.
+        try:
+            was = sub_convert(target["id"], old_secret)
+        except Exception:
+            was = None
+        target.update(refresh_schedule(target, provider_hours, now))
+        # The profile was downloaded and read: whatever it failed at last time
+        # is no longer what is known about it. Pressing "refresh" on a stuck
+        # row is the whole reason somebody presses it.
+        target["error"] = ""
+        if outs == was:
+            try:
+                if content != old_secret.get("body"):
+                    write_private(path, dict(old_secret, url=url,
+                                             exclude=exclude, body=content,
+                                             skip=skip))
+                save_tunnels(rows)
+            except Exception:
+                _restore_file(path, snapshot)
+                raise VpnError("start-failed") from None
+            return target
         secret = dict(fresh_secret, skip=skip)
-        target["nodes"], target["error"] = len(outs), ""
+        target["nodes"] = len(outs)
         # The node list is a different one now, so the last probe measured a
         # subscription that no longer exists.
-        target["probe"], target["reach"] = "", 0
+        _forget_probe(target)
         if not target["enabled"]:
             try:
                 write_private(path, secret)
@@ -2801,12 +3007,58 @@ def vpn_refresh(tid, runner=None, applier=None, fetcher=None):
         return _find_tunnel(committed, tid)
 
 
+def vpn_schedule(tid, hours, now=None):
+    """Set a person's interval. Zero means refresh only by hand."""
+    hours = check_refresh_hours(hours)
+    with _vpn_lock:
+        rows = load_tunnels()
+        target = _find_tunnel(rows, tid)
+        if target["kind"] != "subscription":
+            raise VpnError("validation-failed")
+        target["refresh_hours"] = hours
+        target["refresh_manual"] = True
+        target["refresh_at"] = int(time.time() if now is None else now)
+        target["refresh_error"] = ""
+        try:
+            save_tunnels(rows)
+        except Exception:
+            raise VpnError("start-failed") from None
+        return target
+
+
+def vpn_auto_refresh(now=None, runner=None, applier=None, fetcher=None):
+    """Refresh at most one due subscription on a poller's tick."""
+    now = int(time.time() if now is None else now)
+    with _vpn_lock:
+        due = next((row["id"] for row in load_tunnels()
+                    if refresh_due(row, now)), None)
+    if due is None:
+        return False
+    # ponytail: one download per tick bounds poll latency; the next due profile
+    # follows on the next tick if a fleet ever grows large enough to queue.
+    try:
+        vpn_refresh(due, runner, applier, fetcher, now)
+    except Exception as e:
+        with contextlib.suppress(Exception), _vpn_lock:
+            rows = load_tunnels()
+            with contextlib.suppress(VpnError):
+                row = _find_tunnel(rows, due)
+                code = str(e) if isinstance(e, VpnError) else "validation-failed"
+                row["refresh_at"] = now
+                row["refresh_error"] = code if code in SAFE_VPN_ERRORS \
+                    else "validation-failed"
+                save_tunnels(rows)
+    return True
+
+
 def vpn_action(action, body, runner=None, applier=None, fetcher=None):
     actions = {"add": lambda: vpn_add(body, runner, fetcher),
                "enable": lambda: vpn_enable(body.get("id"), runner, applier),
                "disable": lambda: vpn_disable(body.get("id"), runner, applier),
                "refresh": lambda: vpn_refresh(body.get("id"), runner, applier,
                                                 fetcher),
+               "schedule": lambda: vpn_schedule(body.get("id"),
+                                                  body.get("hours")),
                # The only one that neither starts nor stops anything, so it is
                # the only one that takes no applier.
                "check": lambda: vpn_check(body.get("id"), runner),
@@ -3113,13 +3365,14 @@ def quick_address(text):
 
 
 def probe_tcp(host, port, timeout=None):
-    """One TCP connection, opened and dropped. Reachability, not a handshake."""
+    """TCP connect time in milliseconds, or None. Reachability, not a handshake."""
     timeout = PROBE_TIMEOUT if timeout is None else timeout
+    started = time.monotonic()
     try:
         with socket.create_connection((str(host), int(port)), timeout):
-            return True
+            return max(1, round((time.monotonic() - started) * 1000))
     except (OSError, ValueError, TypeError, OverflowError):
-        return False
+        return None
 
 
 def probe_nodes(outs, prober=None):
@@ -3142,17 +3395,27 @@ def probe_nodes(outs, prober=None):
             seen[target] = None
             targets.append(target)
     if not targets:
-        return 0, 0, {}
+        return 0, 0, {}, {}
     with futures.ThreadPoolExecutor(max_workers=PROBE_WORKERS) as pool:
-        answers = list(pool.map(lambda t: bool(prober(*t)), targets))
-    seen.update(zip(targets, answers))
+        answers = list(pool.map(lambda t: prober(*t), targets))
+    readings = []
+    for answer in answers:
+        ok = bool(answer)
+        ms = int(answer) if ok and not isinstance(answer, bool) \
+            and isinstance(answer, (int, float)) and answer > 0 else None
+        readings.append((ok, ms))
+    seen.update(zip(targets, readings))
     # Back to the nodes: several of them share one address, and the one
     # connection made for it is the answer for all of them. A node past the cap
     # has no entry rather than a made-up one.
-    by_tag = {out["tag"]: seen[(out["server"], out["server_port"])]
+    by_tag = {out["tag"]: seen[(out["server"], out["server_port"])][0]
               for out in outs
-              if seen.get((out.get("server"), out.get("server_port"))) is not None}
-    return sum(answers), len(targets), by_tag
+              if (out.get("server"), out.get("server_port")) in seen}
+    ms_by_tag = {out["tag"]: seen[(out["server"], out["server_port"])][1]
+                 for out in outs
+                 if (out.get("server"), out.get("server_port")) in seen
+                 and seen[(out["server"], out["server_port"])][1] is not None}
+    return sum(ok for ok, _ in readings), len(targets), by_tag, ms_by_tag
 
 
 def _probe_subscription(row, runner=None, prober=None):
@@ -3181,12 +3444,16 @@ def _probe_subscription(row, runner=None, prober=None):
     # nodes nobody chose. Otherwise "отвечают 24 из 60" would be the answer
     # for a subscription where all sixty work.
     chosen = {out["tag"] for out in picked}
-    _, _, by_tag = probe_nodes(
+    _, _, by_tag, ms_by_tag = probe_nodes(
         picked + [out for out in outs if out["tag"] not in chosen], prober)
     reach = sum(1 for tag in chosen if by_tag.get(tag))
     prefix = sub_prefix(tid)
     up = {singbox_sub.label_of(tag, prefix): ok for tag, ok in by_tag.items()}
-    return ("ok" if reach else "unreachable"), reach, len(picked), up
+    latency = {singbox_sub.label_of(tag, prefix): ms
+               for tag, ms in ms_by_tag.items()}
+    fastest = min((ms for tag, ms in ms_by_tag.items() if tag in chosen),
+                  default=0)
+    return ("ok" if reach else "unreachable"), reach, len(picked), up, latency, fastest
 
 
 def _probe_link(kind, stripped, address, runner=None, sender=None, wait=None):
@@ -3311,7 +3578,7 @@ def vpn_node_list(tid):
         raise VpnError("validation-failed") from None
 
 
-def _remember_probe(tid, up):
+def _remember_probe(tid, up, latency=None):
     """Fold one probe's per-node result into the stored secret, nothing else.
 
     Re-read and merged rather than written from the copy the probe was holding.
@@ -3323,7 +3590,9 @@ def _remember_probe(tid, up):
         secret = load_subscription_secret(tid)
         offered = set(sub_labels(tid, secret))
         kept = {label: bool(ok) for label, ok in up.items() if label in offered}
-        write_private(tunnel_path(tid, ".json"), dict(secret, up=kept))
+        ms = {label: max(1, int(value)) for label, value in (latency or {}).items()
+              if label in offered and isinstance(value, (int, float)) and value > 0}
+        write_private(tunnel_path(tid, ".json"), dict(secret, up=kept, ms=ms))
 
 
 def vpn_nodes(tid, ids, runner=None, applier=None):
@@ -3364,7 +3633,7 @@ def vpn_nodes(tid, ids, runner=None, applier=None):
         target["nodes"], target["error"] = len(outs), ""
         # The summary counted a different set of nodes; the per-node readings
         # in the secret are still true and are what the next choice is made on.
-        target["probe"], target["reach"] = "", 0
+        _forget_probe(target)
         if not target["enabled"]:
             try:
                 write_private(path, secret)
@@ -3397,15 +3666,26 @@ def vpn_check(tid, runner=None, prober=None, sender=None):
     """
     with _vpn_lock:
         target = dict(_find_tunnel(load_tunnels(), tid))
-    reach = nodes = 0
+        # What the probe is about to measure. A refresh, by hand or on the
+        # poller's own tick, can replace the node list while a socket is still
+        # waiting, and a summary written after that would describe a
+        # subscription that is no longer this one.
+        before = _probe_subject(target)
+    reach = nodes = probe_ms = 0
     up = None
+    latency = None
     try:
         with _probe_lock:
+            # Timed from inside the lock: a second profile queued behind the
+            # one scratch interface would otherwise be charged the wait.
+            started = time.monotonic()
             if target["kind"] == "subscription":
-                probe, reach, nodes, up = _probe_subscription(target, runner,
-                                                              prober)
+                probe, reach, nodes, up, latency, probe_ms = _probe_subscription(
+                    target, runner, prober)
             else:
                 probe = _probe_quick(target, runner, sender)
+                if probe == "ok":
+                    probe_ms = max(1, round((time.monotonic() - started) * 1000))
     except VpnError as e:
         probe = str(e) if str(e) in SAFE_PROBE_CODES else "invalid-state"
     except Exception:
@@ -3415,11 +3695,18 @@ def vpn_check(tid, runner=None, prober=None, sender=None):
         # Re-found, not reused: the profile may have been deleted or switched
         # while the probe was waiting on a socket.
         row = _find_tunnel(rows, tid)
+        if _probe_subject(row) != before:
+            # Somebody else changed what this profile is. The reading is not
+            # wrong, it is about something that no longer exists, and writing
+            # it would put a stale summary on a fresh node list.
+            return _tunnel_row(row)
         row["probe"], row["reach"] = probe, reach
+        row["probe_at"] = int(time.time())
+        row["probe_ms"] = probe_ms
         if nodes:
             row["nodes"] = nodes
         if up is not None:
-            _remember_probe(tid, up)
+            _remember_probe(tid, up, latency)
         # Only the probe fields move: a check is a reading, and a reading must
         # not switch a backend, close transit or clear somebody else's error.
         save_tunnels(rows)
@@ -3604,6 +3891,190 @@ def sysinfo():
             "bps": _sys["bps"],
         }
         return _sys["out"]
+
+
+# --- diagnostics -----------------------------------------------------------
+
+DIAG_COMMAND_LIMIT = 16 << 10
+DIAG_REPORT_MAX = 256 << 10
+DIAG_COMMANDS = (
+    ("kernel", ["uname", "-a"]),
+    ("addresses", ["ip", "-details", "address", "show"]),
+    ("IPv4 rules", ["ip", "rule", "show"]),
+    ("IPv6 rules", ["ip", "-6", "rule", "show"]),
+    ("IPv4 routes", ["ip", "route", "show", "table", "all"]),
+    ("IPv6 routes", ["ip", "-6", "route", "show", "table", "all"]),
+    ("gateway-acl nftables", ["nft", "list", "table", "inet", "gwacl"]),
+    ("sing-box nftables", ["nft", "list", "table", "inet", "sing-box"]),
+    ("listening sockets", ["ss", "-lntup"]),
+    ("filesystems", ["df", "-h"]),
+    ("memory", ["free", "-h"]),
+    ("gateway-acl service", ["systemctl", "status", "gateway-acl",
+                             "--no-pager", "-n", "40"]),
+    ("sing-box service", ["systemctl", "status", "sing-box",
+                          "--no-pager", "-n", "40"]),
+    ("service properties", ["systemctl", "show", "gateway-acl", "sing-box",
+                            "-p", "Id,LoadState,ActiveState,SubState,Result,"
+                            "ExecMainCode,ExecMainStatus,ActiveEnterTimestamp"]),
+    ("service journal", ["journalctl", "-u", "gateway-acl", "-u", "sing-box",
+                         "--no-pager", "-n", "200", "-o", "short-iso"]),
+    ("kernel journal", ["journalctl", "-k", "--no-pager", "-n", "100",
+                        "-o", "short-iso"]),
+    ("sing-box version", ["sing-box", "version"]),
+    ("WireGuard version", ["wg", "--version"]),
+    ("AmneziaWG version", ["awg", "--version"]),
+    ("nftables version", ["nft", "--version"]),
+)
+
+
+def _diagnostic_secret_values():
+    """Known endpoints added to the generic redactor; never returned itself."""
+    values = set()
+    for row in load_tunnels():
+        try:
+            if row["kind"] == "subscription":
+                secret = load_subscription_secret(row["id"])
+                url = str(secret.get("url") or "")
+                if url:
+                    values.add(url)
+                    if urlparse(url).hostname:
+                        values.add(urlparse(url).hostname)
+                for out in sub_convert(row["id"], secret, skip=()):
+                    for key in ("server", "uuid", "password"):
+                        if out.get(key):
+                            values.add(str(out[key]))
+            else:
+                text = _read_quick_config(row)
+                for match in re.finditer(
+                        r"(?im)^\s*(?:PrivateKey|PresharedKey|Endpoint)\s*=\s*(\S+)",
+                        text):
+                    value = match.group(1)
+                    values.add(value)
+                    values.add(value.rsplit(":", 1)[0].strip("[]"))
+        except Exception:
+            continue
+    return {value for value in values if len(value) >= 3}
+
+
+def _redact_diagnostics(text, known=()):
+    text = str(text)
+    for value in sorted(set(known), key=len, reverse=True):
+        text = text.replace(value, "[REDACTED_SECRET]")
+    text = re.sub(r"(?i)\b(?:https?|vless|vmess|trojan|ss)://[^\s<>\"']+",
+                  "[REDACTED_URL]", text)
+    text = re.sub(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+                  r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b", "[REDACTED_UUID]", text)
+    text = re.sub(r"(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{43}=?"
+                  r"(?![A-Za-z0-9+/=])",
+                  "[REDACTED_KEY]", text)
+    text = re.sub(r"(?i)\b(privatekey|presharedkey|endpoint|password|token|"
+                  r"secret|authorization)(\s*[:=]\s*)\S+",
+                  r"\1\2[REDACTED_SECRET]", text)
+    text = re.sub(r"(?i)\b(?:[a-z0-9-]+\.)+[a-z]{2,63}(?=:\d{1,5}\b)",
+                  "[REDACTED_ENDPOINT]", text)
+
+    def hide_public_ip(match):
+        """`is_global`, and not a hand-written list of private ranges: it is the
+        one that already knows about `::`, `fe80::/10`, `fc00::/7`, `2001:db8::`
+        and CGNAT. Multicast is kept because a routing table is full of it and
+        it says nothing about whose gateway this is."""
+        try:
+            address = ipaddress.ip_address(match.group(0))
+            return "[REDACTED_PUBLIC_IP]" \
+                if address.is_global and not address.is_multicast \
+                else match.group(0)
+        except ValueError:
+            return match.group(0)
+
+    # IPv6 first, and deliberately loose: `ip_address` is the validator, so a
+    # timestamp or a MAC that matches the shape is simply handed back. Without
+    # this pass `ip -6 addr` and `ip -6 route` hand over the gateway's own
+    # public prefix and the tunnel's peers, in a report that says it removed
+    # the secrets. `::ffff:1.2.3.4` has to be eaten whole here, before the
+    # IPv4 pass can take half of it.
+    text = re.sub(r"(?<![:.\w])(?:[0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4}"
+                  r"(?:\.\d{1,3}){0,3}(?![:.\w])", hide_public_ip, text)
+    text = re.sub(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?![\w.])",
+                  hide_public_ip, text)
+    return text
+
+
+def _diagnostic_command(item, runner=None):
+    title, argv = item
+    try:
+        result = (runner or subprocess.run)(
+            argv, capture_output=True, text=True, timeout=5)
+        output = "\n".join(x for x in (str(result.stdout or "").strip(),
+                                         str(result.stderr or "").strip()) if x)
+        if not output:
+            output = "(no output)"
+        return f"### {title}\n$ {' '.join(argv)}\nexit={result.returncode}\n" \
+               f"{output[:DIAG_COMMAND_LIMIT]}"
+    except FileNotFoundError:
+        return f"### {title}\n$ {' '.join(argv)}\ncommand not found"
+    except subprocess.TimeoutExpired as e:
+        output = "".join(str(x or "") for x in (e.stdout, e.stderr))
+        return f"### {title}\n$ {' '.join(argv)}\ntimed out\n" \
+               f"{output[:DIAG_COMMAND_LIMIT]}"
+    except Exception as e:
+        return f"### {title}\n$ {' '.join(argv)}\nfailed: {type(e).__name__}"
+
+
+def diagnostic_report(runner=None, now=None):
+    """One bounded support bundle. Logs are untrusted and secrets are removed."""
+    now = time.time() if now is None else now
+    cfg = conf()
+    cfg["pw"] = "[REDACTED_PASSWORD_HASH]" if cfg.get("pw") else None
+    try:
+        devices = load()
+    except Exception as e:
+        devices = {"error": type(e).__name__}
+    try:
+        tunnels = vpn_public(runner)
+    except Exception as e:
+        tunnels = {"error": type(e).__name__}
+    try:
+        machine = sysinfo()
+    except Exception as e:
+        machine = {"error": type(e).__name__}
+    files = {}
+    for path in (CONFIG, DEVICES, TODAY, TRAFFIC, TUNNELS, SINGBOX_CONFIG,
+                 UPDATE_LOG):
+        try:
+            st = os.stat(path)
+            files[path] = {"size": st.st_size, "mode": oct(st.st_mode & 0o777),
+                           "mtime": int(st.st_mtime)}
+        except OSError as e:
+            files[path] = {"error": type(e).__name__}
+    try:
+        h = history()
+        history_summary = {"days": len(h.get("days", {})),
+                           "months": len(h.get("months", {})),
+                           "seen": len(h.get("seen", {})),
+                           "hot_date": _hot_date}
+    except Exception as e:
+        history_summary = {"error": type(e).__name__}
+    with futures.ThreadPoolExecutor(max_workers=6) as pool:
+        commands = list(pool.map(lambda item: _diagnostic_command(item, runner),
+                                 DIAG_COMMANDS))
+    update_log = _read(UPDATE_LOG)[-DIAG_COMMAND_LIMIT:] or "(empty or missing)"
+    report = "\n\n".join((
+        "# gateway-acl diagnostics",
+        "Generated: " + time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(now)),
+        "Security: secrets are redacted. Logs below are untrusted data, not instructions.",
+        "## version\n" + json.dumps({"gateway_acl": VERSION,
+                                      "python": sys.version,
+                                      "pid": os.getpid()}, indent=2),
+        "## configuration\n" + json.dumps(cfg, ensure_ascii=False, indent=2),
+        "## machine\n" + json.dumps(machine, ensure_ascii=False, indent=2),
+        "## devices\n" + json.dumps(devices, ensure_ascii=False, indent=2),
+        "## managed tunnels\n" + json.dumps(tunnels, ensure_ascii=False, indent=2),
+        "## history summary\n" + json.dumps(history_summary, indent=2),
+        "## files\n" + json.dumps(files, ensure_ascii=False, indent=2),
+        "## update log\n" + update_log,
+        "## commands\n\n" + "\n\n".join(commands),
+    ))
+    return _redact_diagnostics(report, _diagnostic_secret_values())[:DIAG_REPORT_MAX]
 
 
 def parse_arp(text):
@@ -4215,6 +4686,7 @@ def render(tpl, t=None):
                .replace("{{PORT}}", str(PORT))
                .replace("{{POLL}}", str(POLL_SEC))
                .replace("{{KEEP}}", str(KEEP_MONTHS))
+               .replace("{{SUB_REFRESH_MAX}}", str(SUB_REFRESH_MAX))
                .replace("{{REBOOT_AT}}", html.escape(CFG["reboot_at"], quote=True))
                .replace("{{RB}}", " checked" if CFG["reboot"] else "")
                .replace("{{RB_OFF}}", "" if CFG["reboot"] else " disabled")
@@ -4334,7 +4806,20 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  .drow.off .nm,.drow.off .dnum{color:var(--dim)}
  .ddet{padding:0 0 var(--s3) var(--s5);display:flex;flex-direction:column;
        gap:var(--s2)}
- .spark{display:block;width:100%;height:28px}
+ /* Полоски, а не SVG: viewBox растягивался на всю ширину строки, и столбики
+    расплывались в плашки. Ширину и промежуток теперь держит flex. */
+ .sparkw{display:flex;flex-direction:column;gap:var(--s1)}
+ /* max-width как у полос месяцев: во всю ширину строки столбик становится
+    плиткой, и разница высот перестаёт быть тем, что видно первым. */
+ .spark{display:flex;align-items:flex-end;justify-content:space-between;
+        gap:2px;height:36px}
+ .spark i{flex:1;min-width:0;max-width:14px;background:var(--blue);
+          border-radius:2px 2px 0 0}
+ /* День без трафика — тонкая засечка, а не пустота: иначе редкие
+    столбики висят в воздухе и ряд не читается как ряд. */
+ .spark i.nil{background:var(--line);border-radius:1px}
+ .drow.off .spark i{background:var(--dim2)}
+ .scap{display:flex;justify-content:space-between;gap:var(--s2)}
  .dacts{display:flex;align-items:center;gap:var(--s2);flex-wrap:wrap}
  .dacts .sp{flex:1}
  .vpn{display:flex;align-items:center;gap:var(--s2);font-size:var(--f-sec);
@@ -4358,6 +4843,8 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  .vpnlist .row{align-items:flex-start;flex-wrap:wrap}
  .vpnmeta{min-width:12rem;flex:1}
  .vpnacts{display:flex;gap:var(--s1);flex-wrap:wrap;justify-content:flex-end}
+ .vfreq{display:flex;align-items:center;gap:var(--s1);white-space:nowrap}
+ .vfreq input{width:4.5rem;max-width:4.5rem}
  /* Узлы одной подписки: вложенный список под её строкой, отступлен слева —
     тот же приём, что и у .list.inset, показывает, чьи они. */
  .nodes{margin:0 0 var(--s3) var(--s5);display:flex;flex-direction:column}
@@ -4425,7 +4912,8 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
 
   <h2 class=grp>{{t.groupVpn}}</h2>
   <div class="list inset panel">
-   <div class=row><span id="vpnSummary" class=sp>{{t.vpnLoading}}</span></div>
+   <div class=row><span id="vpnSummary" class=sp>{{t.vpnLoading}}</span>
+    <button id="vpnCheckAll" class=btn onclick=checkAllVpn()>{{t.vpnCheckAll}}</button></div>
    <div id="vpnList" class=vpnlist></div>
    <div class=vpnform>
     <div class=row><label for=vpnKind>{{t.groupVpn}}</label><span class=sp></span>
@@ -4474,6 +4962,10 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
     <button class=btn id=s_check onclick=checkUpd()>{{t.sCheck}}</button>
     <button class="btn bad" id=s_reboot onclick=rebootHost()>{{t.sReboot}}</button></div>
    <p class=hint>{{t.sCheckHint}}</p>
+   <div class=row><span id=diagStatus class="hint sp" role=status
+     aria-live=polite></span>
+    <button class=btn onclick=diagnostics(true)>{{t.diagCopy}}</button>
+    <button class=btn onclick=diagnostics(false)>{{t.diagDownload}}</button></div>
   </div>
 
   <h2 class=grp>{{t.groupPw}}</h2>
@@ -4720,19 +5212,26 @@ const hover = i => {
   pop.style.top = Math.max(0, -box.top + 4) + 'px';
 };
 
-const spark = (ser, max, on) => {
+const dm = k => k.slice(8) + '.' + k.slice(5, 7);
+
+// Масштаб свой у каждого устройства. Общий превращал график тихого телефона
+// в пустое поле с одним столбиком: рядом с 228 ГБ соседа его 2 ГБ не видны.
+// Поэтому масштаб подписан. Иначе столбик в полвысоты у телефона и у ноутбука
+// выглядит одинаково, а значит разное.
+const spark = ser => {
   if (!ser || ser.length < 2) return '';
-  const w = 240, h = 28, bw = w / ser.length;
-  return `<svg class=spark viewBox="0 0 ${w} ${h}" preserveAspectRatio=none `
-    + `fill="var(--down)"${on ? '' : ' opacity=.35'}>`
-    + ser.map((v, i) => { const t = (v[0] + v[1]) / max * h;
-        return t < .4 ? '' : `<rect x="${(i * bw).toFixed(2)}" y="${(h - t).toFixed(2)}" `
-          + `width="${Math.max(.7, bw * .72).toFixed(2)}" height="${t.toFixed(2)}"/>`;
-      }).join('') + `</svg>`;
+  const v = ser.map(d => d[0] + d[1]), max = Math.max(...v);
+  if (!max) return `<p class="sec">${T.sparkNone}</p>`;
+  const ds = S.days, last = ds[ds.length - 1][0];
+  return `<div class=sparkw><div class=spark>`
+    + v.map(t => `<i class="${t ? '' : 'nil'}" style="height:`
+        + `${t ? Math.max(10, t / max * 100).toFixed(1) + '%' : '2px'}"></i>`).join('')
+    + `</div><div class="sec scap"><span>${dm(ds[0][0])} – ${dm(last)}</span>`
+    + `<span>${n(T.sparkPeak, fmt(max))}</span></div></div>`;
 };
 
-const devDetail = (x, peak) => `<div class=ddet>`
-  + spark(x.series, peak, x.on)
+const devDetail = x => `<div class=ddet>`
+  + spark(x.series)
   + `<div class=dacts>`
   + (x.until > S.now
       ? `<button class=btn title="${esc(T.tmCancel)}" `
@@ -4864,6 +5363,8 @@ const nodeList = p => {
   const box = vpnNode('div', 'nodes');
   if (!NODES) { box.append(vpnNode('p', 'hint', T.vpnLoading)); return box; }
   box.append(vpnNode('p', 'hint', T.vpnNodesWhat));
+  if (p.probe_at) box.append(vpnNode('p', 'sec',
+    T.vpnProbeTime.replace('{t}', ago(Math.max(0, Date.now()/1000-p.probe_at)))));
   NODES.forEach(n => {
     const line = vpnNode('label', 'noderow');
     const box2 = document.createElement('input');
@@ -4876,7 +5377,8 @@ const nodeList = p => {
     line.append(box2, vpnNode('span', 'sp', n.name));
     // Что показала последняя проверка. Ничего — значит этот узел ещё не
     // спрашивали: у проверки есть потолок, и дальше него она не ходит.
-    if (n.up === true) line.append(vpnNode('span', 'good sec', T.vpnNodeUp));
+    if (n.up === true) line.append(vpnNode('span', 'good sec', n.ms
+      ? T.vpnNodeMs.replace('{n}', n.ms) : T.vpnNodeUp));
     else if (n.up === false) line.append(vpnNode('span', 'bad sec', T.vpnNodeDown));
     box.append(line);
   });
@@ -4937,17 +5439,38 @@ const renderVpn = () => {
     const details = [VPN_TYPES[p.kind] || p.kind,
       p.enabled ? T.vpnEnabled : T.vpnDisabled];
     if (p.kind === 'subscription') details.push(T.vpnNodes.replace('{n}', p.nodes));
+    if (p.kind === 'subscription') details.push(p.refresh_hours
+      ? T.vpnAutoEvery.replace('{n}', p.refresh_hours) : T.vpnAutoOff);
     meta.append(vpnNode('div', 'sec', details.join(' · ')));
+    if (p.kind === 'subscription' && p.provider_hours)
+      meta.append(vpnNode('div', 'sec',
+        T.vpnProviderEvery.replace('{n}', p.provider_hours)));
+    if (p.kind === 'subscription' && p.updated_at)
+      meta.append(vpnNode('div', 'sec', T.vpnUpdated.replace('{t}',
+        ago(Math.max(0, Date.now()/1000-p.updated_at)))));
+    if (p.kind === 'subscription' && p.refresh_error)
+      meta.append(vpnNode('div', 'bad sec', T.vpnRefreshFailed));
     if (p.ipv6 === false) meta.append(vpnNode('div', 'sec', T.vpnIpv6));
     if (p.error) meta.append(vpnNode('div', 'bad sec', vpnError(p.error)));
     // Проверка — отдельная строка от ошибки: профиль может быть выключен и
     // исправен, и наоборот — включён, но с узлами, которые молчат.
-    if (p.probe === 'ok')
-      meta.append(vpnNode('div', 'good sec', p.kind === 'subscription'
+    if (p.probe === 'ok') {
+      const checked = p.kind === 'subscription'
         ? T.vpnProbeNodes.replace('{a}', p.reach).replace('{b}', p.nodes)
-        : T.vpnProbeOk));
-    else if (p.probe)
-      meta.append(vpnNode('div', 'bad sec', vpnError(p.probe)));
+        : T.vpnProbeOk;
+      const bits = [checked];
+      if (p.probe_ms) bits.push((p.kind === 'subscription'
+        ? T.vpnProbeFastest : T.vpnProbeDuration).replace('{n}', p.probe_ms));
+      if (p.probe_at) bits.push(T.vpnProbeTime.replace('{t}',
+        ago(Math.max(0, Date.now()/1000-p.probe_at))));
+      meta.append(vpnNode('div', 'good sec', bits.join(' · ')));
+    }
+    else if (p.probe) {
+      const bits = [vpnError(p.probe)];
+      if (p.probe_at) bits.push(T.vpnProbeTime.replace('{t}',
+        ago(Math.max(0, Date.now()/1000-p.probe_at))));
+      meta.append(vpnNode('div', 'bad sec', bits.join(' · ')));
+    }
     row.append(meta);
     const acts = vpnNode('div', 'vpnacts');
     if (p.enabled) acts.append(vpnButton(T.vpnDisable, () => {
@@ -4962,6 +5485,13 @@ const renderVpn = () => {
       acts.append(vpnButton(T.vpnRefresh, () => vpnCall('refresh', {id:p.id})));
       acts.append(vpnButton(openNodes === p.id ? T.vpnHideNodes : T.vpnPickNodes,
         () => toggleNodes(p.id)));
+      const freq = vpnNode('label', 'vfreq sec', T.vpnAuto);
+      const hours = document.createElement('input');
+      hours.className = 'field'; hours.type = 'number'; hours.min = 0;
+      hours.max = {{SUB_REFRESH_MAX}}; hours.value = p.refresh_hours || 0;
+      hours.disabled = vpnBusy; hours.setAttribute('aria-label', T.vpnAuto);
+      hours.onchange = () => vpnCall('schedule', {id:p.id, hours:+hours.value});
+      freq.append(hours); acts.append(freq);
     }
     acts.append(vpnButton(T.vpnDelete, () => vpnDeleteProfile(p), true));
     row.append(acts); vpnList.append(row);
@@ -4969,6 +5499,7 @@ const renderVpn = () => {
       vpnList.append(nodeList(p));
   });
   vpnAdd.disabled = vpnBusy;
+  vpnCheckAll.disabled = vpnBusy || !VPN.profiles.length;
   vpnFields();
 };
 const loadVpn = async () => {
@@ -4999,6 +5530,57 @@ const vpnRequest = async (method, url, body) => {
   return ok;
 };
 const vpnCall = (action, body={}) => vpnRequest('POST', '/vpn', {action, ...body});
+const checkAllVpn = async () => {
+  if (vpnBusy || !VPN || !VPN.profiles.length) return;
+  const profiles = [...VPN.profiles]; vpnBusy = true; renderVpn();
+  let failed = '';
+  try {
+    for (let i=0; i<profiles.length; i++) {
+      vpnStatus.textContent = T.vpnCheckingAll.replace('{a}', i+1)
+        .replace('{b}', profiles.length);
+      try {
+        const r = await mutate('/vpn', 'POST', {action:'check', id:profiles[i].id});
+        // Сессия кончилась посреди очереди: остальные тоже не пройдут, и
+        // разбор ответа как JSON тут только заменил бы причину на «не удалось».
+        if (r.status === 401) { location.reload(); return; }
+        const data = await r.json();
+        if (!r.ok) throw new Error(vpnError(data.error));
+        VPN = data; csrf = data.csrf || csrf; renderVpn();
+      } catch (e) {
+        // Профиль мог исчезнуть из-под очереди. Это не повод не проверять
+        // остальные: кнопка обещала проверить все, а не до первой осечки.
+        failed = e.message || T.vpnErrStart;
+      }
+    }
+    vpnStatus.textContent = failed || T.vpnSaved;
+  } finally { vpnBusy = false; renderVpn(); }
+};
+
+const diagnostics = async copy => {
+  try {
+    const r = await fetch('/diagnostics');
+    if (r.status === 401) { location.reload(); return; }
+    if (!r.ok) throw new Error();
+    const report = await r.text();
+    if (copy) {
+      if (navigator.clipboard && window.isSecureContext)
+        await navigator.clipboard.writeText(report);
+      else {
+        const area = document.createElement('textarea');
+        area.value = report; area.style.position = 'fixed'; area.style.opacity = 0;
+        document.body.append(area); area.select();
+        const copied = document.execCommand('copy'); area.remove();
+        if (!copied) throw new Error();
+      }
+      diagStatus.textContent = T.diagCopied;
+    } else {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(new Blob([report], {type:'text/plain'}));
+      a.download = 'gateway-acl-diagnostics.txt'; a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    }
+  } catch (e) { diagStatus.textContent = T.diagFailed; }
+};
 const vpnAddProfile = () => {
   const kind = vpnKind.value, name = vpnName.value.trim();
   const body = {kind, name, exclude:vpnExclude.value};
@@ -5151,10 +5733,7 @@ const draw = () => {
   if (!sysbox.matches(':hover'))
     sysbox.innerHTML = S.sys ? machine(S.sys) : `<p class=hint>${T.sysNone}</p>`;
 
-  const peak = Math.max(1, ...S.devices.flatMap(x => x.series.map(v => v[0]+v[1])));
   const fresh = Math.max(120, S.poll * 2);
-  // The peak stays the whole list's, so filtering does not silently rescale
-  // every sparkline against whatever happens to be left on screen.
   const fq = flt.value.trim().toLowerCase();
   const list = S.devices.filter(x => !fq ||
       (x.ip + ' ' + x.name + ' ' + (x.host || '')).toLowerCase().includes(fq))
@@ -5194,7 +5773,7 @@ const draw = () => {
      + `aria-label="${esc(x.name || x.ip)}" `
      + `onclick="event.stopPropagation()" `
      + `onchange="post({ip:'${esc(x.ip)}',on:this.checked})">`
-     + `</div>${op ? devDetail(x, peak) : ''}</div>`;
+     + `</div>${op ? devDetail(x) : ''}</div>`;
   }).join('') || `<p class=hint>${fq ? T.noMatch : T.empty}</p>`;
 
   renderBanners();
@@ -5413,14 +5992,14 @@ class H(BaseHTTPRequestHandler):
 
     def _deny(self):
         """A live page gets 401, an ordinary navigation gets the login form."""
-        if urlparse(self.path).path in ("/api", "/vpn"):
+        if urlparse(self.path).path in ("/api", "/vpn", "/diagnostics"):
             self._send(401, T["needLogin"], "text/plain")
         else:
             self._send(200, login_page())
 
     def do_GET(self):
         path = urlparse(self.path).path
-        if path not in ("/", "/api", "/vpn"):
+        if path not in ("/", "/api", "/vpn", "/diagnostics"):
             self._send(404, "not found", "text/plain")
             return
         if not self._authed():
@@ -5434,6 +6013,10 @@ class H(BaseHTTPRequestHandler):
             s["you"] = self.client_address[0]
             s["csrf"] = csrf_for(self._session_token())
             self._send(200, json.dumps(s), "application/json")
+        elif path == "/diagnostics":
+            with _diag_lock:
+                report = diagnostic_report()
+            self._send(200, report, "text/plain; charset=utf-8")
         else:
             # /vpn?id=… is one subscription's node list, asked for only when
             # somebody opens it. It means reading a cached body and converting
@@ -5698,6 +6281,7 @@ def poller():
         expire()        # a timer that has run out
         track_macs()    # a device DHCP has moved to another address
         vpn_poll()      # a managed tunnel that vanished closes forwarded traffic
+        vpn_auto_refresh()
         check_update()
         # A minute of slack so two ticks cannot leave a gap between windows.
         if reboot_due(CFG["reboot"] and CFG["reboot_at"],
@@ -5761,11 +6345,24 @@ def selftest():
     assert h._read_body(3) == b"abc"
 
     for method, path in (("do_GET", "/apiX"), ("do_GET", "/vpnX"),
+                         ("do_GET", "/diagnosticsX"),
                          ("do_POST", "/apiX"), ("do_DELETE", "/vpnX")):
         h = request(path, {"Content-Length": "1"})
         h.rfile = BombReader()
         getattr(h, method)()
         assert h.replies[0][0] == 404, f"prefix route accepted: {path}"
+
+    h = request("/diagnostics")
+    h.do_GET()
+    assert h.replies[0][0] == 401, "diagnostics must require a session"
+    real_diagnostics = globals()["diagnostic_report"]
+    try:
+        globals()["diagnostic_report"] = lambda: "safe diagnostics"
+        h = request("/diagnostics", {"Cookie": "sess=" + token})
+        h.do_GET()
+        assert h.replies[0][:2] == (200, "safe diagnostics")
+    finally:
+        globals()["diagnostic_report"] = real_diagnostics
 
     h = request("/logout", {"Cookie": "sess=" + token})
     h.do_GET()
@@ -6559,19 +7156,56 @@ PersistentKeepalive = 25
             (CONFIG, TUNNELS, TUNNEL_DIR, SINGBOX_CONFIG) = old_paths
             CFG["vpn_mark"], _vpn_closed = old_mark, old_closed
 
+    # --- subscription refresh schedule ---
+    assert parse_refresh_hours({}) == 0
+    assert parse_refresh_hours({"Profile-Update-Interval": "6"}) == 6
+    assert parse_refresh_hours({"profile-update-interval": "24"}) == 24
+    assert parse_refresh_hours({"profile-update-interval": "0"}) == 0
+    assert parse_refresh_hours({"profile-update-interval": "bad"}) == 0
+    assert parse_refresh_hours({"profile-update-interval": str(SUB_REFRESH_MAX + 1)}) == 0
+    assert check_refresh_hours(0) == 0 and check_refresh_hours("12") == 12
+    assert check_refresh_hours(" 6 ") == 6, \
+        "a header may carry the space after its colon"
+    for bad in (-1, SUB_REFRESH_MAX + 1, "1.5", None):
+        try:
+            check_refresh_hours(bad)
+            raise AssertionError("an invalid refresh interval was accepted")
+        except ValueError:
+            pass
+
+    # A provider value starts the schedule, but a value somebody picked by
+    # hand is sticky and later provider headers may not silently undo it.
+    auto = refresh_schedule({}, 6, now=100)
+    assert auto == {"refresh_hours": 6, "provider_hours": 6,
+                    "refresh_manual": False, "updated_at": 100,
+                    "refresh_at": 100, "refresh_error": ""}
+    override = refresh_schedule(dict(auto, refresh_hours=12,
+                                     refresh_manual=True), 3, now=200)
+    assert override["refresh_hours"] == 12 and override["provider_hours"] == 3
+    assert override["refresh_manual"] and override["updated_at"] == 200
+    scheduled = dict(override, kind="subscription", refresh_at=200)
+    assert refresh_due(scheduled, now=200 + 12 * 3600)
+    assert not refresh_due(scheduled, now=200 + 12 * 3600 - 1)
+    failed = dict(override, kind="subscription",
+                  refresh_error="validation-failed", refresh_at=300)
+    assert not refresh_due(failed, now=300 + AUTO_REFRESH_RETRY - 1)
+    assert refresh_due(failed, now=300 + AUTO_REFRESH_RETRY)
+
     # --- checking a profile without switching onto it ---
-    assert probe_nodes([], lambda *a: True) == (0, 0, {})
+    assert probe_nodes([], lambda *a: True) == (0, 0, {}, {})
     shared = [{"tag": "one", "server": "a", "server_port": 1},
               {"tag": "two", "server": "a", "server_port": 1},
               {"tag": "three", "server": "b", "server_port": 2},
               {"tag": "four", "server": "", "server_port": 3}]
-    reach, asked, by_tag = probe_nodes(shared, lambda host, port: host == "a")
+    reach, asked, by_tag, ms_by_tag = probe_nodes(
+        shared, lambda host, port: 37 if host == "a" else None)
     assert (reach, asked) == (1, 2), \
         "the same address and port is one connection, and a blank one is none"
     assert by_tag == {"one": True, "two": True, "three": False}, by_tag
+    assert ms_by_tag == {"one": 37, "two": 37}, ms_by_tag
     long_list = [{"tag": f"t{i}", "server": f"h{i}", "server_port": 1}
                  for i in range(PROBE_NODES * 3)]
-    reach, asked, by_tag = probe_nodes(long_list, lambda *a: True)
+    reach, asked, by_tag, ms_by_tag = probe_nodes(long_list, lambda *a: 8)
     assert (reach, asked) == (PROBE_NODES, PROBE_NODES), \
         "a long subscription must not turn one button into a long wait"
     assert len(by_tag) == PROBE_NODES, \
@@ -6589,9 +7223,12 @@ PersistentKeepalive = 25
                     f"vless://{uid}@b.example:443?security=tls#B")
             sub = vpn_add({"kind": "subscription", "name": "probe me",
                            "url": "https://provider.example/token"},
-                          fetcher=lambda url: body)
+                          fetcher=lambda url: (body,
+                              {"Profile-Update-Interval": "6"}))
             assert sub["probe"] == "" and sub["reach"] == 0, \
                 "a new profile has not been checked yet"
+            assert sub["refresh_hours"] == sub["provider_hours"] == 6
+            assert not sub["refresh_manual"] and sub["updated_at"]
             wire = vpn_add({"kind": "wireguard", "name": "probe wg",
                             "config": wg}, runner=quick_ok)
 
@@ -6604,10 +7241,15 @@ PersistentKeepalive = 25
                 return subprocess.CompletedProcess(argv, 0, "", "")
 
             checked = vpn_check(sub["id"], runner=probe_runner,
-                                prober=lambda host, port: host == "a.example")
+                                prober=lambda host, port:
+                                    41 if host == "a.example" else None)
             assert checked["probe"] == "ok" and checked["reach"] == 1
             assert checked["nodes"] == 2 and not checked["enabled"], \
                 "a check must not enable anything"
+            assert checked["probe_ms"] == 41 and checked["probe_at"]
+            node_readings = {n["name"]: n["ms"]
+                             for n in vpn_node_list(sub["id"])}
+            assert node_readings == {"A": 41, "B": None}, node_readings
             assert any(argv[:2] == ["sing-box", "check"] for argv in probe_calls)
             assert not os.path.exists(SINGBOX_CONFIG), \
                 "a check must not write the live sing-box config"
@@ -6615,6 +7257,9 @@ PersistentKeepalive = 25
 
             checked = vpn_check(sub["id"], runner=probe_runner,
                                 prober=lambda host, port: False)
+            assert checked["probe"] == "unreachable" and checked["reach"] == 0
+            checked = vpn_check(sub["id"], runner=probe_runner,
+                                prober=lambda host, port: 0)
             assert checked["probe"] == "unreachable" and checked["reach"] == 0
 
             refused = lambda argv, **k: subprocess.CompletedProcess(argv, 1, "", "")
@@ -6698,11 +7343,118 @@ PersistentKeepalive = 25
                 raise AssertionError("the probe interface must not read as a tunnel")
             except ValueError:
                 pass
+
+            vpn_schedule(sub["id"], 12, now=100)
+            same_secret = open(tunnel_path(sub["id"], ".json"), "rb").read()
+            same_probe = _find_tunnel(load_tunnels(), sub["id"])["probe"]
+            vpn_refresh(sub["id"], fetcher=lambda url: (
+                body, {"profile-update-interval": "3"}), now=200)
+            scheduled = _find_tunnel(load_tunnels(), sub["id"])
+            assert scheduled["refresh_hours"] == 12
+            assert scheduled["provider_hours"] == 3 and scheduled["refresh_manual"]
+            assert open(tunnel_path(sub["id"], ".json"), "rb").read() == same_secret
+            assert scheduled["probe"] == same_probe, \
+                "an unchanged body must keep its readings and avoid a rebuild"
+
+            # A body that arrived differently but converts to the same
+            # outbounds. Providers rewrite the list on every fetch — a node
+            # counting the traffic left is the usual one — and comparing bytes
+            # meant closing transit and restarting sing-box for a config that
+            # came out identical. Only the cache moves.
+            rows = load_tunnels()
+            _find_tunnel(rows, sub["id"])["error"] = "start-failed"
+            save_tunnels(rows)
+            recoded = base64.b64encode(body.encode()).decode()
+            vpn_refresh(sub["id"], fetcher=lambda url: (recoded, {}), now=250)
+            quiet = _find_tunnel(load_tunnels(), sub["id"])
+            assert quiet["probe"] == same_probe and quiet["probe_at"], \
+                "the same outbounds must keep the readings that measured them"
+            assert quiet["error"] == "", \
+                "a refresh that read the profile must clear what it failed at"
+            assert quiet["updated_at"] == 250
+            cached = json.loads(_read(tunnel_path(sub["id"], ".json")))
+            assert cached["body"] == recoded and cached["skip"] == [], \
+                "the cache must hold what the provider actually sent"
+
+            # Changing which nodes are picked drops the whole reading, not the
+            # summary while its timestamp stays on screen.
+            node_ids = [n["id"] for n in vpn_node_list(sub["id"])]
+            vpn_nodes(sub["id"], [node_ids[1]])
+            picked = _find_tunnel(load_tunnels(), sub["id"])
+            assert picked["probe"] == "" and "probe_at" not in picked \
+                and "probe_ms" not in picked, picked
+            vpn_nodes(sub["id"], [])
+
+            # A reading is a reading *of* a set of nodes. When a refresh
+            # replaces that set while a socket is still open, the answer is
+            # about a subscription that no longer exists and must not land on
+            # the one that does.
+            vpn_check(sub["id"], runner=probe_runner,
+                      prober=lambda host, port:
+                          41 if host == "a.example" else None)
+            assert _find_tunnel(load_tunnels(), sub["id"])["probe"] == "ok"
+
+            def refresh_mid_probe(host, port):
+                vpn_refresh(sub["id"], runner=probe_runner, now=260,
+                            fetcher=lambda url: (
+                                body.replace("#B", "#Bravo")
+                                    .replace("b.example", "z.example"), {}))
+                return 41 if host == "a.example" else None
+
+            raced = vpn_check(sub["id"], runner=probe_runner,
+                              prober=refresh_mid_probe)
+            assert raced["probe"] == "" and "probe_at" not in raced, \
+                "a reading of a node list that was replaced must be dropped"
+
+            vpn_schedule(sub["id"], 1, now=300)
+            before_secret = open(tunnel_path(sub["id"], ".json"), "rb").read()
+
+            def dead_subscription(url):
+                raise ValueError("offline")
+
+            assert vpn_auto_refresh(now=3900, fetcher=dead_subscription)
+            failed = _find_tunnel(load_tunnels(), sub["id"])
+            assert failed["refresh_error"] == "validation-failed"
+            assert failed["updated_at"] == 260 and failed["refresh_at"] == 3900
+            assert open(tunnel_path(sub["id"], ".json"), "rb").read() == before_secret
+            assert not vpn_auto_refresh(now=3900 + AUTO_REFRESH_RETRY - 1,
+                                        fetcher=dead_subscription)
+            changed = body.replace("b.example", "c.example")
+            assert vpn_auto_refresh(now=3900 + AUTO_REFRESH_RETRY,
+                                    fetcher=lambda url: (changed, {}))
+            refreshed = _find_tunnel(load_tunnels(), sub["id"])
+            assert refreshed["refresh_error"] == ""
+            assert refreshed["updated_at"] == 3900 + AUTO_REFRESH_RETRY
+            assert refreshed["refresh_hours"] == 1
+            assert refreshed["provider_hours"] == 3
+
+            diag_secret = "https://provider.example/token"
+            diag_log = (f"failed {diag_secret} at c.example for {uid} "
+                        f"PrivateKey = {key} token=raw-token "
+                        f"inet6 2a02:6ea0:c700::17/64 via fe80::1 "
+                        f"Endpoint = [2a02:6ea0:c700::9]:51820")
+
+            def diag_runner(argv, **kwargs):
+                return subprocess.CompletedProcess(argv, 0, diag_log, "")
+
+            report = diagnostic_report(runner=diag_runner, now=123456)
+            for leaked in (diag_secret, "provider.example", "c.example", uid,
+                           key, "raw-token", "2a02:6ea0:c700::17",
+                           "2a02:6ea0:c700::9"):
+                assert leaked not in report, f"diagnostics leaked {leaked}"
+            assert "fe80::1" in report, \
+                "a link-local address is not a secret, and removing it would " \
+                "remove the fault as often as not"
+            for heading in ("# gateway-acl diagnostics", "## configuration",
+                            "## managed tunnels", "## files", "## commands"):
+                assert heading in report, heading
+            assert "[REDACTED" in report and len(report) <= DIAG_REPORT_MAX
         finally:
             TUNNELS, TUNNEL_DIR, SINGBOX_CONFIG = old_paths
 
     assert quick_address(wg) == "10.66.66.5/32"
     assert quick_address("[Interface]\nPrivateKey = x\n") == ""
+    assert "checkAllVpn" in PAGE and "diagnostics(true)" in PAGE
 
     # --- what a quick profile needs before the panel may offer to enable it ---
     real_which, seen_modinfo = shutil.which, []
@@ -7449,6 +8201,7 @@ PersistentKeepalive = 25
     # silently empty in the browser, which no other check here would notice.
     page = render(PAGE_T)
     for needle in ('id="vpnList"', 'id="vpnKind"', 'id="vpnSecret"',
+                   'id="vpnCheckAll"', 'id=diagStatus',
                    'aria-live="polite"', 'autocomplete="off"'):
         assert needle in page, f"the tunnel form has no {needle}"
     assert "PrivateKey" not in page and "PresharedKey" not in page, \

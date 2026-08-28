@@ -582,10 +582,80 @@ is deleted in a `finally`, and again before the next probe builds it.
 
 It runs outside the tunnel lock, under a lock of its own. A dead subscription
 costs a connect timeout and a silent peer costs the handshake window, and the
-poller must not queue behind a button somebody pressed. Only `probe`, `reach`
-and the node count are written back, and the row is looked up again under the
-lock afterwards, because the profile may have been deleted while a socket was
-still waiting.
+poller must not queue behind a button somebody pressed. The TCP probe returns
+its connect time rather than a made-up ICMP reading; the private subscription
+file keeps that number by label while the public catalog keeps the fastest
+picked node and the check timestamp. The row is looked up again under the lock
+afterwards, because the profile may have been deleted while a socket was still
+waiting, and the reading is discarded when the profile no longer converts to
+what the probe measured. A refresh, by hand or on the poller's tick, can
+replace the node list while a socket is open; the subject compared is the
+converted outbounds rather than the secret file, so a refresh that only
+brought the cached body up to date does not throw a good reading away.
+*Check all* is deliberately browser-side sequencing over this same endpoint:
+quick probes share one scratch interface, so a second server action that
+pretended they could safely run together would only add another queue.
+
+## Automatic subscription refresh
+
+`singbox_sub.fetch(..., with_headers=True)` returns the body and response
+headers without changing its CLI contract. The panel retains only the integer
+`Profile-Update-Interval`, whose unit is hours. `provider_hours` records that
+recommendation; `refresh_hours` is the effective period; `refresh_manual`
+keeps a person's later choice from being silently replaced by another header.
+Zero means no schedule and the accepted ceiling is one year.
+
+The normal poller calls `vpn_auto_refresh()`, which takes at most one due
+subscription per tick. The same `vpn_refresh()` path validates, commits and
+rolls back both manual and automatic downloads. A failed automatic attempt only
+sets `refresh_error` and `refresh_at`; it neither changes the cached body nor
+borrows the backend's `error` field. It retries after an hour instead of every
+poll. Success records `updated_at` and clears the row's `error`, because the
+profile has just been downloaded and read.
+
+What is committed is decided by the outbounds the body converts to, not by the
+body. Providers list a node that counts the traffic left or the day the plan
+expires, and rewrite it on every fetch, so a body comparison found a change
+every single time: transit closed and sing-box restarted on the provider's
+schedule, unattended, for a config that came out identical. When the conversion
+matches what the cache already produces, the refresh writes the new body,
+advances the timestamps and stops there. The node readings stay, because they
+still describe the running configuration. A cached body too damaged to convert
+counts as a change, since a refresh is how somebody repairs one.
+
+The download runs before the lock is taken, not inside it. It is a request to
+somebody else's server with a twenty second timeout, the poller now makes it on
+its own tick, and holding `_vpn_lock` across it would mean every button in the
+tunnel list queues behind the poller. Everything after the download is read
+again under the lock: the node selection, and the profile itself, may have
+moved while the socket was waiting.
+
+## Diagnostics without profile secrets
+
+`GET /diagnostics` is session-protected and returns a bounded plain-text support
+bundle. It combines sanitized configuration and public state with fixed,
+read-only system commands: service status and journals, routes, addresses,
+nftables, sockets, filesystem/memory state and tool versions. Commands are
+argument arrays, run concurrently with individual timeouts; no report text is
+ever fed back to a shell.
+
+One bundle is collected at a time, because it is about twenty processes and a
+couple of journal reads on a machine that is already being asked what is wrong
+with it.
+
+Before the response leaves the process, the redactor removes every URL and
+credential-shaped value plus exact subscription and quick-profile endpoints
+read from the owner-only files. Public addresses and hostname-with-port
+endpoints in logs are also hidden, in both families. IPv6 is not an
+afterthought here: `ip -6 address show` and `ip -6 route show table all` are
+part of the bundle, so a v4-only redactor handed over the gateway's own public
+prefix and the tunnel's peers. The test is `is_global`, which already knows
+about `::`, `fe80::/10`, `fc00::/7`, the documentation prefix and carrier NAT.
+Multicast stays, because a routing table is full of it and it names nobody.
+LAN addresses, device names and log prose remain because
+removing them would often remove the fault. The report begins by marking logs
+as untrusted data so a pasted bundle does not present journal text as
+instructions to an agent.
 
 ## The version constant
 

@@ -223,13 +223,42 @@ A **check** button sits on every profile and switches nothing. It answers
 "would this one work" while the current tunnel keeps running. A subscription is
 built into a configuration of its own, handed to `sing-box check` to read, and
 its nodes (up to 24 distinct addresses, all at once) are knocked on over TCP.
-The list then says "checked: 21 of 24 answered". A WireGuard or AmneziaWG
+The list then says "checked: 21 of 24 answered", the TCP connect time for each
+answering node and when that reading was taken. This is not ICMP ping and does
+not prove a proxy handshake; it is the time needed to reach the server's port.
+*Check all* runs the same check over every saved profile in order. A WireGuard or AmneziaWG
 profile is brought up on a scratch interface carrying a single route to
 `192.0.2.1`, an address from the block reserved for documentation, where nothing
 real is ever sent. The panel sends one packet through it, waits for the
 handshake, and deletes the interface. That is how you collect a pool of profiles
 and sort them into working and not, without switching the whole gateway onto
 each one.
+
+Subscriptions can refresh themselves. The first download reads the standard
+`Profile-Update-Interval` response header as hours and uses it automatically.
+Without that header the schedule stays off until you enter an interval; `0`
+means refresh only by hand. The interval beside every subscription is always
+editable, including one originally supplied by the provider, and a manual
+choice is not overwritten by later responses. An automatic failure keeps the
+old cache and live backend, records the error and retries an hour later. A
+successful one clears whatever the profile failed at last time.
+
+What decides whether anything is switched is the nodes the response turns into,
+not the bytes of the response. Providers list a node that counts the traffic
+left or names the day the plan expires, and rewrite it on every fetch. If the
+resulting configuration is the same one, the panel stores the new response and
+stops there. Nothing is restarted, forwarded traffic is not closed, and the
+check results stay, because they still describe what is running.
+
+*Copy diagnostics* and *download diagnostics* build one bounded text report for
+support or an AI agent: sanitized settings and profile state, devices, machine
+metrics, file state, tool versions, services, routes, nftables, sockets and the
+latest service/kernel journal. Subscription URLs and endpoints, UUIDs,
+passwords, tokens and WireGuard keys are redacted before the browser receives
+the report, and so is every public address, IPv6 included. Device names, LAN
+addresses and logs remain because they are often the diagnosis; inspect the
+text before sharing it outside your network. Only one report is collected at a
+time.
 
 Only one backend class is active at a time: the aggregate sing-box
 subscriptions, one WireGuard profile, one AmneziaWG profile, or direct routing.
@@ -308,14 +337,17 @@ panel password buys: whoever knows it can make the gateway install a release.
 The reboot button has always been the same kind of power. Better to say so than
 let you find out.
 
-**The panel reaches out once a day, and whenever you press the button.** It
+**The release checker reaches out once a day, and whenever you press its
+button.** It
 makes a GET to `api.github.com/repos/ChasoniCK/gateway-acl/releases/latest` for
 the latest release tag. Nothing about you is sent, but the request itself is
 visible to GitHub: your address and the time. The check is on by default, the
 switch is under **Settings** in the corner of the panel, and it takes effect at
-once. Beside it, *check for an update* makes that same request on demand. That
-is the only outbound traffic the panel ever has, so it happens no more often
-than you press it. On a gateway with no internet the request simply fails: the
+once. Beside it, *check for an update* makes that same request on demand. This
+is the only unsolicited destination built into the panel. Saved subscriptions
+are fetched when you add, refresh or schedule them, and their nodes are reached
+when you press a profile check; those destinations come only from profiles you
+supplied. On a gateway with no internet the release request simply fails: the
 daily check stays quiet and the button says so.
 
 ## Settings

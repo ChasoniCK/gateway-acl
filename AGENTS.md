@@ -1,6 +1,6 @@
 # AGENTS.md
-
 This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Commands
 
@@ -204,8 +204,8 @@ constant. `BACKEND_WAIT` is a module global resolved in the body, never a defaul
 argument, because `selftest()` sets it to 0.
 
 **A subscription's node selection lives with the subscription, not in the
-catalog.** `tunnels/<id>.json` holds `skip` (labels the user turned off) and `up`
-(what the last probe found per label) beside the link and the cached body.
+catalog.** `tunnels/<id>.json` holds `skip` (labels the user turned off), `up`
+and `ms` (what the last probe found per label) beside the link and cached body.
 `_tunnel_row()` whitelists the catalog and would drop them anyway. A *label* is
 an outbound tag minus its `sub-<id>-` prefix (`Germany` / `Germany 2`), and
 `convert()` allocates the tag before honouring `skip`, so dropping one node never
@@ -230,9 +230,53 @@ that fallback would call every profile on a host without the kernel module
 with its own kernel is the normal way to have AmneziaWG at all. It runs
 **outside** `_vpn_lock`, under `_probe_lock` of its own: a dead subscription
 costs a connect timeout and a silent peer costs the handshake window, and the
-poller must not queue behind a button. Only `probe`/`reach`/`nodes` are written
-back, and the row is re-found under the lock because the profile may have been
-deleted while a socket was waiting.
+poller must not queue behind a button. The catalog gets `probe`/`reach`/`nodes`,
+the fastest `probe_ms` and `probe_at`; the private file gets per-label readings.
+The row is re-found under the lock because the profile may have been deleted
+while a socket was waiting, and the reading is dropped outright when
+`_probe_subject()` no longer matches what it measured: a refresh can replace
+the node list mid-probe, and a summary written after that would describe a
+subscription this profile is not. That subject is the *converted* outbounds
+and not the secret file, so a refresh that only brought the cached body up to
+date does not throw a good reading away. "Check all" is browser-side
+sequencing over the same action because every quick probe shares `PROBE_IF`.
+
+**A provider's refresh interval is a default, a person's value is an
+override.** `Profile-Update-Interval` is parsed as hours, saved as
+`provider_hours` and used as `refresh_hours` until `vpn_schedule()` sets
+`refresh_manual`. Zero disables the schedule. `vpn_auto_refresh()` takes at
+most one due subscription per poll and uses the ordinary refresh/rollback path.
+Failure records `refresh_error` without touching the cache or backend and
+retries after `AUTO_REFRESH_RETRY`.
+
+What decides whether anything is committed is the **outbounds** the body
+converts to, never the bytes it arrived as. Providers put a "traffic left" or
+"expires on" node in the list and rewrite it on every fetch, so comparing
+bodies closed transit and restarted sing-box on the provider's schedule, for a
+config that came out identical. When `outs` equals what the cache already
+converts to, the refresh updates the cache and the timestamps and touches
+nothing else: no restart, and the probe results still describe the running
+config. A cache too damaged to convert counts as a change, because a refresh
+is how somebody repairs one. The download itself happens **outside**
+`_vpn_lock`: the poller takes this path on its own tick, and twenty seconds of
+somebody else's server must not be twenty seconds of a panel that answers
+nothing. Everything after it re-reads under the lock, because the selection
+may have moved while the socket was waiting.
+
+**Diagnostics are broad, but browser-safe.** `/diagnostics` is authenticated
+and combines sanitized public state with fixed read-only commands, bounded
+output and timeouts, one bundle at a time under `_diag_lock`.
+`_redact_diagnostics()` runs after the whole report is assembled and must
+remove subscription URLs and endpoints, UUIDs, tokens, passwords and
+quick-profile keys. Addresses go through `is_global`, in **both** families:
+`ip -6 addr` and `ip -6 route show table all` are in the bundle, so a v4-only
+redactor handed over the gateway's own public prefix and the tunnel's peers in
+a report whose first line says the secrets were removed. The v6 pattern runs
+first and is deliberately loose, because `ipaddress` is what validates it and
+a timestamp or a MAC that matches the shape is simply handed back. Multicast
+and everything `is_global` rejects stay, since a routing table is mostly that
+and removing it would remove the fault. Never add a raw secret file, command
+built from request data, or unredacted journal response to this endpoint.
 
 **The update button is the one place the panel runs code it downloaded.**
 `tar_url()` builds the address from constants and accepts a tag only if it matches
