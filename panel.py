@@ -49,6 +49,7 @@ import tarfile
 import tempfile
 import threading
 import time
+import traceback
 import urllib.request
 import zlib
 import singbox_sub
@@ -6356,9 +6357,28 @@ class H(BaseHTTPRequestHandler):
         pass
 
 
-def poller():
-    while True:
-        time.sleep(POLL_SEC)
+_tick_fault = ""    # what the last failed tick said, so it is said once
+
+
+def tick():
+    """Everything that happens on a schedule. Nothing escapes this.
+
+    An exception used to end the poller thread, and only the thread: the HTTP
+    server carried on serving pages, so the panel went on looking healthy while
+    timers stopped running back, an address DHCP had moved was never followed,
+    subscriptions stopped refreshing and the nightly reboot stopped happening.
+    Nothing said so, and Restart=always could not help, because the process was
+    still alive. A full disk in flush() or one `nft` that returned non-zero in
+    expire() was enough.
+
+    check_update() has caught its own exceptions since it was written, and says
+    so in as many words. This is that reasoning applied to the whole tick: a
+    step that fails costs its tick and nothing more, and the next one tries the
+    lot again. Reported once per distinct fault, because a fault that lasts
+    would otherwise be a traceback a minute for as long as it lasts.
+    """
+    global _tick_fault
+    try:
         poll()
         expire()        # a timer that has run out
         track_macs()    # a device DHCP has moved to another address
@@ -6369,6 +6389,20 @@ def poller():
         if reboot_due(CFG["reboot"] and CFG["reboot_at"],
                       time.localtime(), uptime(), POLL_SEC + 60):
             reboot_host()
+        _tick_fault = ""
+    except Exception as e:
+        said = f"{type(e).__name__}: {e}"
+        if said != _tick_fault:
+            _tick_fault = said
+            print("gateway-acl: the poller tick failed:",
+                  file=sys.stderr, flush=True)
+            traceback.print_exc()
+
+
+def poller():
+    while True:
+        time.sleep(POLL_SEC)
+        tick()
 
 
 def selftest():
@@ -6378,6 +6412,11 @@ def selftest():
     global _set_vpn_mark
     global _vpn_closed
     global BACKEND_WAIT, BACKEND_STEP
+    # Stubbed at the very end, to prove one failing step cannot take the
+    # poller thread with it. Declared here because a `global` has to come
+    # before the name is used anywhere else in the function.
+    global poll, expire, track_macs, vpn_poll, vpn_auto_refresh
+    global check_update, reboot_due, _tick_fault
 
     class BombReader:
         def read(self, *unused):
@@ -8356,6 +8395,36 @@ PersistentKeepalive = 25
             assert "{{" not in page, f"{lang}: a placeholder survived in the page"
             assert str(SELF_IP) in page or "login" in page
         assert str(LAN.netmask) in render(PAGE_T, t), f"{lang}: the netmask was not substituted"
+
+    # --- one failing step must cost its tick and nothing else ----------------
+    # Last, because every step of the tick is replaced and not put back: an
+    # exception used to end the poller thread while the HTTP server carried on
+    # serving pages, so the panel looked healthy with every timer stopped.
+    def boom(*a, **k):
+        raise OSError(28, "No space left on device")
+
+    steps = ["poll", "expire", "track_macs", "vpn_poll", "vpn_auto_refresh",
+             "check_update"]
+    for broken in steps:
+        for name in steps:
+            globals()[name] = (boom if name == broken else lambda *a, **k: None)
+        reboot_due = lambda *a, **k: False
+        _tick_fault = ""
+        said = io.StringIO()
+        with contextlib.redirect_stderr(said):
+            tick()          # must not raise, whichever step it was
+            tick()
+        assert said.getvalue().count("the poller tick failed") == 1, \
+            f"a failing {broken} is reported once, not once a tick"
+        assert "OSError" in said.getvalue(), f"{broken}: the fault is not named"
+    for name in steps:
+        globals()[name] = boom
+    reboot_due = boom
+    _tick_fault = ""
+    with contextlib.redirect_stderr(io.StringIO()):
+        tick()
+    assert _tick_fault, "a tick that failed must leave the fault behind"
+
     print("selftest ok")
 
 
