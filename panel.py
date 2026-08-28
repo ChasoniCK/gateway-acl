@@ -7,17 +7,17 @@ Nothing else on the system is touched.
 
 Traffic is counted by named nftables counters, two per device (up/down). They
 are zeroed when the table is rebuilt and on reboot, so the poller accumulates
-bytes per day, detecting resets (see accrue). The day in progress lives in
-today.json and the days already closed in traffic.json — see flush() for why
-the two are not one file.
+bytes per day and detects resets (see accrue). The day in progress lives in
+today.json and the days already closed in traffic.json. See flush() for why the
+two are not one file.
 
-Whoever knocks without being allowed is recorded by the kernel itself into the
-dynamic `blocked` set with a timeout — that is the unknown-devices list.
+The kernel itself records whoever knocks without being allowed, into the
+dynamic `blocked` set with a timeout. That is the unknown-devices list.
 
 The only request this program ever makes to the internet is a check of the
-latest release tag on GitHub — once a day, once more whenever the settings are
+latest release tag on GitHub: once a day, once more whenever the settings are
 saved, and whenever the check button is pressed. `"update_check": false` turns
-the daily one off; the button asks anyway, but no oftener than once a minute.
+the daily one off. The button asks anyway, but no oftener than once a minute.
 `"update_notify"` decides whether the page that finds a release also raises a
 browser notification about it.
 
@@ -61,16 +61,16 @@ from urllib.parse import urlparse, parse_qs
 # it against the newest tag on GitHub, so a forgotten bump makes every install
 # claim to be older than it is and show a banner that never goes away. CI
 # refuses a tag push where the two disagree.
-VERSION = "1.5.6"
+VERSION = "1.5.7"
 RELEASES_URL = "https://api.github.com/repos/ChasoniCK/gateway-acl/releases/latest"
 RELEASES_PAGE = "https://github.com/ChasoniCK/gateway-acl/releases/latest"
 # The one address the update button may ever download from. The repository is
 # part of the constant on purpose: only the tag comes off the network.
 TARBALL = "https://codeload.github.com/ChasoniCK/gateway-acl/tar.gz/refs/tags/"
 UPDATE_EVERY = 86400
-# The floor between two hand-made checks. GitHub allows sixty unauthenticated
-# requests an hour from an address, and spending them on a button held down is
-# how the daily check starts failing too.
+# The minimum gap between two checks made by hand. GitHub allows sixty
+# unauthenticated requests an hour from an address, and spending them on a
+# button held down is how the daily check starts failing too.
 MANUAL_EVERY = 60
 TAR_MAX = 20 << 20
 
@@ -93,7 +93,7 @@ DEFAULTS = {"iface": "eno1", "lan": "192.168.1.0/24", "self_ip": "192.168.1.10",
             "reboot": False, "reboot_at": "05:30",
             # Not a setting and not on the form: the moment the gateway stops
             # letting everyone through again. It lives in the config because it
-            # has to survive a restart — the table is rebuilt from disk on every
+            # has to survive a restart. The table is rebuilt from disk on every
             # start, and a bypass that evaporated there would lock out a room
             # full of guests the moment the service is updated.
             "bypass": 0,
@@ -102,12 +102,12 @@ DEFAULTS = {"iface": "eno1", "lan": "192.168.1.0/24", "self_ip": "192.168.1.10",
             # and whoever has to change it is already editing that tunnel's
             # config. 0 turns the whole feature off.
             #
-            # 0x2024 is sing-box's AutoRedirectOutputMark — what it puts on its
-            # own packets so they are not swallowed again, and therefore the one
+            # 0x2024 is sing-box's AutoRedirectOutputMark, which it puts on its
+            # own packets so they are not swallowed again, so it is the one
             # thing its rules step aside for. Its neighbour 0x2023 is the
             # *input* mark and does the exact opposite: `ip rule ... fwmark
-            # 0x2023 lookup 2022` sends the packet into the tun. Reading it off
-            # the host beats trusting either number — see docs/singbox.md.
+            # 0x2023 lookup 2022` sends the packet into the tun. Read it off
+            # the host rather than trusting either number, see docs/singbox.md.
             # wg-quick's is its own port, 51820.
             "vpn_mark": 0x2024}
 SESSION_TTL = 7 * 86400
@@ -117,18 +117,18 @@ BLOCK_TTL = 6 * 3600    # how long the kernel remembers whom it dropped
 TIMER_MAX = 7 * 86400   # the longest a device may be switched off "for a while"
 # ...and the longest the whole gateway may stand open. Shorter than a device's
 # timer on purpose: this one suspends the entire point of the program, and
-# "until tomorrow" is not a thing anybody means by "let the guests in".
+# nobody means "until tomorrow" by "let the guests in".
 BYPASS_MAX = 6 * 3600
 # How long /api reuses its own last answer. Every open tab asks every five
-# seconds, and on a phone plus a laptop that is two full readings — the day
-# buckets copied, the ARP table and the lease file read, /proc walked — for a
-# number that cannot have changed in between. Below POLL_MIN on purpose: the
-# counters are behind that window anyway, so this only removes work nothing
-# was waiting for.
+# seconds, so a phone plus a laptop is two full readings: the day buckets
+# copied, the ARP table and the lease file read, /proc walked, all for a number
+# that cannot have changed in between. Below POLL_MIN on purpose, since the
+# counters are behind that window anyway, so this only removes work nothing was
+# waiting for.
 STATE_CACHE = 1.0
 # How long today.json is allowed to lag behind memory. This is the seconds of
-# accounting a power cut costs — a clean stop or a crash costs nothing, see
-# flush() — and it is what keeps a page refreshing every five seconds from
+# accounting a power cut costs (a clean stop or a crash costs nothing, see
+# flush()), and it is what keeps a page refreshing every five seconds from
 # rewriting the file every five seconds. Five minutes of a gateway's traffic is
 # worth less than the flash this saves: the file is rewritten whole, so this
 # number divides the bytes written per day straight down.
@@ -164,9 +164,9 @@ def conf():
     except FileNotFoundError:
         return dict(DEFAULTS)
     except PermissionError:
-        # config.json is 0600 — it holds the password hash. A plain user (say,
-        # running --selftest by hand) gets the defaults, but is told so out
-        # loud: a silently wrong iface and network would look like healthy work.
+        # config.json is 0600, because it holds the password hash. A plain user
+        # (say, running --selftest by hand) gets the defaults and is told so:
+        # a silently wrong iface and network would look like healthy work.
         lang = "en" if os.environ.get("GWACL_LANG") == "en" else "ru"
         print(STRINGS[lang]["cfgUnreadable"].replace("{cfg}", CONFIG), file=sys.stderr)
         return dict(DEFAULTS)
@@ -210,12 +210,12 @@ def write_private_text(path, text):
 def write_atomic(path, obj):
     """Write json so that a power cut leaves either the old file or the new one.
 
-    `open(path, "w")` truncates first: cut the power in that window and what
+    `open(path, "w")` truncates first. Cut the power in that window and what
     comes back up is half a file, which is not json and takes the panel with it
     on the next start. The rename is the atomic step, and the fsync is what
-    makes it mean anything — without it the rename can reach the disk before
-    the bytes do. Compact separators because nobody reads these two files by
-    hand and every comma is written FLUSH_EVERY seconds apart, for ever.
+    makes it mean anything: without it the rename can reach the disk before the
+    bytes do. Compact separators, because nobody reads these two files by hand
+    and every comma is written FLUSH_EVERY seconds apart, for ever.
     """
     tmp = f"{path}.tmp"
     with open(tmp, "w") as f:
@@ -262,30 +262,30 @@ STRINGS = {
         "addDevice": "Добавить устройство",
         "phName": "название устройства",
         "add": "добавить",
-        "hint": "На устройстве прописать вручную: шлюз <b>{{GW}}</b>, маска "
+        "hint": "На устройстве пропишите вручную: шлюз <b>{{GW}}</b>, маска "
                 "<b>{{MASK}}</b> (Android спрашивает длину префикса — "
-                "<b>{{PFX}}</b>), DNS <b>1.1.1.1</b>. Кого нет в списке — тот через "
-                "шлюз не ходит вообще. «Выключить» оставляет устройство в списке "
-                "вместе с историей и именем, но закрывает ему выход. Устройство "
-                "запоминается по MAC: если DHCP выдаст ему другой адрес, запись "
-                "переедет туда вместе со всей своей историей.",
+                "<b>{{PFX}}</b>), DNS <b>1.1.1.1</b>. Кого нет в списке, тот "
+                "через шлюз не ходит. «Выключить» закрывает устройству выход, "
+                "но оставляет его в списке с именем и историей. Устройство "
+                "запоминается по MAC: если DHCP выдаст ему другой адрес, "
+                "запись переедет туда вместе со всей историей.",
         "blockedTitle": "Стучались, но не пущены",
-        "blockedHint": "Ядро запомнило адреса, чьи пакеты дропнуты за последние 6 часов.",
+        "blockedHint": "Адреса, чьи пакеты ядро отбросило за последние 6 часов.",
         "noData": "за этот месяц данных ещё нет",
         "youAre": "Вы",
         "turnOff": "выключить",
         "turnOn": "включить",
         "vpnOff": "мимо VPN",
         "vpnOn": "через VPN",
-        "vpnWhat": "Выпустить устройство мимо туннеля: интернет у него остаётся, "
-                   "но идёт напрямую через шлюз, а не через VPN. Пакеты "
-                   "помечаются fwmark, по которой туннель их не забирает — "
-                   "метка задаётся в config.json как \"vpn_mark\".",
+        "vpnWhat": "Выпустить устройство мимо туннеля. Интернет у него "
+                   "остаётся, но идёт напрямую через шлюз. Пакеты помечаются "
+                   "fwmark, по которой туннель их не забирает. Метка задаётся "
+                   "в config.json как \"vpn_mark\".",
         "del": "удалить",
         "tmFor": "на время",
-        "tmWhat": "Выключить или включить на время: когда срок выйдет, устройство "
-                  "само вернётся к тому состоянию, в котором стоит сейчас. "
-                  "Точность — период опроса счётчиков.",
+        "tmWhat": "Выключить или включить на время. Когда срок выйдет, "
+                  "устройство вернётся в то состояние, в котором стоит "
+                  "сейчас. Точность — период опроса счётчиков.",
         "tm15": "15 минут",
         "tm1h": "1 час",
         "tm3h": "3 часа",
@@ -299,29 +299,32 @@ STRINGS = {
         "tm5": "5 минут",
         "byp": "пустить всех",
         "bypOn": "открыто для всех",
-        "bypWhat": "На это время шлюз пропускает всех подряд, включая тех, кого "
-                   "нет в списке. Учёт трафика не прерывается, и ядро всё так же "
-                   "запоминает, кто приходил, — когда время выйдет, они окажутся "
-                   "в списке внизу, и любого можно будет добавить в один клик.",
-        "confirmByp": "Пустить через шлюз всех подряд? На это время список не "
-                      "действует — выход получит любое устройство в сети.",
+        "bypWhat": "На это время шлюз пропускает всех, включая тех, кого нет "
+                   "в списке. Учёт трафика не прерывается, ядро по-прежнему "
+                   "запоминает, кто приходил. Когда время выйдет, все они "
+                   "окажутся в списке внизу, и любого можно добавить в один "
+                   "клик.",
+        "confirmByp": "Пустить через шлюз всех? На это время список не "
+                      "действует: выход получит любое устройство в сети.",
         "allOff": "выключить всех",
         "allOn": "включить всех",
         "allWhat": "Кроме вашего собственного адреса",
         "confirmAllOff": "Закрыть выход всем устройствам? Ваш адрес останется "
-                         "включённым, вернуть остальных можно той же кнопкой.",
+                         "включённым. Вернуть остальных можно той же кнопкой.",
         "useHost": "назвать так, как устройство представляется сети: {n}",
         "clashTitle": "На адресе не то устройство",
         "clashLine": "в списке {a}, отвечает {b}",
-        "clashHint": "Правило разрешает адрес, а отвечает с него сейчас другое "
-                     "железо — значит, через шлюз ходит не то, что вы разрешали. "
-                     "Обычно это статический адрес, который DHCP успел выдать "
-                     "кому-то ещё. Проще всего сменить адрес одному из двоих.",
+        "clashHint": "Правило разрешает адрес, но отвечает с него другое "
+                     "железо. Значит, через шлюз ходит не то, что вы "
+                     "разрешали. Обычно так бывает, когда статический адрес "
+                     "DHCP успел выдать кому-то ещё. Проще всего сменить "
+                     "адрес одному из двоих.",
         "macRandom": "случайный адрес",
-        "empty": "пусто — сейчас через шлюз не ходит никто",
+        "empty": "пусто: сейчас через шлюз никто не ходит",
         "confirmDel": "Удалить {ip}? История трафика останется.",
-        "confirmDelMe": "Удалить {ip}? Это ваш собственный адрес — интернет через шлюз "
-                        "пропадёт, но панель останется доступна, и себя можно будет вернуть.",
+        "confirmDelMe": "Удалить {ip}? Это ваш собственный адрес. Интернет через "
+                        "шлюз пропадёт, но панель останется доступна, и себя "
+                        "можно будет вернуть.",
         "b": " Б", "kb": " КБ", "mb": " МБ", "gb": " ГБ",
         "now": "сейчас",
         "minAgo": "{n} мин назад",
@@ -341,20 +344,20 @@ STRINGS = {
         "noIface": "интерфейса {iface} нет — поправьте iface в {cfg}",
         "noPwWarn": "ВНИМАНИЕ: пароль не задан, панель никого не пустит. "
                     "Задайте: {cmd} --set-password",
-        "cfgUnreadable": "{cfg} читается только root — беру значения по умолчанию",
+        "cfgUnreadable": "{cfg} читается только под root — беру значения по умолчанию",
         "pwShort": "пароль короче 8 символов",
         "updateTitle": "Есть обновление",
         "updateNew": "Вышла версия {v}, установлена {{VERSION}}.",
-        "updateHint": "Кнопка скачивает релиз с GitHub и запускает тот же "
-                      "<code>install.sh</code>, отвечая за вас теми значениями, "
-                      "что уже настроены. Список устройств и статистика не "
-                      "тронутся. Руками: <code>git pull</code> и "
-                      "<code>sudo ./install.sh</code>. Проверку можно выключить "
-                      "в настройках.",
+        "updateHint": "Кнопка скачает релиз с GitHub и запустит тот же "
+                      "<code>install.sh</code> с теми настройками, что уже "
+                      "заданы. Список устройств и статистика не тронутся. "
+                      "Вручную: <code>git pull</code> и "
+                      "<code>sudo ./install.sh</code>. Проверку можно "
+                      "выключить в настройках.",
         "updateNow": "Установить сейчас",
         "updateConfirm": "Скачать {v} и установить? Панель перезапустится сама.",
-        "updating": "Обновление пошло. Панель перезапустится — обновите страницу "
-                    "через минуту-другую.",
+        "updating": "Обновление пошло. Панель перезапустится, обновите "
+                    "страницу через минуту-другую.",
         "updateNone": "Обновления нет.",
         "updateFound": "Вышла версия {v}.",
         "updateFail": "GitHub не ответил. Проверьте связь и попробуйте позже.",
@@ -390,34 +393,34 @@ STRINGS = {
         "vpnDelete": "удалить",
         "vpnProbeOk": "проверка пройдена",
         "vpnProbeNodes": "проверка: отвечают {a} из {b}",
-        "vpnProbeWhat": "Проверка не переключает шлюз: подписка собирается в "
-                        "отдельный конфиг и отдаётся sing-box на разбор, узлы "
-                        "опрашиваются по TCP, а WireGuard поднимается на "
-                        "временном интерфейсе с маршрутом в 192.0.2.1 — туда "
-                        "не ходит ничего настоящего — и удаляется сразу после "
+        "vpnProbeWhat": "Проверка ничего не переключает. Подписка собирается "
+                        "в отдельный конфиг и отдаётся sing-box на разбор, "
+                        "узлы опрашиваются по TCP. WireGuard поднимается на "
+                        "временном интерфейсе с маршрутом в 192.0.2.1 (туда "
+                        "не ходит ничего настоящего) и удаляется сразу после "
                         "рукопожатия.",
         "vpnErrUnreachable": "ни один узел не ответил",
-        "vpnNoTool": "на шлюзе не установлено: {tools} — сохранённые туннели "
+        "vpnNoTool": "На шлюзе не установлено: {tools}. Сохранённые туннели "
                      "этих типов не поднимутся. Поставит установщик: "
                      "sudo ./install.sh",
-        "vpnNoToolKind": "На шлюзе нет {tool}: профиль сохранится, но включить "
+        "vpnNoToolKind": "На шлюзе нет {tool}. Профиль сохранится, но включить "
                          "его будет нечем. Поставит sudo ./install.sh",
         "vpnPickNodes": "узлы",
         "vpnHideNodes": "свернуть",
         "vpnNodesSave": "сохранить выбор",
         "vpnNodeUp": "отвечает",
         "vpnNodeDown": "молчит",
-        "vpnNodesWhat": "Снятые узлы не попадают в конфиг вовсе, поэтому группа "
-                        "не сможет их выбрать. Отметки «отвечает» и «молчит» — "
-                        "от последней проверки; узлы, до которых она не дошла, "
-                        "остаются без отметки. Хотя бы один узел должен "
+        "vpnNodesWhat": "Снятые узлы не попадают в конфиг, поэтому группа не "
+                        "сможет их выбрать. Отметки «отвечает» и «молчит» "
+                        "остались от последней проверки; узлы, до которых она "
+                        "не дошла, идут без отметки. Хотя бы один узел должен "
                         "остаться.",
         "vpnConfirmDisable": "Выключить последний активный туннель? Трафик пойдёт напрямую.",
         "vpnConfirmDelete": "Удалить этот туннель и его сохранённые данные? Если он активен, подключение будет переключено.",
         "vpnIpv6": "В конфиге нет полного маршрута IPv6",
-        "vpnHint": "Новый туннель сначала сохраняется выключенным. Подписки можно "
-                   "включать вместе; WireGuard или AmneziaWG заменяет их как "
-                   "единственный активный backend. Команды из хуков конфигов запрещены.",
+        "vpnHint": "Новый туннель сохраняется выключенным. Подписки можно "
+                   "включать вместе. WireGuard или AmneziaWG заменяет их и "
+                   "работает один. Команды из хуков в конфигах запрещены.",
         "vpnBusy": "Применяю…",
         "vpnSaved": "Готово",
         "vpnBadForm": "Заполните название и данные выбранного типа.",
@@ -439,21 +442,21 @@ STRINGS = {
         "sLang": "язык панели",
         "sUpdate": "сообщать о новых версиях",
         "sNotify": "уведомлять о них в браузере",
-        "sNotifyHint": "Пока вкладка открыта, о новой версии скажет уведомление "
-                       "браузера — если он их разрешил и страница открыта по "
-                       "https или с localhost; по http на адрес в сети браузер "
-                       "уведомления не даёт вовсе. Там, где не даёт, точка "
-                       "появится в заголовке вкладки. Про версию говорится один "
-                       "раз, а не при каждом опросе.",
+        "sNotifyHint": "Пока вкладка открыта, о новой версии скажет "
+                       "уведомление браузера. Нужно, чтобы он их разрешил и "
+                       "страница была открыта по https или с localhost: по "
+                       "http на адрес в сети уведомлений не будет вовсе. "
+                       "Тогда вместо них появится точка в заголовке вкладки. "
+                       "Про версию говорится один раз, а не при каждом опросе.",
         "notifyBody": "Вышла версия {v}. Откройте панель, чтобы поставить.",
         "sCheck": "проверить обновление",
         "sCheckHint": "Панель и так спрашивает GitHub раз в сутки. Вручную — "
-                      "не чаще раза в минуту и всё равно редко: GitHub считает "
-                      "запросы с адреса (60 в час), и если их выбрать, "
-                      "перестанет отвечать и суточной проверке.",
+                      "не чаще раза в минуту, и всё равно пореже: GitHub "
+                      "считает запросы с адреса, 60 в час. Если их выбрать, "
+                      "он перестанет отвечать и суточной проверке.",
         "sPoll": "опрос счётчиков, с",
         "sKeep": "хранить по дням, мес.",
-        "sKeepWhat": "Сколько месяцев держать разбивку по дням. Что старше — "
+        "sKeepWhat": "Сколько месяцев держать разбивку по дням. Что старше, "
                      "сворачивается в одну цифру за месяц: итоги месяцев и "
                      "устройств остаются точными до байта, пропадает только "
                      "график по дням. Уменьшение сворачивает лишнее сразу.",
@@ -465,17 +468,18 @@ STRINGS = {
         "sPwKeep": "оставить прежний",
         "sSave": "сохранить",
         "sRebootAt": "ребут каждый день в",
-        "sRebootAtWhat": "Перезагружать шлюз каждую ночь в это время. Точность "
-                         "— период опроса: ребут случится в первый опрос после "
-                         "указанного времени.",
+        "sRebootAtWhat": "Перезагружать шлюз каждую ночь в это время. "
+                         "Точность — период опроса: ребут случится в первый "
+                         "опрос после указанного времени.",
         "sReboot": "перезагрузить шлюз",
-        "confirmReboot": "Перезагрузить шлюз? Пока он загружается, интернета не "
-                         "будет ни у одного устройства.",
+        "confirmReboot": "Перезагрузить шлюз? Пока он загружается, интернета "
+                         "не будет ни у одного устройства.",
         "rebooting": "Шлюз перезагружается. Панель вернётся через минуту-другую.",
-        "sNetHint": "Первые три поля — то же, что нашёл установщик. Меняйте их, только "
-                    "если сеть действительно переехала: правила nftables пересобираются "
-                    "сразу, а устройства вне новой сети добавить будет уже нельзя. "
-                    "Смена порта перезапускает панель. Всё лежит в {{CFG}}.",
+        "sNetHint": "Первые три поля — то, что нашёл установщик. Меняйте их, "
+                    "только если сеть переехала: правила nftables "
+                    "пересоберутся сразу, а устройства вне новой сети добавить "
+                    "будет уже нельзя. Смена порта перезапускает панель. Всё "
+                    "лежит в {{CFG}}.",
         "sRestart": "Порт изменён. Панель перезапускается — откройте {url}",
         "badLang": "языка {lang} нет",
         "badNumber": "здесь нужно число",
@@ -485,7 +489,7 @@ STRINGS = {
         "badPort": "порт — от 1 до 65535",
         "badIface": "интерфейса {iface} в системе нет",
         "selfOutside": "{ip} не входит в сеть {lan}",
-        "portBusy": "порт {port} уже занят — панель не поднимется на нём",
+        "portBusy": "порт {port} уже занят — панель на нём не поднимется",
         "colNow": "сейчас",
         "byDay": "по дням",
         "byHour": "за сутки",
@@ -493,7 +497,7 @@ STRINGS = {
         "locale": "ru-RU",
         "cumul": "накопительно",
         "vsPrev": "к прошлому месяцу",
-        "noHours": "часы копятся с запуска панели — подождите немного",
+        "noHours": "часы копятся с запуска панели, подождите немного",
         "showAll": "показать все",
         "showInChart": "Показать в графике",
         "sysTitle": "Машина",
@@ -514,11 +518,11 @@ STRINGS = {
         "dShort": "д",
         "hShort": "ч",
         "other": "прочее",
-        "otherWhat": "Трафик адресов, которых в списке уже нет. История привязана "
-                     "к адресу и переживает удаление устройства, поэтому байты "
-                     "остаются в итогах месяца — но приписать их больше некому. "
-                     "Сюда же попадает всё, что было учтено до того, как адрес "
-                     "добавили заново.",
+        "otherWhat": "Трафик адресов, которых в списке больше нет. История "
+                     "привязана к адресу и переживает удаление устройства, "
+                     "поэтому байты остаются в итогах месяца, но приписать их "
+                     "уже некому. Сюда же попадает всё, что было учтено до "
+                     "того, как адрес добавили заново.",
         "filter": "фильтр",
         "noMatch": "под фильтр ничего не подошло",
         "csvWhat": "скачать таблицу за выбранный месяц",
@@ -526,7 +530,7 @@ STRINGS = {
         "updateWhat": "что изменилось",
         "dotLive": "трафик идёт",
         "dotQuiet": "тихо",
-        "rolled": "подробности по дням за этот месяц свёрнуты — остался только итог",
+        "rolled": "разбивка по дням за этот месяц свёрнута, остался только итог",
     },
     "en": {
         "title": "Gateway",
@@ -548,31 +552,30 @@ STRINGS = {
         "addDevice": "Add device",
         "phName": "name device",
         "add": "add",
-        "hint": "Set manually on the device: gateway <b>{{GW}}</b>, netmask "
+        "hint": "Set this on the device by hand: gateway <b>{{GW}}</b>, netmask "
                 "<b>{{MASK}}</b> (Android and Quest ask for prefix length — "
-                "<b>{{PFX}}</b>), DNS <b>1.1.1.1</b>. Anything not on the list does not "
-                "route through the gateway at all. &ldquo;Turn off&rdquo; keeps a device "
-                "listed with its name and history, but closes its way out. A device is "
-                "remembered by its hardware address: if DHCP moves it to another "
-                "address, the entry follows it there with all of its history.",
+                "<b>{{PFX}}</b>), DNS <b>1.1.1.1</b>. Anything not on the list "
+                "does not get through the gateway. &ldquo;Turn off&rdquo; blocks a "
+                "device but keeps it listed with its name and history. Devices are "
+                "remembered by hardware address: if DHCP moves one to another "
+                "address, the entry follows it with all its history.",
         "blockedTitle": "Knocked, not allowed",
-        "blockedHint": "The kernel recorded the addresses whose packets it dropped "
-                       "in the last 6 hours.",
+        "blockedHint": "Addresses whose packets the kernel dropped in the last 6 hours.",
         "noData": "no data for this month yet",
         "youAre": "You",
         "turnOff": "turn off",
         "turnOn": "turn on",
         "vpnOff": "no VPN",
         "vpnOn": "via VPN",
-        "vpnWhat": "Let the device past the tunnel: it keeps its internet, but "
-                   "goes straight out through the gateway instead of through "
-                   "the VPN. Its packets are stamped with an fwmark the tunnel "
-                   "leaves alone — the mark is \"vpn_mark\" in config.json.",
+        "vpnWhat": "Send the device around the tunnel. It keeps its internet, "
+                   "but goes straight out through the gateway instead of the "
+                   "VPN. Its packets carry an fwmark the tunnel ignores. The "
+                   "mark is \"vpn_mark\" in config.json.",
         "del": "delete",
         "tmFor": "for a while",
-        "tmWhat": "Turn off or on for a while: when the time is up the device goes "
-                  "back to the state it stands in now. It is as precise as the "
-                  "counter poll interval.",
+        "tmWhat": "Turn off or on for a while. When the time is up, the device "
+                  "goes back to the state it is in now. Accurate to one "
+                  "counter poll.",
         "tm15": "15 minutes",
         "tm1h": "1 hour",
         "tm3h": "3 hours",
@@ -581,37 +584,37 @@ STRINGS = {
         "tmLeftM": "{n} min left",
         "tmLeftH": "{n} h left",
         "tmCancel": "drop the timer and leave it as it is",
-        "badTimer": "a timer is a minute to a week",
-        "badBypass": "the gateway may stand open for {n} h at most",
+        "badTimer": "a timer is one minute to one week",
+        "badBypass": "the gateway can stay open for {n} h at most",
         "tm5": "5 minutes",
         "byp": "let everyone in",
         "bypOn": "open to everyone",
-        "bypWhat": "For that long the gateway lets everything through, the "
-                   "devices that are not on the list included. The accounting "
-                   "carries on, and the kernel goes on recording who came — when "
-                   "the time is up they are in the list at the bottom, and any of "
-                   "them is one click from being allowed for good.",
-        "confirmByp": "Let everything through the gateway? For that long the list "
-                      "does not apply — any device on the network gets out.",
+        "bypWhat": "For that long the gateway lets everything through, "
+                   "including devices that are not on the list. Accounting "
+                   "keeps running and the kernel keeps recording who showed "
+                   "up. When the time is up they are all in the list below, "
+                   "one click from being allowed for good.",
+        "confirmByp": "Let every device through the gateway? For that long the "
+                      "list does not apply and anything on the network gets out.",
         "allOff": "turn everyone off",
         "allOn": "turn everyone on",
         "allWhat": "Except your own address",
-        "confirmAllOff": "Close the way out for every device? Your own address "
-                         "stays on, and the same button brings the rest back.",
-        "useHost": "name it the way it introduces itself to the network: {n}",
+        "confirmAllOff": "Block every device? Your own address stays on. The "
+                         "same button brings the rest back.",
+        "useHost": "use the name the device gives the network: {n}",
         "clashTitle": "Another device is on that address",
         "clashLine": "listed as {a}, answers as {b}",
-        "clashHint": "The rule allows an address, and different hardware is "
-                     "answering from it — so what routes through the gateway is "
-                     "not what you allowed. Usually a static address that DHCP "
-                     "has handed out to somebody else as well. The simplest fix "
-                     "is to move one of the two.",
+        "clashHint": "The rule allows this address, but different hardware is "
+                     "answering from it. So the device going through the "
+                     "gateway is not the one you allowed. Usually a static "
+                     "address that DHCP has also handed to somebody else. The "
+                     "easiest fix is to move one of the two.",
         "macRandom": "randomised address",
-        "empty": "empty — nobody routes through the gateway right now",
+        "empty": "empty: nobody is using the gateway right now",
         "confirmDel": "Delete {ip}? Its traffic history stays.",
-        "confirmDelMe": "Delete {ip}? That is your own address — you will lose internet "
-                        "through the gateway, but the panel stays reachable and you can "
-                        "add yourself back.",
+        "confirmDelMe": "Delete {ip}? That is your own address. You lose internet "
+                        "through the gateway, but the panel stays reachable and "
+                        "you can add yourself back.",
         "b": " B", "kb": " KB", "mb": " MB", "gb": " GB",
         "now": "now",
         "minAgo": "{n} min ago",
@@ -626,28 +629,28 @@ STRINGS = {
         "tooMany": "Too many attempts. Wait a minute.",
         "noPw": "No password set. On the gateway: panel.py --set-password",
         "needLogin": "sign in required",
-        "badIp": "{ip}: expected a client address from {lan}, not the gateway itself",
+        "badIp": "{ip}: needs a client address from {lan}, not the gateway itself",
         "pwSaved": "password saved",
         "noIface": "interface {iface} does not exist — fix iface in {cfg}",
         "noPwWarn": "WARNING: no password set, the panel will let nobody in. "
                     "Set one: {cmd} --set-password",
-        "cfgUnreadable": "{cfg} is readable by root only — falling back to defaults",
+        "cfgUnreadable": "{cfg} is readable by root only — using defaults",
         "pwShort": "password shorter than 8 characters",
         "updateTitle": "Update available",
         "updateNew": "Version {v} is out, you have {{VERSION}}.",
-        "updateHint": "The button downloads the release from GitHub and runs the "
-                      "same <code>install.sh</code>, answering it with the "
-                      "settings you already have. Your device list and "
-                      "statistics are left alone. By hand: <code>git pull</code> "
-                      "then <code>sudo ./install.sh</code>. The check can be "
-                      "turned off in the settings.",
+        "updateHint": "The button downloads the release from GitHub and runs "
+                      "the same <code>install.sh</code> with the settings you "
+                      "already have. Your device list and statistics are left "
+                      "alone. By hand: <code>git pull</code> then "
+                      "<code>sudo ./install.sh</code>. You can turn the check "
+                      "off in the settings.",
         "updateNow": "Install now",
         "updateConfirm": "Download {v} and install it? The panel restarts itself.",
-        "updating": "The update has started. The panel will restart — reload the "
-                    "page in a minute or two.",
+        "updating": "The update has started. The panel will restart, so reload "
+                    "the page in a minute or two.",
         "updateNone": "There is no update.",
         "updateFound": "Version {v} is out.",
-        "updateFail": "GitHub did not answer. Check the link and try later.",
+        "updateFail": "GitHub did not answer. Check the connection and try later.",
         "updateLog": "How it went: {{UPDLOG}}",
         "settingsTitle": "Settings",
         "groupGeneral": "General",
@@ -680,35 +683,34 @@ STRINGS = {
         "vpnDelete": "delete",
         "vpnProbeOk": "the check passed",
         "vpnProbeNodes": "checked: {a} of {b} answered",
-        "vpnProbeWhat": "A check switches nothing: the subscription is built "
-                        "into a configuration of its own and handed to sing-box "
-                        "to read, its nodes are knocked on over TCP, and a "
-                        "WireGuard profile is brought up on a scratch interface "
-                        "routed to 192.0.2.1 — where nothing real is ever "
-                        "sent — and deleted again right after the handshake.",
+        "vpnProbeWhat": "A check switches nothing. The subscription is built "
+                        "into a config of its own and handed to sing-box to "
+                        "read, then its nodes are knocked on over TCP. A "
+                        "WireGuard profile comes up on a temporary interface "
+                        "routed to 192.0.2.1, where nothing real is ever sent, "
+                        "and is deleted right after the handshake.",
         "vpnErrUnreachable": "no node answered",
-        "vpnNoTool": "not installed on the gateway: {tools} — the saved "
-                     "tunnels of those kinds will not come up. The installer "
-                     "adds them: sudo ./install.sh",
-        "vpnNoToolKind": "The gateway has no {tool}: the profile will be saved, "
-                         "but there is nothing to bring it up with. "
+        "vpnNoTool": "Not installed on the gateway: {tools}. Saved tunnels of "
+                     "those kinds will not come up. The installer adds them: "
+                     "sudo ./install.sh",
+        "vpnNoToolKind": "The gateway has no {tool}. The profile will be saved, "
+                         "but there is nothing to start it with. "
                          "sudo ./install.sh adds it",
         "vpnPickNodes": "nodes",
         "vpnHideNodes": "collapse",
         "vpnNodesSave": "save the selection",
         "vpnNodeUp": "answers",
         "vpnNodeDown": "silent",
-        "vpnNodesWhat": "A node turned off here does not reach the "
-                        "configuration at all, so the group cannot pick it. "
-                        "\"answers\" and \"silent\" come from the last check; "
-                        "nodes it did not reach carry no mark. At least one "
-                        "node has to stay.",
+        "vpnNodesWhat": "A node turned off here never reaches the config, so "
+                        "the group cannot pick it. \"answers\" and \"silent\" "
+                        "come from the last check; nodes it did not reach have "
+                        "no mark. At least one node has to stay.",
         "vpnConfirmDisable": "Disable the last active tunnel? Traffic will go direct.",
         "vpnConfirmDelete": "Delete this tunnel and its saved data? If it is active, the connection will switch.",
         "vpnIpv6": "The configuration has no full IPv6 route",
-        "vpnHint": "A new tunnel is saved disabled first. Subscriptions may be "
-                   "enabled together; WireGuard or AmneziaWG replaces them as "
-                   "the only active backend. Configuration hooks are forbidden.",
+        "vpnHint": "A new tunnel is saved turned off. Subscriptions can be "
+                   "enabled together. WireGuard or AmneziaWG replaces them and "
+                   "runs alone. Hook commands in configs are not allowed.",
         "vpnBusy": "Applying…",
         "vpnSaved": "Done",
         "vpnBadForm": "Fill in the name and the data required for this type.",
@@ -730,24 +732,24 @@ STRINGS = {
         "sLang": "panel language",
         "sUpdate": "tell me about new versions",
         "sNotify": "and pop up a browser notification",
-        "sNotifyHint": "While a tab is open, a new version arrives as a browser "
-                       "notification — if the browser allows them and the page "
-                       "came over https or from localhost; over plain http on a "
-                       "network address the browser withholds notifications "
-                       "entirely. Where it does, a dot appears in the tab title "
+        "sNotifyHint": "While a tab is open, a new version shows up as a "
+                       "browser notification. The browser has to allow them, "
+                       "and the page has to be on https or localhost: over "
+                       "plain http on a network address there are no "
+                       "notifications at all. A dot appears in the tab title "
                        "instead. A version is announced once, not on every poll.",
         "notifyBody": "Version {v} is out. Open the panel to install it.",
         "sCheck": "check for an update",
-        "sCheckHint": "The panel already asks GitHub once a day. By hand: once a "
-                      "minute at most, and sparingly even then — GitHub counts "
-                      "requests per address (60 an hour), and spending them "
-                      "stops the daily check from getting an answer too.",
+        "sCheckHint": "The panel already asks GitHub once a day. By hand: once "
+                      "a minute at most, and rarely even then. GitHub counts "
+                      "requests per address, 60 an hour. Spend them and the "
+                      "daily check stops getting an answer too.",
         "sPoll": "counter poll, s",
         "sKeep": "keep day by day, months",
         "sKeepWhat": "How many months keep their day-by-day breakdown. Older "
                      "ones are folded into one figure per month: monthly and "
                      "per-device totals stay exact to the byte, only the daily "
-                     "chart goes. Lowering this folds what is over the line at once.",
+                     "chart goes. Lowering this folds the excess right away.",
         "sIface": "interface",
         "sLan": "local network",
         "sSelfIp": "this gateway in it",
@@ -756,17 +758,18 @@ STRINGS = {
         "sPwKeep": "leave the current one",
         "sSave": "save",
         "sRebootAt": "reboot every day at",
-        "sRebootAtWhat": "Reboot the gateway every night at this time. It is as "
-                         "precise as the poll interval: the reboot happens on "
-                         "the first poll past that time.",
+        "sRebootAtWhat": "Reboot the gateway every night at this time. "
+                         "Accurate to one poll interval: the reboot happens on "
+                         "the first poll after that time.",
         "sReboot": "reboot the gateway",
-        "confirmReboot": "Reboot the gateway? Every device is without internet "
-                         "until it comes back up.",
+        "confirmReboot": "Reboot the gateway? No device has internet until it "
+                         "comes back up.",
         "rebooting": "The gateway is rebooting. The panel is back in a minute or two.",
-        "sNetHint": "The first three are what the installer found. Change them only if "
-                    "the network really moved: the nftables rules are rebuilt at once, "
-                    "and devices outside the new network can no longer be added. "
-                    "Changing the port restarts the panel. All of it lives in {{CFG}}.",
+        "sNetHint": "The first three are what the installer found. Change them "
+                    "only if the network really moved: the nftables rules are "
+                    "rebuilt at once, and devices outside the new network can "
+                    "no longer be added. Changing the port restarts the panel. "
+                    "All of it lives in {{CFG}}.",
         "sRestart": "The port changed. The panel is restarting — open {url}",
         "badLang": "there is no {lang} language",
         "badNumber": "a number is expected here",
@@ -776,7 +779,7 @@ STRINGS = {
         "badPort": "the port is 1 to 65535",
         "badIface": "there is no {iface} interface on this system",
         "selfOutside": "{ip} is outside the {lan} network",
-        "portBusy": "port {port} is taken — the panel would not come back up on it",
+        "portBusy": "port {port} is taken — the panel would not start on it",
         "colNow": "now",
         "byDay": "by day",
         "byHour": "last 24 h",
@@ -784,7 +787,7 @@ STRINGS = {
         "locale": "en-GB",
         "cumul": "cumulative",
         "vsPrev": "against the previous month",
-        "noHours": "hours accrue from the panel's start — give it a moment",
+        "noHours": "hours accrue from the panel's start, give it a moment",
         "showAll": "show all",
         "showInChart": "Show in chart",
         "sysTitle": "Machine",
@@ -798,18 +801,18 @@ STRINGS = {
         "sUptime": "uptime",
         "cores": "{n} cores",
         "sysNone": "this system exposes no metrics",
-        "tempWhat": "Sensor {n} — the warmest of the ones the kernel exposes in "
+        "tempWhat": "Sensor {n} — the warmest one the kernel exposes in "
                     "/sys/class/thermal. There are several, and they measure "
                     "different things: the processor package, the chipset, a disk.",
         "perSec": "/s",
         "dShort": "d",
         "hShort": "h",
         "other": "other",
-        "otherWhat": "Traffic of addresses that are no longer on the list. History "
-                     "is kept per address and outlives the device, so its bytes "
-                     "stay in the month's totals — but there is nobody left to "
-                     "attribute them to. Anything counted before an address was "
-                     "added back lands here too.",
+        "otherWhat": "Traffic from addresses that are no longer on the list. "
+                     "History is kept per address and outlives the device, so "
+                     "the bytes stay in the month's totals with nobody left to "
+                     "attribute them to. Anything counted before an address "
+                     "was added back lands here too.",
         "filter": "filter",
         "noMatch": "nothing matches the filter",
         "csvWhat": "download the selected month as a table",
@@ -817,8 +820,8 @@ STRINGS = {
         "updateWhat": "what changed",
         "dotLive": "traffic is flowing",
         "dotQuiet": "quiet",
-        "rolled": "the day-by-day detail for this month has been folded away — "
-                  "only the total is left",
+        "rolled": "the day-by-day detail for this month is folded away, only "
+                  "the total is left",
     },
 }
 
@@ -828,7 +831,8 @@ def reload_conf():
 
     Called once at import and again whenever the settings form saves, so a
     changed language or network takes effect without a restart. Only the port
-    cannot be picked up this way — the socket is already bound (see restart).
+    cannot be picked up this way, because the socket is already bound (see
+    restart).
     """
     global CFG, LANG, T, IFACE, PORT, POLL_SEC, KEEP_MONTHS, LAN, SELF_IP, PAGE
     CFG = conf()
@@ -873,9 +877,9 @@ def check_settings(body, base):
         raise ValueError(T["badKeep"])
     c["poll_sec"], c["port"], c["keep_months"] = poll_sec, port, keep
 
-    # The hour is kept whether the reboot is on or off — turning the switch back
-    # on should find the time that was there before, not an empty field. Stored
-    # normalised, because <input type=time> will not show "5:30".
+    # The hour is kept whether the reboot is on or off, so that turning the
+    # switch back on finds the time that was there before rather than an empty
+    # field. Stored normalised, because <input type=time> will not show "5:30".
     try:
         at = time.strftime("%H:%M", time.strptime(
             str(body.get("reboot_at", c["reboot_at"])).strip(), "%H:%M"))
@@ -888,8 +892,8 @@ def check_settings(body, base):
         raise ValueError(T["badIface"].replace("{iface}", iface))
     c["iface"] = iface
 
-    # ip_network is strict: 192.168.1.5/24 is rejected, and that is the point —
-    # a network with host bits set would quietly drop devices out of validate().
+    # ip_network is strict: 192.168.1.5/24 is rejected, which is what we want.
+    # A network with host bits set would quietly drop devices out of validate().
     lan = ipaddress.ip_network(str(body.get("lan", c["lan"])).strip())
     self_ip = ipaddress.ip_address(str(body.get("self_ip", c["self_ip"])).strip())
     if self_ip not in lan:
@@ -899,7 +903,7 @@ def check_settings(body, base):
 
     if port != base["port"]:
         # A port already taken would crash the restarted process, and systemd
-        # would keep restarting it — the panel would be gone for good.
+        # would keep restarting it, so the panel would be gone for good.
         with socket.socket() as s:
             try:
                 s.bind(("", port))
@@ -916,7 +920,7 @@ def stop(*_):
 
 def restart():
     """Replace this process, the only way to bind a changed port."""
-    # ponytail: a fixed delay instead of a shutdown handshake — long enough for
+    # ponytail: a fixed delay instead of a shutdown handshake. Long enough for
     # the reply to leave, and the browser is told to reconnect by hand anyway.
     def go():
         stop()
@@ -936,7 +940,7 @@ def reboot_host():
 
 def uptime():
     """Seconds since this machine booted, 0 where that cannot be answered."""
-    # ponytail: /proc, not a boot-time constant — on anything that is not Linux
+    # ponytail: /proc, not a boot-time constant. On anything that is not Linux
     # (a Mac running --selftest) 0 means the scheduled reboot never fires, which
     # is the right answer there anyway.
     try:
@@ -953,10 +957,11 @@ def reboot_due(at, now, up, window):
 
     No cron, no timer unit: the poller is already awake every POLL_SEC, and a
     scheduler that lives in config.json is one the settings form can change
-    without touching the host. The window has to be a poll long — the tick
-    lands where it lands, not on the minute — so what stops the machine from
-    going down again the moment it comes back up is `up`: nothing here fires in
-    the first two hours of a boot, and a window is at most one hour and a bit.
+    without touching the host. The window has to be a poll long, because the
+    tick lands where it lands rather than on the minute. What stops the machine
+    from going down again the moment it comes back up is `up`: nothing here
+    fires in the first two hours of a boot, and a window is at most an hour and
+    a bit.
     """
     if not at:
         return False
@@ -965,7 +970,7 @@ def reboot_due(at, now, up, window):
         target = int(h) * 3600 + int(m) * 60
     except ValueError:
         # The form cannot write anything but hh:mm, a text editor can. Junk here
-        # means "never" — an exception would take the poller thread with it.
+        # means "never": an exception would take the poller thread with it.
         return False
     since_midnight = now.tm_hour * 3600 + now.tm_min * 60 + now.tm_sec
     return up > 2 * 3600 and 0 <= since_midnight - target < window
@@ -978,7 +983,7 @@ def _devs_stamp():
     """When the device list on disk was last written, or None if there is none.
 
     The poller reads the list, spends a moment deciding what to do with it and
-    writes the whole of it back; a button pressed in that moment lands in the
+    writes the whole of it back. A button pressed in that moment lands in the
     file and is then overwritten by a list that predates it. Compared before
     the write, this says the poller lost the race and should let go.
     """
@@ -991,10 +996,10 @@ def _devs_stamp():
 def load():
     """The device list, re-read only when the file has changed underneath us.
 
-    It is asked for on every poll, on every page refresh and on every button —
+    It is asked for on every poll, on every page refresh and on every button:
     the same few hundred bytes, parsed again each time. What is handed back is a
-    copy of each row: callers mutate what they get and then call save(), so
-    lending out the cached list itself would let a change that was never written
+    copy of each row, because callers mutate what they get and then call save().
+    Lending out the cached list itself would let a change that was never written
     take effect anyway, and a failed request would leave it behind.
     """
     try:
@@ -1015,7 +1020,7 @@ def save(devs):
     # from anywhere else has to invalidate it just the same.
     _devs["mtime"] = None
     # Every change to a device passes through here, and the answer the page is
-    # about to ask for must show it — a button that takes a second to look like
+    # about to ask for must show it. A button that takes a second to look like
     # it was pressed reads as a button that did not work.
     _state["val"] = None
 
@@ -1031,8 +1036,9 @@ def check_minutes(v, cap=None, bad=None):
     """The timer off the button, in minutes. 0 means "no timer".
 
     Minutes and not a moment: the browser knows what "until 07:00" means in the
-    timezone the person is standing in, the gateway knows what time it is. Only
-    one of those two is worth trusting over the wire, and it is the duration.
+    timezone the person is standing in, and the gateway knows what time it is.
+    Only one of those two is worth trusting over the wire, and it is the
+    duration.
     """
     cap = TIMER_MAX // 60 if cap is None else cap
     bad = bad or T["badTimer"]
@@ -1048,7 +1054,7 @@ def check_minutes(v, cap=None, bad=None):
 def lan_client(ip):
     """The same question validate() answers, without raising: an address on
     this network that is not the gateway. The lease file is written by another
-    program and may hold anything, IPv6 entries included — a junk line there
+    program and may hold anything, IPv6 entries included, so a junk line there
     must not take the whole page down."""
     try:
         a = ipaddress.ip_address(ip)
@@ -1061,11 +1067,11 @@ def is_mac(s):
     """A hardware address fit to be written into a rule.
 
     Everywhere else a MAC is a label on a page; in the ruleset it is syntax.
-    Both places one comes from — the ARP cache and dnsmasq's lease file — are
+    Both places one comes from, the ARP cache and dnsmasq's lease file, are
     written by other programs, and a single junk field would make `nft -f`
-    reject the table. Atomically, which is the bad part: the old rules stay,
-    the panel goes on answering, and nothing anyone does to a device takes
-    effect again.
+    reject the table. It would reject it atomically, which is the bad part: the
+    old rules stay, the panel goes on answering, and nothing anyone does to a
+    device takes effect again.
     """
     p = str(s).split(":")
     return len(p) == 6 and all(
@@ -1103,8 +1109,8 @@ def check_password(password):
 
 
 def _tok(token):
-    """What is kept on disk instead of the cookie itself: a leaked
-    sessions.json then hands over nothing that can be presented as a session."""
+    """What is kept on disk instead of the cookie itself, so that a leaked
+    sessions.json hands over nothing that can be presented as a session."""
     return hashlib.sha256((token or "").encode()).hexdigest()
 
 
@@ -1112,7 +1118,7 @@ def _save_sessions():
     try:
         write_private(SESSIONS, _sessions)
     except OSError:
-        # A read-only /etc is not a reason to refuse a login — the session
+        # A read-only /etc is not a reason to refuse a login. The session
         # simply goes back to living only in memory.
         pass
 
@@ -1143,7 +1149,7 @@ def csrf_for(token):
 
 
 def _load_sessions():
-    """Sessions outlive the process: an update runs install.sh, which restarts
+    """Sessions outlive the process. An update runs install.sh, which restarts
     the service, and being thrown out of the panel by its own upgrade is the
     one moment it stings most. Expired ones are dropped on the way in."""
     try:
@@ -1170,13 +1176,13 @@ def fail_blocked(ip):
 
 def ruleset(devs, bypass=None, vpn_closed=None):
     """The whole table as one string. `bypass` is the moment the gateway stops
-    letting everyone through — resolved from the config when it is not given,
+    letting everyone through, resolved from the config when it is not given,
     because a reload_conf()-managed value must never be frozen into a default.
     """
     # While that moment is in the future the chain keeps everything it does
-    # except the verdict: the counters still run, and `update @blocked` still
-    # records every address that came in past the list — so when the window
-    # shuts, who used it is on the page rather than lost.
+    # except the verdict. The counters still run, and `update @blocked` still
+    # records every address that came in past the list, so when the window
+    # shuts, whoever used it is on the page rather than lost.
     open_now = (CFG["bypass"] if bypass is None else bypass) > time.time()
     closed = _vpn_closed if vpn_closed is None else bool(vpn_closed)
     verdict = "" if open_now else "\n    drop"
@@ -1193,21 +1199,21 @@ def ruleset(devs, bypass=None, vpn_closed=None):
                    for d in devs)
     down = "\n".join(f"    ip daddr {d['ip']} counter name {cname('down', d['ip'])}"
                      for d in devs)
-    # "vpn": false — allowed through the gateway, but not through the tunnel.
-    # A mark is the only handle this program has on something it does not own:
-    # every one of them keeps a mark for its own packets, so that what it sends
-    # is not swallowed by itself again — and that mark is the one thing its
+    # "vpn": false means allowed through the gateway, but not through the
+    # tunnel. A mark is the only handle this program has on something it does
+    # not own. Every tunnel keeps a mark for its own packets, so that what it
+    # sends is not swallowed by itself again, and that mark is the one thing its
     # rules step aside for. sing-box: `ip rule fwmark 0x2024 goto` past the tun
     # lookup, and `meta mark 0x2024 ... return` above its queue. wg-quick: `ip
     # rule not fwmark 51820`. Both then route the packet by the main table and
-    # out of the uplink. Which is why this is set at raw — before the routing
+    # out of the uplink. That is why this is set at raw: before the routing
     # decision and before any redirect chain, the two places that read it.
-    # Getting the number wrong is not a no-op: sing-box's neighbouring 0x2023
-    # forces the packet *into* the tun instead. Read it off the host.
+    # Getting the number wrong is not a no-op, because sing-box's neighbouring
+    # 0x2023 forces the packet *into* the tun instead. Read it off the host.
     #
     # By the hardware address wherever one is known, because a device's IPv6 is
-    # not in devices.json and cannot be — it is handed out by the network, there
-    # are several of them and they rotate. The frame carries the same MAC either
+    # not in devices.json and cannot be: the network hands it out, there are
+    # several of them and they rotate. The frame carries the same MAC either
     # way, so one rule covers both protocols. Marking only the v4 address is how
     # this first shipped, and it left every such device still leaving by the
     # tunnel over v6 while the panel said it was out.
@@ -1217,8 +1223,8 @@ def ruleset(devs, bypass=None, vpn_closed=None):
         if is_mac(d.get("mac")) else
         f"\n    ip saddr {d['ip']} meta mark set 0x{mark:x}"
         for d in devs if not d.get("vpn", True)) if mark else ""
-    # `table` before `delete` — so delete never fails on a first run.
-    # priority raw (-300) — ahead of any redirect chains (auto_redirect, in the
+    # `table` before `delete`, so delete never fails on a first run.
+    # priority raw (-300) is ahead of any redirect chains (auto_redirect, in the
     # case of sing-box), otherwise the verdict comes after the interception.
     # fib daddr type != unicast lets through everything addressed to the host
     # itself: SSH and the panel stay reachable even to a blocked device.
@@ -1227,7 +1233,7 @@ def ruleset(devs, bypass=None, vpn_closed=None):
     # ponytail: a switched-off device still accrues its own doomed retries as
     # upload. A few kilobytes, and it makes the knocking visible.
     # The mark is the one thing above `meta nfproto != ipv4 accept`, because it
-    # is the one thing that has to happen to an IPv6 packet too; everything
+    # is the one thing that has to happen to an IPv6 packet too. Everything
     # below that line is v4 by construction.
     return f"""\
 table inet gwacl
@@ -1258,9 +1264,9 @@ table inet gwacl {{
   }}
 }}
 """
-# ponytail: IPv6 is neither counted nor filtered — a typical gateway has v6
+# ponytail: IPv6 is neither counted nor filtered, and a typical gateway has v6
 # forwarding off. When it is needed: a second set and rules on ip6 saddr/daddr.
-# It is *marked*, though, and that is not symmetry for its own sake: a device
+# It is *marked*, though, and that is not symmetry for its own sake. A device
 # let past the tunnel over v4 while its v6 still went through it read, to every
 # site that asked, as a device still sitting in the tunnel.
 
@@ -1275,9 +1281,9 @@ def nft_table():
     """Everything this panel keeps in the kernel, in one call.
 
     The counters are wanted on every poll and the blocked set on every page
-    refresh; asking for the two separately meant two `nft` processes to read one
-    table. The rules come along with them — parsing a few kilobytes more of json
-    is cheaper than spawning a second process.
+    refresh, and asking for the two separately meant two `nft` processes to read
+    one table. The rules come along with them, because parsing a few kilobytes
+    more of json is cheaper than spawning a second process.
     """
     return nft_json("table", "inet", "gwacl")
 
@@ -1300,7 +1306,7 @@ def parse_blocked(objs):
     is a string, with one it is a dict.
 
     The kernel re-arms the timeout on every packet it drops, so what is left of
-    it says when the address last tried — the difference between somebody
+    it says when the address last tried. That is the difference between somebody
     hammering the gateway right now and somebody who gave up hours ago. None
     when this build tells us nothing.
     """
@@ -1366,9 +1372,9 @@ def bypass_until(when):
 def flip_all(devs, on, mine=""):
     """Switch every device at once, except the address that asked.
 
-    The panel offers this as one button, and a button that can take the
-    internet away from the person pressing it, on a page that then has to be
-    used to give it back, is a button that will be pressed exactly once.
+    The panel offers this as one button. A button that can take the internet
+    away from the person pressing it, on a page that then has to be used to
+    give it back, is a button that will be pressed exactly once.
     """
     for d in devs:
         if d["ip"] != mine:
@@ -1380,13 +1386,13 @@ def expire(now=None):
     """Flip back whatever a timer was set on. True if the ruleset changed.
 
     One field per device carries it: `until` is the moment the state it stands
-    in now runs out. Which way it flips is not stored, because it is not needed
-    — a timer always undoes what set it, so "off until seven" and "on for an
-    hour" are the same field and the same line of code.
+    in now runs out. Which way it flips is not stored, because it is not
+    needed. A timer always undoes what set it, so "off until seven" and "on for
+    an hour" are the same field and the same line of code.
 
-    Called from the poller, so it is as precise as poll_sec — same as the
-    nightly reboot, and for the same reason: a thread that wakes on a schedule
-    is the whole mechanism, and a second one would not be worth its own bugs.
+    Called from the poller, so it is as precise as poll_sec, same as the nightly
+    reboot and for the same reason: a thread that wakes on a schedule is the
+    whole mechanism, and a second one would not be worth its own bugs.
     """
     now = int(time.time() if now is None else now)
     stamp = _devs_stamp()
@@ -1420,7 +1426,7 @@ def _load_json(path, empty):
     A file that is not json used to take the panel down on every start, and
     systemd would restart it into the same crash for ever. It is written
     atomically now, so this can only be damage done by a version that did not,
-    or by something outside this program — either way, saying so once and
+    or by something outside this program. Either way, saying so once and
     carrying on beats a boot loop nobody can see the reason for.
     """
     try:
@@ -1436,11 +1442,11 @@ def _load_json(path, empty):
 def _read_history():
     """Both files, joined back into the one dict the rest of this program reads.
 
-    The day in progress is whatever today.json says: it is the file that is
-    kept up to date, and traffic.json holds a copy of that day only until the
-    rollover rewrites it. Upgrading from a single-file version lands here with
-    no today.json at all — traffic.json still has today, `seen` and `last` in
-    it, and the first flush moves them across.
+    The day in progress is whatever today.json says: that is the file kept up to
+    date, and traffic.json holds a copy of that day only until the rollover
+    rewrites it. Upgrading from a single-file version lands here with no
+    today.json at all, because traffic.json still has today, `seen` and `last`
+    in it, and the first flush moves them across.
     """
     h = _load_json(TRAFFIC, {"days": {}})
     if "days" not in h:  # old format: month keys straight in the root
@@ -1480,8 +1486,8 @@ def history():
 def snapshot():
     """A private copy for a reader outside the lock.
 
-    poll() mutates the live history in place — a new day, a device seen for the
-    first time — and iterating it from an HTTP thread at that moment is how a
+    poll() mutates the live history in place, for a new day or a device seen for
+    the first time, and iterating it from an HTTP thread at that moment is how a
     page refresh crashes on "dictionary changed size during iteration". One
     level deep is all state() reads.
     """
@@ -1494,19 +1500,19 @@ def snapshot():
 def flush(force=False):
     """Write the history out, at most every FLUSH_EVERY seconds. Holds _lock.
 
-    Buffering costs nothing on a clean stop — SIGTERM flushes — and nothing
-    even on a kill: the baseline on disk is exactly as old as the totals beside
-    it, so the next poll measures the increment from there and lands on the
-    same figure. Only losing the kernel's counters at the same moment, which
+    Buffering costs nothing on a clean stop, because SIGTERM flushes, and
+    nothing even on a kill: the baseline on disk is exactly as old as the totals
+    beside it, so the next poll measures the increment from there and lands on
+    the same figure. Only losing the kernel's counters at the same moment, which
     means a reboot or a power cut, costs the last FLUSH_EVERY seconds.
 
     Two files, because only one of them changes. Today's bucket, `seen` and the
     baseline are a kilobyte or so and have to be written every FLUSH_EVERY
-    seconds; the months behind them are a hundred times that and cannot change
+    seconds. The months behind them are a hundred times that and cannot change
     until midnight. Writing them together meant rewriting a year of history to
-    record the last five minutes — hundreds of megabytes a day onto the flash
-    of a machine that is never turned off. So traffic.json is written when a
-    day closes or a month is folded, and today.json on the clock.
+    record the last five minutes: hundreds of megabytes a day onto the flash of
+    a machine that is never turned off. So traffic.json is written when a day
+    closes or a month is folded, and today.json on the clock.
     """
     global _flushed, _dirty, _cold
     if not _dirty or (not force and time.time() - _flushed < FLUSH_EVERY):
@@ -1558,8 +1564,8 @@ def rates(moved, devs, now):
 
     poll() runs both on the poller's tick and on every page refresh, so the
     gap between two calls is anything from a second to a minute. Increments
-    are therefore held in `_pend` until the window is wide enough to divide by
-    — otherwise two refreshes in a row would report a wild number, or drop the
+    are therefore held in `_pend` until the window is wide enough to divide by.
+    Otherwise two refreshes in a row would report a wild number, or drop the
     bytes that fell between them on the floor.
     """
     global _rate_at
@@ -1574,7 +1580,7 @@ def rates(moved, devs, now):
     _rate.clear()
     for d in devs:
         u, dn = _pend.get(d["ip"], (0, 0))
-        # Whole bytes: a rate is a measurement over a ragged window, and the
+        # Whole bytes. A rate is a measurement over a ragged window, and the
         # fraction is noise the page would faithfully print to ten decimals.
         _rate[d["ip"]] = [round(u / dt), round(dn / dt)]
     _pend.clear()
@@ -1586,7 +1592,7 @@ def note_hour(moved, key=None):
     ponytail: memory only, so a restart of the service starts the day over.
     Storing them would multiply today.json by twenty-four, and that is the file
     written every FLUSH_EVERY seconds, for a chart whose whole point is the
-    last day — the month is already on disk.
+    last day. The month is already on disk.
     """
     bucket = _hours.setdefault(key or time.strftime("%Y-%m-%d %H"), {})
     for ip, (u, d) in moved.items():
@@ -1603,12 +1609,12 @@ def rekey(old, new):
 
     Everything the history knows is filed under an address: the day buckets, the
     hour buckets, when it was last seen. A device that DHCP has moved keeps none
-    of that unless it is carried across — its month would start again from zero
+    of that unless it is carried across. Its month would start again from zero
     and its past would surface as "other", which is exactly the pair of symptoms
     that reads as the panel having lost the data.
 
-    The baseline is dropped rather than moved: the new address gets new counters
-    and they start at zero.
+    The baseline is dropped rather than moved, because the new address gets new
+    counters and they start at zero.
     """
     global _dirty, _cold
     with _lock:
@@ -1634,7 +1640,7 @@ def roll_up(days, month, keep=None):
 
     A month key is a shape this program already reads: month_totals counts it,
     and the per-day chart skips it on key length. So the monthly totals and the
-    strip below the chart stay exact to the byte; what is given up is the
+    strip below the chart stay exact to the byte, and what is given up is the
     day-by-day chart of a month older than `keep`.
 
     Without this, days accumulate for ever in a file every start has to read.
@@ -1662,10 +1668,10 @@ _polled = 0.0
 def poll(force=False):
     """Sample the nftables counters and add the increment to today.
 
-    Called on the poller's tick and by every page refresh — every open tab, four
-    times a minute. Two of them a second apart would run nft twice to learn the
-    same thing, so anything inside POLL_MIN is dropped. apply() forces its way
-    through: that call exists to read the counters before the rebuild zeroes
+    Called on the poller's tick and by every page refresh, so every open tab
+    four times a minute. Two of them a second apart would run nft twice to learn
+    the same thing, so anything inside POLL_MIN is dropped. apply() forces its
+    way through: that call exists to read the counters before the rebuild zeroes
     them, and skipping it would lose whatever they hold.
     """
     global _polled, _dirty, _cold, _hot_date
@@ -1684,7 +1690,7 @@ def poll(force=False):
         today = time.strftime("%Y-%m-%d")
         if _hot_date != today:
             # Midnight, or the first poll of this process. Yesterday is a closed
-            # day now and closed days live in the cold file — which is also the
+            # day now, and closed days live in the cold file. It is also the
             # only moment a month can have aged past keep_months, so this is
             # where the fold belongs rather than on every poll of the day.
             _hot_date, _cold = today, True
@@ -1711,9 +1717,9 @@ def poll(force=False):
 def refold():
     """Apply a lowered keep_months now instead of at the next rollover.
 
-    The fold itself belongs at midnight — nothing can age past the line inside a
-    day. But someone who has just cut the retention did it to get the space
-    back, and telling them to wait until tomorrow for a number they typed
+    The fold itself belongs at midnight, since nothing can age past the line
+    inside a day. But someone who has just cut the retention did it to get the
+    space back, and telling them to wait until tomorrow for a number they typed
     themselves is the kind of thing that reads as broken.
     """
     global _dirty, _cold
@@ -1747,14 +1753,14 @@ def check_update(force=False):
     `force` is the button: it asks regardless of the day gate and regardless of
     "update_check", because somebody who clicked wants an answer now. It returns
     True when GitHub answered, False when it did not and None when the check was
-    skipped — the button has to say which of the three happened, the poller
+    skipped. The button has to say which of the three happened; the poller
     ignores all of it.
 
     Every failure is silence: a gateway that cannot reach the internet is a
     supported setup, not a fault to report on the panel. The timestamp is
     written before the request, so an unreachable GitHub is tried once a day
-    too, not once a minute. The whole body is inside the try — this runs in the
-    poller thread, and an answer of an unexpected shape must not take the
+    too, not once a minute. The whole body is inside the try, because this runs
+    in the poller thread and an answer of an unexpected shape must not take the
     traffic counters down with it.
     """
     if not force and (not CFG.get("update_check", True)
@@ -1777,7 +1783,7 @@ def check_update(force=False):
 
 # One at a time: a second click while the first download runs is not a second
 # install. Held for the whole of install_update(), released when the installer
-# has been handed off — by which point this process is about to be replaced.
+# has been handed off, by which point this process is about to be replaced.
 _updating = threading.Lock()
 
 
@@ -1799,8 +1805,8 @@ def _safe_members(tf):
 
     Not tarfile's `filter=`: that arrived in 3.12 and the gateway runs whatever
     python it has. Absolute paths, paths climbing out with `..`, symlinks and
-    devices are dropped rather than repaired — a release tarball has no business
-    containing any of them.
+    devices are dropped rather than repaired, because a release tarball has no
+    business containing any of them.
     """
     for m in tf.getmembers():
         if not m.isfile():
@@ -1840,13 +1846,13 @@ def install_update(tag):
 
     Two checks stand between the download and root running it: the code has to
     say it is the version that was announced, and its own selftest has to pass.
-    Neither is a signature — what they buy is that a truncated or mislabelled
+    Neither is a signature. What they buy is that a truncated or mislabelled
     tarball is refused before anything on the host is replaced.
 
-    The installer is started detached and outlives this process on purpose: its
-    last steps restart the service, which kills the panel that asked for it.
-    Progress and failure go to UPDATE_LOG, because after the restart there is
-    nobody left to tell.
+    The installer is started detached and outlives this process on purpose,
+    because its last steps restart the service, which kills the panel that asked
+    for it. Progress and failure go to UPDATE_LOG, because after the restart
+    there is nobody left to tell.
     """
     if not _updating.acquire(blocking=False):
         return
@@ -1913,14 +1919,12 @@ SAFE_PROBE_CODES = SAFE_VPN_ERRORS | {"ok", "unreachable"}
 
 # How long something just started is given to appear. `systemctl restart`
 # returns as soon as the process is running, and sing-box then needs a moment
-# to build the tun and install its policy route; `wg-quick up` returns before
+# to build the tun and install its policy route. `wg-quick up` returns before
 # the first handshake. Checking straight away therefore fails a tunnel that is
-# coming up perfectly well, and the whole switch rolls back — which is exactly
+# coming up perfectly well, and the whole switch rolls back, which is exactly
 # what "the subscription will not come up" looked like.
 #
 # A module global and never a default argument: the selftest drives a fake
-# runner where every wait is dead time, and sets this to 0. Resolved in the
-# body of the two functions that use it, per the rule in CLAUDE.md.
 BACKEND_WAIT = 20
 BACKEND_STEP = 0.5
 
@@ -1945,11 +1949,11 @@ PROBE_DST = "192.0.2.1"
 PROBE_LINK = {"wireguard": "wireguard", "amneziawg": "amneziawg"}
 PROBE_CONF = {"wireguard": "wg", "amneziawg": "awg"}
 # What wg-quick and awg-quick fall back to when `ip link add ... type X` fails,
-# and therefore what a probe has to fall back to as well: a host running the
+# and therefore what a probe has to fall back to as well. A host running the
 # userspace implementation has a perfectly working tunnel, and a probe that
 # only knows the kernel module would call every one of its profiles missing.
 # On a distribution with its own kernel that is the usual way to have AmneziaWG
-# at all — a module needs headers and a rebuild after every kernel upgrade.
+# at all: a module needs headers and a rebuild after every kernel upgrade.
 PROBE_USERSPACE = {"wireguard": "wireguard-go", "amneziawg": "amneziawg-go"}
 
 
@@ -1999,7 +2003,7 @@ def _tunnel_row(row):
              "enabled": bool(row.get("enabled")), "error": error,
              "nodes": nodes,
              # What the last press of "check" found, and how much of it
-             # answered. Never a reason to change the ruleset — a profile
+             # answered. Never a reason to change the ruleset: a profile
              # nobody enabled is allowed to be unreachable.
              "probe": probe, "reach": reach}
     for key in ("verified", "ipv6"):
@@ -2078,11 +2082,11 @@ def have_link_type(name, runner=None):
 def quick_usable(kind, runner=None):
     """Whether a WireGuard-family profile could actually be brought up.
 
-    `wg-quick` on its own is not enough and saying otherwise is a lie the
-    panel told: on a host with the tools but no kernel module and no userspace
+    `wg-quick` on its own is not enough, and saying otherwise is a lie the panel
+    used to tell. On a host with the tools but no kernel module and no userspace
     implementation, awg-quick prints `Unknown device type` and gives up, while
-    the settings page cheerfully offered to enable the profile. It needs one
-    of the two ways to build the interface, exactly as the script does.
+    the settings page cheerfully offered to enable the profile. It needs one of
+    the two ways to build the interface, exactly as the script does.
     """
     if shutil.which(QUICK_TOOLS[kind]) is None:
         return False
@@ -2149,11 +2153,11 @@ def sub_prefix(tid):
 def sub_convert(tid, secret, skip=None, taken=None):
     """One subscription's outbounds, with everything it is stored with applied.
 
-    The single place a cached body turns into nodes: the provider's exclusion
-    regex and the by-hand selection are both part of what the subscription
-    *is*, and a caller that forgot one of them would quietly build a config the
-    panel does not claim to have built. `skip=()` asks for the whole list —
-    which is what listing the nodes to choose from needs, and nothing else.
+    This is the single place a cached body turns into nodes. The provider's
+    exclusion regex and the by-hand selection are both part of what the
+    subscription *is*, and a caller that forgot one of them would quietly build
+    a config the panel does not claim to have built. `skip=()` asks for the
+    whole list, which is what listing the nodes to choose from needs.
     """
     return singbox_sub.convert(
         secret["body"], exclude=secret.get("exclude"), prefix=sub_prefix(tid),
@@ -2170,9 +2174,9 @@ def sub_labels(tid, secret):
 def sub_nodes(tid, secret):
     """The node list as the settings page may see it: id, shown name, state.
 
-    No label and no address: a node the provider gave no name to is named
-    after its own server, so what is shown for one of those is its position in
-    the list, and what identifies it on the wire is a digest.
+    No label and no address. A node the provider gave no name to is named after
+    its own server, so what is shown for one of those is its position in the
+    list, and what identifies it on the wire is a digest.
     """
     skip = set(_skip_list(secret.get("skip")))
     up = secret.get("up") if isinstance(secret.get("up"), dict) else {}
@@ -2266,7 +2270,7 @@ def _wait_for(read, wait):
     """Call `read` until it answers something truthy or the window closes.
 
     One read when `wait` is 0, which is what a health check on the poll path
-    wants; a few over the window when something was just started and has not
+    wants, and a few over the window when something was just started and has not
     finished appearing yet.
     """
     deadline = time.monotonic() + max(0.0, wait or 0.0)
@@ -2302,8 +2306,8 @@ def backend_mark(backend, runner=None, wait=0):
     """The fwmark the running tunnel steps aside for, once it has one.
 
     A tunnel that has just been started has not written its rules yet, and a
-    mark read as 0 there is not "this host has no mark" but "ask again in a
-    moment" — the difference is a panel that quietly stops offering to send a
+    mark read as 0 there does not mean "this host has no mark" but "ask again in
+    a moment". The difference is a panel that quietly stops offering to send a
     device past the tunnel.
     """
     if not backend:
@@ -2422,7 +2426,7 @@ def _check_singbox_candidate(config, runner=None):
         result = vpn_exec(["sing-box", "check", "-c", path], runner=runner)
     if result.returncode:
         # The browser gets a two-word code on purpose, and a two-word code is
-        # useless to whoever has to fix it: an installed sing-box too old for
+        # useless to whoever has to fix it. An installed sing-box too old for
         # this config fails here and looks exactly like a bad subscription.
         # The journal is root-only, so the tool's own complaint goes there.
         reason = " ".join(str(result.stderr or result.stdout or "").split())[:300]
@@ -2561,11 +2565,11 @@ def _backend_up(backend, runner=None):
     """One reading: is this backend running.
 
     For sing-box that is the unit and nothing else. It used to also demand a
-    default route in a policy table, and that was wrong: `auto_redirect` sends
+    default route in a policy table, and that was wrong. `auto_redirect` sends
     forwarded traffic into the tun with nftables instead of routing it, so a
-    perfectly working tunnel has no such route at all — the panel then closed
+    perfectly working tunnel has no such route at all. The panel then closed
     transit, rolled the switch back and stopped a sing-box that was proxying
-    happily, once every time. The unit is a real check: the candidate has
+    happily, every single time. The unit is a real check: the candidate has
     already passed `sing-box check`, so a config it cannot run makes the
     process exit and the unit is not active.
     """
@@ -2613,7 +2617,7 @@ def _check_backend(backend, runner=None, wait=0):
         return
     if not _wait_for(lambda: _backend_up(backend, runner), wait):
         # Only on the way to failing, and only when there was patience to
-        # spend: this is the path a switch takes, not the poll path, and a
+        # spend. This is the path a switch takes, not the poll path, and a
         # health check that ran out has nothing new to say.
         if wait:
             _why_down(backend, runner)
@@ -2760,10 +2764,10 @@ def vpn_refresh(tid, runner=None, applier=None, fetcher=None):
                     or len(content.encode("utf-8")) > singbox_sub.SUB_BODY_MAX):
                 raise ValueError
             fresh_secret = {"url": url, "exclude": exclude, "body": content}
-            # The by-hand selection survives a refresh — that is the point of
-            # keying it on the label rather than on a position in the list —
-            # but only the part of it the provider still lists: a name that has
-            # gone would otherwise sit in the file for good.
+            # The by-hand selection survives a refresh, which is the point of
+            # keying it on the label rather than on a position in the list. But
+            # only the part of it the provider still lists survives: a name that
+            # has gone would otherwise sit in the file for good.
             offered = set(sub_labels(target["id"], fresh_secret))
             skip = [label for label in _skip_list(old_secret.get("skip"))
                     if label in offered]
@@ -2875,7 +2879,7 @@ def reconcile_tunnels(runner=None, applier=None):
         try:
             try:
                 # This runs at startup, which on a reboot is the same moment
-                # the tunnel's own unit is starting — the wait is not patience
+                # the tunnel's own unit is starting, so the wait is not patience
                 # with a broken tunnel, it is not racing a healthy one.
                 _check_backend(backend, runner, BACKEND_WAIT)
             except VpnError:
@@ -2987,8 +2991,8 @@ def _valid_wg_key(value):
 def _strip_quick(kind, text, runner, tid):
     """The config as the kernel wants it, or None when the tool is not here.
 
-    The stripped text is what `wg setconf` takes — the same reading that says
-    the config is valid also produces what a probe needs, so it is handed back
+    The stripped text is what `wg setconf` takes. The same reading that says the
+    config is valid also produces what a probe needs, so it is handed back
     instead of thrown away.
     """
     tool = QUICK_TOOLS[kind]
@@ -3083,9 +3087,9 @@ def check_quick_config(kind, value, runner=None, tid=None):
 def quick_address(text):
     """The interface's first IPv4 address, `10.66.66.5/32` and so on.
 
-    A probe cannot send anything into a scratch link that has no address on
-    it — the kernel has no source to put in the packet — and this is the one
-    thing beyond the stripped config that it needs.
+    A probe cannot send anything into a scratch link that has no address on it,
+    because the kernel has no source to put in the packet. This is the one thing
+    beyond the stripped config that it needs.
     """
     for section in _quick_sections(text):
         if section["section"] != "interface":
@@ -3102,7 +3106,7 @@ def quick_address(text):
 #
 # "Add it, then find out by switching the whole gateway onto it" is the one
 # thing a pool of profiles must not require. Everything below answers "would
-# this one work" while the live backend keeps running untouched: a subscription
+# this one work" while the live backend keeps running untouched. A subscription
 # is converted, checked by sing-box and knocked on node by node, and a
 # WireGuard profile is brought up on a scratch interface that carries no route
 # anybody uses and is deleted again whatever happens.
@@ -3124,9 +3128,9 @@ def probe_nodes(outs, prober=None):
     Distinct address and port only: providers hand out the same host under a
     dozen names, and knocking on it a dozen times measures nothing new.
 
-    All at once, because they are all waiting on the same thing: a list where
-    every node is dead costs one timeout in total rather than two dozen of
-    them, and nobody watches a button for a minute and a half.
+    All at once, because they are all waiting on the same thing. A list where
+    every node is dead costs one timeout in total rather than two dozen of them,
+    and nobody watches a button for a minute and a half.
     """
     prober = prober or probe_tcp
     seen, targets = {}, []
@@ -3154,9 +3158,9 @@ def probe_nodes(outs, prober=None):
 def _probe_subscription(row, runner=None, prober=None):
     """Convert what is stored, let sing-box read it, then ask the nodes.
 
-    A config of its own, not the live one and not merged into it: the question
-    is whether *this* subscription is usable, and a base that fails to check
-    for an unrelated reason would answer a different one.
+    A config of its own, not the live one and not merged into it. The question
+    is whether *this* subscription is usable, and a base that fails to check for
+    an unrelated reason would answer a different one.
     """
     tid = row["id"]
     secret = load_subscription_secret(tid)
@@ -3174,7 +3178,7 @@ def _probe_subscription(row, runner=None, prober=None):
         raise VpnError("validation-failed")
     _check_singbox_candidate(singbox_sub.fresh(picked, IFACE), runner)
     # Picked ones first, so that when the cap cuts the list short it cuts the
-    # nodes nobody chose — otherwise "отвечают 24 из 60" would be the answer
+    # nodes nobody chose. Otherwise "отвечают 24 из 60" would be the answer
     # for a subscription where all sixty work.
     chosen = {out["tag"] for out in picked}
     _, _, by_tag = probe_nodes(
@@ -3189,7 +3193,7 @@ def _probe_link(kind, stripped, address, runner=None, sender=None, wait=None):
     """Bring one scratch WireGuard link up, force a handshake, tear it down.
 
     The link carries a single route to an address RFC 5737 reserves for
-    documentation, so nothing real is ever sent through it; the handshake does
+    documentation, so nothing real is ever sent through it. The handshake does
     not care where the packet was going, only that one was sent.
     """
     wait = PROBE_WAIT if wait is None else wait
@@ -3204,9 +3208,9 @@ def _probe_link(kind, stripped, address, runner=None, sender=None, wait=None):
     # The mark the live tunnel steps aside for. The handshake this probe
     # provokes leaves the host as an ordinary UDP packet to the peer, and on a
     # gateway whose sing-box has auto_route that packet is swallowed by the tun
-    # like any other — the probe would then report every working profile as
-    # silent. It is the same mark, and the same reason, as "past the tunnel"
-    # for a device; 0 means this host has none and there is nothing to set.
+    # like any other, so the probe would report every working profile as silent.
+    # It is the same mark, and the same reason, as "past the tunnel" for a
+    # device. 0 means this host has none and there is nothing to set.
     mark = int(CFG.get("vpn_mark") or 0)
     with tempfile.TemporaryDirectory(prefix=".probe-", dir=TUNNEL_DIR) as td:
         os.chmod(td, 0o700)
@@ -3225,7 +3229,7 @@ def _probe_link(kind, stripped, address, runner=None, sender=None, wait=None):
                 if vpn_exec([spare, PROBE_IF], runner=runner).returncode:
                     raise VpnError("tool-missing")
                 # It daemonises once the device is up, but the socket the next
-                # step writes through is its own — wait for the link to exist
+                # step writes through is its own, so wait for the link to exist
                 # rather than race it.
                 if not _wait_for(lambda: not vpn_exec(
                         ["ip", "link", "show", "dev", PROBE_IF],
@@ -3261,9 +3265,9 @@ def _probe_link(kind, stripped, address, runner=None, sender=None, wait=None):
 
 
 def _probe_send(source=None):
-    """One datagram out of the probe link — enough to start a handshake.
+    """One datagram out of the probe link, enough to start a handshake.
 
-    Bound to the device and not merely routed to it: a sing-box with auto_route
+    Bound to the device and not merely routed to it. A sing-box with auto_route
     installs an `ip rule` that is consulted before the main table, so the one
     host route this probe added would be stepped over and the packet would go
     into the live tunnel instead of the link being tested.
@@ -3310,8 +3314,8 @@ def vpn_node_list(tid):
 def _remember_probe(tid, up):
     """Fold one probe's per-node result into the stored secret, nothing else.
 
-    Re-read and merged rather than written from the copy the probe was holding:
-    a refresh may have committed a whole new body while that probe was waiting
+    Re-read and merged rather than written from the copy the probe was holding.
+    A refresh may have committed a whole new body while that probe was waiting
     on sockets, and writing the old dict back would undo it. Called under
     `_vpn_lock` for the same reason.
     """
@@ -3326,9 +3330,9 @@ def vpn_nodes(tid, ids, runner=None, applier=None):
     """Turn individual nodes of one subscription off and on by hand.
 
     The same shape as a refresh, because it is the same event: the set of
-    outbounds the profile stands for changes, so an enabled profile goes
-    through a full switch with the secret written at commit and put back on
-    rollback, and a disabled one is only a file and a row.
+    outbounds the profile stands for changes. So an enabled profile goes through
+    a full switch with the secret written at commit and put back on rollback,
+    and a disabled one is only a file and a row.
     """
     with _vpn_lock:
         old_rows = load_tunnels()
@@ -3384,7 +3388,7 @@ def vpn_nodes(tid, ids, runner=None, applier=None):
 def vpn_check(tid, runner=None, prober=None, sender=None):
     """Report whether one profile would work. Never changes what is running.
 
-    The reading happens outside `_vpn_lock`: a dead subscription costs one
+    The reading happens outside `_vpn_lock`. A dead subscription costs one
     connect timeout and a silent peer costs the handshake window, and holding
     the tunnel lock for either would stall the poller behind a button. What is
     held instead is `_probe_lock`, because both probes are built out of one
@@ -3468,8 +3472,8 @@ _sys = {"at": 0.0, "cpu": None, "net": None, "pct": None, "bps": [0, 0], "out": 
 
 def _read(path):
     """A whole small /proc or /sys file, or "" when this kernel has no such
-    thing. Every metric below is optional — the panel leaves out what it did
-    not get rather than refusing to draw."""
+    thing. Every metric below is optional: the panel leaves out what it did not
+    get rather than refusing to draw."""
     try:
         with open(path) as f:
             return f.read()
@@ -3487,7 +3491,7 @@ def _num(s):
 def cpu_jiffies(text):
     """(idle, total) off the first line of /proc/stat, None if it is not one.
 
-    Idle counts iowait as well: a gateway waiting on its disk is not busy, and
+    Idle counts iowait as well. A gateway waiting on its disk is not busy, and
     calling it busy would light the meter up for no reason.
     """
     f = text.split("\n", 1)[0].split()
@@ -3526,11 +3530,11 @@ def temp_c(root="/sys/class/thermal"):
     """The warmest sensor the kernel exposes: (°C, what it calls itself).
 
     Zones are milli-degrees and a machine has several, measuring different
-    things — the processor package, the chipset, an NVMe drive. The hottest is
+    things: the processor package, the chipset, an NVMe drive. The hottest is
     the one worth showing, but on its own it is an anonymous number, so the
     zone's `type` goes with it and the panel names the sensor it picked.
-    Absurd readings are dropped: an empty or disabled zone happily reports 0
-    or −273.
+    Absurd readings are dropped, because an empty or disabled zone happily
+    reports 0 or −273.
     """
     best = None
     try:
@@ -3556,7 +3560,7 @@ def sysinfo():
     machine that stops answering about itself must not stop the accounting.
 
     The whole answer is held for that same window rather than only the two
-    rates: inside it there is nothing new to say, and re-reading /proc, statvfs
+    rates. Inside it there is nothing new to say, and re-reading /proc, statvfs
     and every thermal zone once per open tab was work whose result was already
     on the screen.
     """
@@ -3616,7 +3620,7 @@ def parse_leases(text):
     """{address: hostname} out of a dnsmasq lease file.
 
     A line is `expiry mac address name clientid`, and a client that gave no
-    name leaves a bare `*` there — that is not a name, it is a placeholder.
+    name leaves a bare `*` there. That is not a name, it is a placeholder.
     """
     out = {}
     for line in text.splitlines():
@@ -3631,11 +3635,12 @@ def parse_lease_macs(text, now=None):
 
     The one place that says where a device is *now*. The kernel's ARP cache does
     not: it keeps the entry for an address a device has left, and on a home LAN
-    it keeps it for ever — the collector only starts above `gc_thresh1`, which a
-    few dozen devices never reach. A device that has ever had two addresses is
-    therefore at both of them as far as the cache is concerned. dnsmasq instead
-    rewrites the line when the client takes another address, so this is the
-    tie-breaker; `0` in the expiry field means the lease never runs out.
+    it keeps it for ever, because the collector only starts above `gc_thresh1`,
+    which a few dozen devices never reach. A device that has ever had two
+    addresses is therefore at both of them as far as the cache is concerned.
+    dnsmasq instead rewrites the line when the client takes another address, so
+    this is the tie-breaker. `0` in the expiry field means the lease never runs
+    out.
     """
     now = time.time() if now is None else now
     out = {}
@@ -3667,7 +3672,7 @@ def lease_macs():
 
 
 def lan_names():
-    """{address: [hostname, mac]} — whatever the system already knows.
+    """{address: [hostname, mac]}: whatever the system already knows.
 
     Hardware addresses come from the kernel's ARP cache, names from dnsmasq if
     it happens to run on this gateway. Both are a courtesy: without them the
@@ -3682,8 +3687,8 @@ def lan_names():
 
 # Where a distribution keeps the IEEE list, if it has it at all. A gateway
 # installed from a minimal image usually does not, hence the short table below:
-# what actually turns up on a home network, and nothing at all for the rest —
-# a wrong manufacturer is worse than none.
+# what actually turns up on a home network, and nothing at all for the rest.
+# A wrong manufacturer is worse than none.
 OUI_FILES = ("/usr/share/ieee-data/oui.txt", "/var/lib/ieee-data/oui.txt",
              "/usr/share/hwdata/oui.txt", "/usr/share/misc/oui.txt",
              "/usr/share/wireshark/manuf")
@@ -3712,12 +3717,12 @@ def _oui_key(mac):
 def scan_oui(path, want, into):
     """One pass of an IEEE list for a set of prefixes.
 
-    Both formats a distribution ships look the same at the front — three bytes,
+    Both formats a distribution ships look the same at the front: three bytes,
     a separator, then the name. `oui.txt` puts "(hex)" in between and gives the
-    long name; wireshark's `manuf` gives a short name first, which is the one
-    worth showing in a table cell. Lines carrying a "/" are the 28- and 36-bit
-    assignments: their prefix is longer than three bytes, and taking one would
-    name a whole block after one small company inside it.
+    long name, while wireshark's `manuf` gives a short name first, which is the
+    one worth showing in a table cell. Lines carrying a "/" are the 28- and
+    36-bit assignments: their prefix is longer than three bytes, and taking one
+    would name a whole block after one small company inside it.
     """
     try:
         with open(path, encoding="utf-8", errors="replace") as f:
@@ -3738,13 +3743,13 @@ def vendors(macs):
     """{hardware address: who made it}, for whatever can be answered.
 
     The IEEE list is thirty thousand lines, so it is read once for every prefix
-    asked about at once, and the answers — the empty ones too — are kept. After
-    the first page there is nothing left to look up until something with a
-    prefix nobody has seen before turns up.
+    asked about at once, and the answers are kept, the empty ones too. After the
+    first page there is nothing left to look up until something with a prefix
+    nobody has seen before turns up.
 
     An address with the locally-administered bit set was made up by the device
     itself. Modern phones do that per network, which is why a perfectly ordinary
-    handset has no manufacturer — saying so is more useful than a blank.
+    handset has no manufacturer, and saying so is more useful than a blank.
     """
     want = {_oui_key(m) for m in macs if len(m) >= 8}
     miss = want - set(_oui)
@@ -3770,10 +3775,10 @@ def vendors(macs):
 def clashes(devs, names):
     """Listed addresses that are answering with different hardware.
 
-    The entry says one address, the wire says another device is on it — so the
+    The entry says one address, the wire says another device is on it, so the
     rule that was written for the tablet is now the rule for whatever took its
     address, and nothing on the page would otherwise say so. track_macs() moves
-    an entry whose device merely went somewhere else; what is left here is the
+    an entry whose device merely went somewhere else. What is left here is the
     case where its address was taken and there is nowhere to move it to.
     """
     out = []
@@ -3789,7 +3794,7 @@ def track_macs():
     """Follow a device that DHCP has moved to another address.
 
     Everything here hangs off the address: the rule, the two counters, the day
-    buckets. A new lease therefore turns an entry into a rule for nobody — the
+    buckets. A new lease therefore turns an entry into a rule for nobody. The
     device is silently outside the gateway, or silently through it, and the
     panel goes on reporting the old address as quiet. The hardware address is
     the thing that did not change, and the kernel's own ARP table says where it
@@ -3798,16 +3803,16 @@ def track_macs():
     A device that has never been seen has no hardware address to be followed by,
     so the first sighting records one. Returns True if the ruleset changed.
 
-    The cache alone is not enough to say where a device is: it holds every
+    The cache alone is not enough to say where a device is. It holds every
     address the device has ever answered from, and reading it into
     {mac: address} kept whichever line came last. Two addresses for one device
     is the normal state of affairs after somebody edits the address on the
-    phone, and the entry then followed the file's own order — onto the address
+    phone, and the entry then followed the file's own order: onto the address
     the device had left, back again on the next poll, dragging its history with
     it each time and putting an address the owner had deleted back on the page.
-    So: one address answering, follow it; several, and only the lease file may
-    break the tie, because it is the one that is rewritten when the address
-    actually changes. Neither, and the entry stays where its owner put it.
+    So: one address answering, follow it. If several answer, only the lease file
+    may break the tie, because it is the one that is rewritten when the address
+    actually changes. If neither says, the entry stays where its owner put it.
     """
     names = lan_names()
     at = {}
@@ -3839,9 +3844,9 @@ def track_macs():
     if not moves and not learned:
         return False
     if _devs_stamp() != stamp:
-        # Somebody pressed a button while this was being worked out, and what is
+        # Somebody pressed a button while this was being worked out, so what is
         # in hand is now the list as it was before they did. Writing it would
-        # undo them — a deleted device would come back by itself a poll later.
+        # undo them, and a deleted device would come back by itself a poll later.
         # ponytail: the next tick works it out again from the file they wrote.
         return False
     if moves:
@@ -3880,7 +3885,7 @@ def month_sums(days):
     """One total per month, in a single pass over the day buckets.
 
     Asking month_totals for each month in turn walked the whole history once per
-    month — a year of days re-summed thirteen times over, on every request of
+    month: a year of days re-summed thirteen times over, on every request of
     every open tab, for the strip under the chart.
     """
     out = {}
@@ -3947,11 +3952,11 @@ def build_state(month=None):
         # While this is in the future the list is suspended and everyone is let
         # through; the page says so rather than looking merely broken.
         "bypass": int(CFG["bypass"]),
-        # No mark, no way to send anyone past the tunnel — then the button that
-        # offers it is a button that does nothing, so it is not drawn at all.
+        # No mark means no way to send anyone past the tunnel, and then the
+        # button that offers it does nothing, so it is not drawn at all.
         "vpnable": bool(int(CFG.get("vpn_mark") or 0)),
-        # Everything the system knows of on this network and the list does not:
-        # the add form offers them rather than asking anyone to remember one.
+        # Everything the system knows of on this network and the list does not.
+        # The add form offers them rather than asking anyone to remember one.
         "lan": [[ip, names[ip][0]] for ip in sorted(names)
                 if ip not in known and lan_client(ip)],
         "sys": sysinfo(),
@@ -3964,7 +3969,7 @@ def state(month=None):
 
     A phone and a laptop left open ask five seconds apart each, and every ask
     copied the whole history, read the ARP table and the lease file and walked
-    /proc for an answer that cannot have moved since the last one — the counters
+    /proc for an answer that cannot have moved since the last one. The counters
     themselves are behind a wider window than this. The answer is shared, so the
     caller must not write into it; the handler copies before it adds `you`.
     """
@@ -3980,7 +3985,7 @@ def state(month=None):
 # --- pages ------------------------------------------------------------------
 
 # Светлая — значения по умолчанию: панель равняется на Настройки macOS, а те
-# светлые. Тёмная описана один раз и подставляется в два селектора — в
+# светлые. Тёмная описана один раз и подставляется в два селектора: в
 # media-запрос для тех, кто ничего не выбирал, и в атрибут для ручного выбора.
 LIGHT = """--bg:#F2F2F7;--panel:#FFFFFF;--line:rgba(60,60,67,.29);
   --fill:rgba(120,120,128,.12);--fg:#000000;--dim:rgba(60,60,67,.6);
@@ -4096,7 +4101,7 @@ CSS = TOKENS + """
       font-size:var(--f-sec);pointer-events:none;white-space:nowrap}
  a{color:var(--blue)}
  /* Safari zooms the page in when a field smaller than 16px takes focus, and it
-    never zooms back out — one tap on a rename box and the whole panel is off
+    never zooms back out: one tap on a rename box and the whole panel is off
     screen. The type scale is 14px everywhere, so on a touch screen the fields
     are the exception. Nothing else may declare a font-size on a field: this is
     an element selector, and the first class that does would win over it. */
@@ -4107,7 +4112,7 @@ CSS = TOKENS + """
   .panel{padding:var(--s3)}}
 """
 
-# ponytail: one inline glyph instead of a file to serve — it also stops the
+# ponytail: one inline glyph instead of a file to serve. It also stops the
 # browser asking for /favicon.ico on every page.
 ICON = ("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'>"
         "<rect width='16' height='16' rx='3' fill='%232C2C2E'/>"
@@ -4120,9 +4125,9 @@ def png_icon(size=180, bg=(44, 44, 46), fg=(10, 132, 255)):
     Safari ignores an SVG in an apple-touch-icon and falls back to a screenshot
     of the page, which is what a panel on somebody's home screen looks like
     without this. iOS masks the corners itself, so the image is a flat square
-    with a dot in it — and a PNG of two colours is a header, one zlib stream of
-    rows and a checksum, which is less code than carrying a base64 blob around
-    and no dependency at all.
+    with a dot in it. A PNG of two colours is a header, one zlib stream of rows
+    and a checksum, which is less code than carrying a base64 blob around and no
+    dependency at all.
     """
     r = size * .21
     rows = b""
@@ -4147,8 +4152,8 @@ def png_icon(size=180, bg=(44, 44, 46), fg=(10, 132, 255)):
 ICON_PNG = png_icon()
 
 # The head both pages share. theme-color paints the browser's own chrome around
-# the panel — the address bar on Android, the status bar of a page kept on a
-# home screen — and it cannot read a CSS variable, so the two backgrounds are
+# the panel: the address bar on Android, the status bar of a page kept on a
+# home screen. It cannot read a CSS variable, so the two backgrounds are
 # repeated here by hand.
 HEAD = """<meta name=viewport content="width=device-width,initial-scale=1">
 <meta name=theme-color content="#1C1C1E" media="(prefers-color-scheme: dark)">
@@ -4283,14 +4288,14 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  .meter i{display:block;height:100%;border-radius:var(--r-pill);background:var(--blue)}
  /* Not a title attribute: this card is rebuilt on every poll, and the browser
     drops a pending native tooltip whenever the node under the cursor is
-    replaced. A CSS one survives that, opens on focus as well as on hover — so
-    a tap works too — and shows up in a screenshot. */
+    replaced. A CSS one survives that, opens on focus as well as on hover, so
+    a tap works too, and shows up in a screenshot. */
  .q{position:relative;margin-left:var(--s1);color:var(--dim);font-style:normal;
     font-size:var(--f-sec);cursor:help}
  .q:hover,.q:focus{color:var(--fg);outline:none}
- /* 11: above the sticky header (10) — the machine card scrolls under #hdr and
-    the tooltip must stay readable there — below the settings sheet (20), same
-    reasoning as .pop. */
+ /* 11: above the sticky header (10), because the machine card scrolls under
+    #hdr and the tooltip must stay readable there. Below the settings sheet
+    (20), same reasoning as .pop. */
  .q>span{display:none;position:absolute;z-index:11;left:0;top:calc(100% + var(--s1));
     width:min(15rem,62vw);padding:var(--s2) var(--s3);background:var(--panel);
     border-radius:var(--r-ctl);box-shadow:var(--sh);color:var(--fg);
@@ -4366,7 +4371,7 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  form{display:flex;gap:.5rem;flex-wrap:wrap}
  form input{flex:1;min-width:8rem}
  /* minmax(0,1fr), not 1fr: `1fr` is `minmax(auto,1fr)`, and `auto` is the
-    item's min-content — one line of numbers that must not break is enough to
+    item's min-content, so one line of numbers that must not break is enough to
     push the column past the screen, and then the whole page scrolls sideways
     on a phone. The wide rule above already guards it the same way. */
  @media (max-width:900px){.row2{grid-template-columns:minmax(0,1fr)}}
@@ -4549,7 +4554,7 @@ const fmt = b => b < 1024 ? Math.round(b) + T.b
   : b < 1048576 ? (b/1024).toFixed(0) + T.kb
   : b < 1073741824 ? (b/1048576).toFixed(1) + T.mb
   : (b/1073741824).toFixed(2) + T.gb;
-// For the axis — no decimals, or the label will not fit the left gutter.
+// For the axis: no decimals, or the label will not fit the left gutter.
 const fmtAx = b => b < 1048576 ? Math.round(b/1024) + T.kb
   : b < 1073741824 ? Math.round(b/1048576) + T.mb
   : (b < 10737418240 ? (b/1073741824).toFixed(1) : Math.round(b/1073741824)) + T.gb;
@@ -4558,7 +4563,7 @@ const ago = s => s < 90 ? T.now : s < 3600 ? n(T.minAgo, Math.round(s/60))
   : s < 86400 ? n(T.hAgo, Math.round(s/3600)) : n(T.dAgo, Math.round(s/86400));
 
 // A timer is one field: when the state a device stands in now runs out. Which
-// way it flips then is nowhere, because it is not needed — a timer always undoes
+// way it flips then is nowhere, because it is not needed: a timer always undoes
 // whatever set it, so "off until seven" and "on for an hour" are the same thing.
 const left = s => s < 5400 ? n(T.tmLeftM, Math.max(1, Math.round(s/60)))
                            : n(T.tmLeftH, Math.round(s/3600));
@@ -4620,7 +4625,7 @@ let S = null, month = null, sel = null, mode = 'day', sortk = 'ip', sortd = 1,
     oth = 0, mtot = 0, openIp = null;
 let VPN = null, vpnBusy = false;
 
-// [short label, up, down, full label, other] — the chart draws whatever this
+// [short label, up, down, full label, other]. The chart draws whatever this
 // returns, so the month, the last 24 hours and one device's slice are the same
 // code. "other" is what the bucket holds and nobody on the list accounts for:
 // history is kept per address and outlives the device it belonged to. With one
@@ -5025,7 +5030,7 @@ document.addEventListener('keydown', e => {
 });
 
 // The view someone left behind, so a reload does not throw them back to the
-// default sort. In a private window localStorage throws — then it is simply
+// default sort. In a private window localStorage throws, and then it is simply
 // not remembered. The picked device is not here: it lives in the address bar.
 const keep = () => { try {
   localStorage.gwacl = JSON.stringify({mode, sortk, sortd});
@@ -5038,7 +5043,7 @@ const flipSort = () => { sortd = -sortd; keep(); draw(); };
 const setMode = m => { mode = m; keep(); draw(); };
 // The picked device goes in the fragment and nowhere else: that makes it a
 // link one can send, and gives the back button something to undo. Picking only
-// moves the address on — onhashchange is what redraws, once.
+// moves the address on; onhashchange is what redraws, once.
 const pickDev = ip => { location.hash = (!ip || sel === ip) ? '' : ip; };
 onhashchange = () => { sel = location.hash.slice(1) || null; draw(); };
 const addKnown = b => post({ip: b.dataset.ip, name: b.dataset.nm});
@@ -5088,7 +5093,7 @@ const draw = () => {
   if (!S) return;
   if (sel && !S.devices.some(x => x.ip === sel)) sel = null;
   const one = sel && S.devices.find(x => x.ip === sel);
-  // The menu that opens it — while it is already open there is nothing left
+  // The menu that opens it: while it is already open there is nothing left
   // to pick, so the row shows the remaining time instead; the warning and the
   // way to close it live in the red banner above.
   bypbox.innerHTML = S.bypass > S.now
@@ -5110,7 +5115,7 @@ const draw = () => {
   const dv = one ? [one] : S.devices;
   const U = dv.reduce((a,x) => a+x.up, 0), D = dv.reduce((a,x) => a+x.down, 0);
   // The month's total counts every address the history knows of, the devices
-  // only those still on the list. What is left over is "other" — hence a total
+  // only those still on the list. What is left over is "other", hence a total
   // that is more than inbound plus outbound, and a tile that says why.
   mtot = (S.months.find(m => m[0] === S.month) || [0, 0])[1];
   oth = one ? 0 : Math.max(0, mtot - S.devices.reduce((a,x) => a+x.up+x.down, 0));
@@ -5194,7 +5199,7 @@ const draw = () => {
 
   renderBanners();
   if (S.update) announce(S.update);
-  // A listed address that answers as somebody else — the rule is now written
+  // A listed address that answers as somebody else, so the rule is now written
   // for whoever took it.
   clash.hidden = !S.clash.length;
   clashb.innerHTML = S.clash.map(([ip, was, now, ven]) =>
@@ -5324,7 +5329,8 @@ document.onvisibilitychange = () => document.hidden || load();
 // Five seconds, not fifteen: the "now" column is a rate measured over exactly
 // this window, so the interval is how alive the page is allowed to look. What
 // it costs the gateway is two comparisons and, on a quiet network, no write at
-// all — the counters are behind the poll window and the blocked set is cached.
+// all, because the counters are behind the poll window and the blocked set is
+// cached.
 // SELECT as well as INPUT: redrawing the table under an open menu closes it,
 // and the timer is chosen from one.
 setInterval(() => document.hidden
@@ -5352,8 +5358,8 @@ class H(BaseHTTPRequestHandler):
         # Nothing here survives its own request: /api is a live reading and the
         # page itself carries the current settings. Without this the address is
         # the same on every refresh, the answer has no validator and no expiry,
-        # and a browser is free to serve its own copy — a panel frozen on old
-        # numbers with nothing in the console to say why.
+        # and a browser is free to serve its own copy. That is a panel frozen on
+        # old numbers with nothing in the console to say why.
         self.send_header("Cache-Control", "no-store")
         if cookie:
             self.send_header("Set-Cookie", cookie)
@@ -5430,7 +5436,7 @@ class H(BaseHTTPRequestHandler):
             self._send(200, json.dumps(s), "application/json")
         else:
             # /vpn?id=… is one subscription's node list, asked for only when
-            # somebody opens it: it means reading a cached body and converting
+            # somebody opens it. It means reading a cached body and converting
             # it, and the settings page has no business paying for that on
             # every open for every profile.
             tid = parse_qs(urlparse(self.path).query).get("id", [None])[0]
@@ -5561,7 +5567,7 @@ class H(BaseHTTPRequestHandler):
     def _bypass(self, raw):
         """Hold the gateway open for a while, or shut it again now.
 
-        The window is written to the config before the table is rebuilt: a
+        The window is written to the config before the table is rebuilt. A
         crash between the two leaves a gateway that is merely still closed,
         where the other order would leave one that is open with nothing on disk
         saying until when.
@@ -5580,7 +5586,7 @@ class H(BaseHTTPRequestHandler):
     def _settings(self, raw):
         """Save the settings form. The answer is the new address, or empty.
 
-        Everything but the port is picked up by reload_conf on the spot; a
+        Everything but the port is picked up by reload_conf on the spot. A
         changed port needs the process replaced, and the browser is told where
         to look rather than sent to a socket that is not listening yet.
         """
@@ -6197,8 +6203,8 @@ PersistentKeepalive = 25
             return subprocess.CompletedProcess(argv, 0, "", "")
 
     # A backend that is up is up on the first reading here, so every second of
-    # the real window would be dead time — and a failure that is meant to stay
-    # a failure would be retried into a pass. The wait itself is asserted just
+    # the real window would be dead time, and a failure that is meant to stay a
+    # failure would be retried into a pass. The wait itself is asserted just
     # below, against a runner that fails once and then works.
     slow = [0]
 
@@ -6228,7 +6234,7 @@ PersistentKeepalive = 25
         BACKEND_STEP = step
 
     # From here the fake runner answers on the first reading, so every second
-    # of the real window would be dead time — and a failure that is meant to
+    # of the real window would be dead time, and a failure that is meant to
     # stay a failure would be retried into a pass.
     BACKEND_WAIT = 0
 
@@ -6716,7 +6722,7 @@ PersistentKeepalive = 25
         assert not quick_usable("amneziawg", no_module), "no tools at all"
         # The state this host was actually in: awg-quick installed, no kernel
         # module and no amneziawg-go, so `awg-quick up` prints "Unknown device
-        # type" — and the panel used to call that ready to use.
+        # type". The panel used to call that ready to use.
         shutil.which = only("awg-quick")
         assert not quick_usable("amneziawg", no_module), \
             "awg-quick alone cannot bring up a tunnel"
@@ -6848,7 +6854,7 @@ PersistentKeepalive = 25
     set_transit_closed(False, lambda devs: gates.append(ruleset(devs)))
     assert "chain vpn_guard" in gates[0] and "chain vpn_guard" not in gates[1]
 
-    # Past the tunnel is not off the network: the device keeps its place in the
+    # Past the tunnel is not off the network. The device keeps its place in the
     # allowed set, and the mark is stamped before the rule that accepts it away.
     old, CFG["vpn_mark"] = CFG.get("vpn_mark"), 0x2024
     v = ruleset([dict(d[0], vpn=False), d[1]])
@@ -6860,7 +6866,7 @@ PersistentKeepalive = 25
     assert "meta mark" not in ruleset(d), "nobody sent past it, nothing stamped"
 
     # With a hardware address the rule is written against that instead, and it
-    # has to stand above the line that lets IPv6 out of the chain — that line is
+    # has to stand above the line that lets IPv6 out of the chain. That line is
     # why the first release of this marked v4 and left v6 in the tunnel.
     m = ruleset([dict(d[0], vpn=False, mac="aa:bb:cc:dd:ee:ff"), d[1]])
     assert "ether saddr aa:bb:cc:dd:ee:ff meta mark set 0x2024" in m
@@ -7078,7 +7084,7 @@ PersistentKeepalive = 25
     _fails.pop(ip)
 
     # A real answer from nft 1.1.6. What is left of the timeout is how long ago
-    # the address last knocked — the kernel re-arms it on every dropped packet.
+    # the address last knocked: the kernel re-arms it on every dropped packet.
     assert parse_blocked(json.loads('{"nftables":[{"metainfo":{}},{"set":{"name":"blocked",'
         '"elem":[{"elem":{"val":"192.168.1.99","expires":21599}}]}}]}')["nftables"]) \
         == {"192.168.1.99": 1}
@@ -7131,7 +7137,7 @@ PersistentKeepalive = 25
         TRAFFIC = os.path.join(td, "traffic.json")
         TODAY = os.path.join(td, "today.json")
         # The table as nft prints it, so counters() is exercised rather than
-        # replaced — it is the half of the reading the accounting hangs on.
+        # replaced, since it is the half of the reading the accounting hangs on.
         table = lambda up, down: [{"counter": {"name": "up_10_0_0_5", "bytes": up}},
                                   {"counter": {"name": "down_10_0_0_5", "bytes": down}}]
         nft_table = lambda: table(500, 900)
@@ -7162,8 +7168,8 @@ PersistentKeepalive = 25
         assert os.stat(TODAY).st_mtime_ns != stamp, "the buffer was never flushed"
         assert json.load(open(TODAY))["day"] == {"10.0.0.5": [700, 900]}
         # And the point of the whole split: recording today did not touch the
-        # months behind it. This is the assertion that keeps the daily write
-        # volume where it is now — delete it and the file quietly grows back.
+        # months behind it. This assertion keeps the daily write volume where it
+        # is now. Delete it and the file quietly grows back.
         assert os.stat(TRAFFIC).st_mtime_ns == cold_stamp, \
             "a day in progress must not rewrite the closed days"
         assert not [f for f in os.listdir(td) if f.endswith(".tmp")], \
@@ -7202,9 +7208,9 @@ PersistentKeepalive = 25
 
         # A file damaged by a version that wrote it without a rename costs its
         # own contents and nothing more: the panel still starts. Its complaint
-        # is caught rather than printed: this is a selftest deliberately feeding
-        # itself half a file, and the line scrolling past an installer's output
-        # reads as a fault of the install. Caught, not silenced — that the
+        # is caught rather than printed, because this is a selftest deliberately
+        # feeding itself half a file, and the line scrolling past an installer's
+        # output reads as a fault of the install. Caught, not silenced: that the
         # damage is reported at all is the other half of what is being tested.
         open(TRAFFIC, "w").write('{"days": {"2026-01-0')
         said = io.StringIO()
@@ -7329,7 +7335,7 @@ PersistentKeepalive = 25
         save([{"ip": a, "name": "quest", "on": True, "mac": "aa:bb:cc:dd:ee:ff"}])
         lan_names = lambda: {b: ["", "aa:bb:cc:dd:ee:ff"]}
         keep_stamp, _devs_stamp = _devs_stamp, lambda: secrets.token_hex(4)
-        assert not track_macs(), "the list changed underneath — let go of it"
+        assert not track_macs(), "the list changed underneath, let go of it"
         assert load()[0]["ip"] == a, "and leave what they wrote alone"
         _devs_stamp = keep_stamp
 
@@ -7356,7 +7362,7 @@ PersistentKeepalive = 25
 
     # What the update button is allowed to fetch. The tag is the only part of
     # the address that does not come from a constant, so it is the only part
-    # that has to be refused — this runs as root and unpacks what it gets.
+    # that has to be refused, because this runs as root and unpacks what it gets.
     assert tar_url("v1.4.0") == TARBALL + "v1.4.0"
     for bad in ("", None, "nightly", "1.4.0 ; reboot", "../../etc/passwd",
                 "https://evil.example/x", "1.4.0?x=1", "1.4.0/..", "v1.4.0\n"):
@@ -7482,7 +7488,7 @@ def main():
     elif "--selftest" in sys.argv:
         # Several tests exercise the paths that report a damaged file or a
         # rejected config to the journal, and those reports are the point of
-        # those paths — printed here they read as an install going wrong. A
+        # those paths. Printed here they read as an install going wrong. A
         # failure still escapes: its traceback is written after this ends.
         with contextlib.redirect_stderr(io.StringIO()):
             selftest()
@@ -7500,7 +7506,7 @@ def main():
             print(T["noPwWarn"].replace("{cmd}", sys.argv[0]), file=sys.stderr)
         # Reconciliation is allowed to fail; the HTTP panel is how the broken
         # profile is repaired. Its only startup side effect here is the guard
-        # flag — the real table is installed once, just below.
+        # flag; the real table is installed once, just below.
         try:
             reconcile_tunnels(applier=lambda devs: None)
         except Exception:

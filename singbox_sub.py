@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Turn subscription links into sing-box outbounds.
 
-The installer uses the CLI for legacy setup and the panel imports the same
+The installer uses the CLI for legacy setup, and the panel imports the same
 parser for managed profiles. A URL is passed directly only by the legacy CLI;
 the panel keeps it in its private tunnel storage and never puts it in argv.
 
@@ -9,8 +9,8 @@ It prints a complete config to stdout and touches nothing on disk, so the caller
 keeps the backup, the `sing-box check` and the rollback. Given `--base`, only two
 things in that config change: outbounds tagged `sub-*`, and the member list of
 the selector group. Routing rules, DNS, inbounds and hand-written outbounds come
-out exactly as they went in — a config tuned by hand over months must survive a
-subscription refresh.
+out exactly as they went in, because a config tuned by hand over months must
+survive a subscription refresh.
 
     python3 singbox_sub.py --url URL --base /etc/sing-box/config.json > new.json
     python3 singbox_sub.py --url URL --iface eno1 > new.json   # a fresh install
@@ -35,9 +35,9 @@ SUB_BODY_MAX = 128 << 10
 
 # sing-box does not implement Xray's xhttp transport and shows no sign of
 # starting to: 1.13 and the 1.14 betas both know exactly five (http, ws, quic,
-# grpc, httpupgrade) and two pull requests adding XHTTP were closed unmerged.
-# Upgrading is not the fix, so the node is skipped — loudly, never silently: one
-# quietly missing from the group is a slower tunnel with no explanation.
+# grpc, httpupgrade), and two pull requests adding XHTTP were closed unmerged.
+# Upgrading is not the fix, so the node is skipped, loudly and never silently.
+# One quietly missing from the group is a slower tunnel with no explanation.
 TRANSPORTS = ("tcp", "")
 
 
@@ -70,8 +70,8 @@ def _b64(s):
 
 
 def fetch(url, timeout=TIMEOUT, limit=SUB_BODY_MAX):
-    """The subscription body. The User-Agent matters: providers hand out Clash
-    YAML to some clients and the plain list to others."""
+    """The subscription body. The User-Agent matters, because providers hand out
+    Clash YAML to some clients and the plain list to others."""
     p = urlsplit(url)
     if p.scheme != "https" or not p.hostname:
         raise ValueError("subscription URL must use HTTPS")
@@ -171,7 +171,7 @@ def _ss(p, tag):
 def outbound(link, tag):
     """One subscription link as one sing-box outbound.
 
-    Raises Unsupported for anything this sing-box would refuse to load; the
+    Raises Unsupported for anything this sing-box would refuse to load. The
     caller reports it and carries on with the rest of the list.
     """
     p = urlsplit(link)
@@ -184,7 +184,7 @@ def outbound(link, tag):
 
 
 def node_name(link):
-    """What the provider called the node — the flag and country in practice."""
+    """What the provider called the node: the flag and country, in practice."""
     p = urlsplit(link)
     return " ".join((unquote(p.fragment).strip() or p.hostname or "node").split())
 
@@ -192,7 +192,7 @@ def node_name(link):
 def tag_for(link, taken, prefix=OWNED):
     """An ownership prefix plus the provider's node name, made unique.
 
-    The prefix is the ownership mark — it is the whole basis on which a refresh
+    The prefix is the ownership mark, and the whole basis on which a refresh
     knows which outbounds are its own to delete. The name is kept because it is
     what shows up in the journal when a node misbehaves.
     """
@@ -206,10 +206,10 @@ def tag_for(link, taken, prefix=OWNED):
 
 
 def label_of(tag, prefix=OWNED):
-    """A tag without its ownership prefix — how one node is named to a person.
+    """A tag without its ownership prefix: how one node is named to a person.
 
     This is the key a hand-picked selection is stored under, so it has to be
-    the tag and not the provider's raw name: two nodes called the same thing
+    the tag and not the provider's raw name. Two nodes called the same thing
     get `Germany` and `Germany 2`, and a selection keyed on the raw name could
     not tell them apart.
     """
@@ -221,9 +221,9 @@ def convert(body, warn=lambda s: None, exclude=None, prefix=OWNED, taken=None,
     """Every usable node of a subscription, in the order the provider listed.
 
     `exclude` is a regular expression matched against the provider's name for
-    the node, and it exists because the group is a `urltest`: it picks by
-    latency, so a domestic node is always the fastest and therefore always the
-    one chosen — the tunnel then exits in the country it was meant to leave.
+    the node. It exists because the group is a `urltest`: it picks by latency,
+    so a domestic node is always the fastest and therefore always the one
+    chosen, and the tunnel then exits in the country it was meant to leave.
     Nothing here can tell where a node is; only its name can, and only the
     person reading it knows what the names mean.
 
@@ -246,7 +246,7 @@ def convert(body, warn=lambda s: None, exclude=None, prefix=OWNED, taken=None,
             warn(f"{name}: исключён / excluded")
             continue
         try:
-            # Inside the try, like everything else that touches one link: a
+            # Inside the try, like everything else that touches one link. A
             # malformed one is one node lost, never the whole subscription.
             tag = tag_for(link, taken, prefix)
             if label_of(tag, prefix) in skip:
@@ -263,8 +263,8 @@ def convert(body, warn=lambda s: None, exclude=None, prefix=OWNED, taken=None,
 def merge(base, outs, group=GROUP):
     """The config with its `sub-*` outbounds replaced and nothing else moved.
 
-    Hand-written outbounds are left in the file even when they leave the group:
-    deleting an outbound a route rule still names would stop sing-box from
+    Hand-written outbounds are left in the file even when they leave the group.
+    Deleting an outbound a route rule still names would stop sing-box from
     loading at all, and this program cannot know which of them you still want.
     """
     c = json.loads(json.dumps(base))          # the caller's dict stays untouched
@@ -310,10 +310,10 @@ def fresh(outs, iface, group=GROUP):
             "address": ["172.19.0.1/30"],
             "auto_route": True, "auto_redirect": True, "strict_route": True,
         }],
-        # Group, then everything not from the subscription, then the nodes —
-        # the order merge() produces. They have to agree: the installer decides
-        # whether to restart sing-box by comparing bytes, and a config that
-        # merely reshuffles itself would restart the tunnel on every run.
+        # Group, then everything not from the subscription, then the nodes,
+        # which is the order merge() produces. They have to agree: the installer
+        # decides whether to restart sing-box by comparing bytes, and a config
+        # that merely reshuffles itself would restart the tunnel on every run.
         "outbounds": [
             {"type": "urltest", "tag": group, "outbounds": [o["tag"] for o in outs],
              "url": "https://www.gstatic.com/generate_204",
@@ -532,7 +532,7 @@ def selftest():
     f = fresh(convert(plain), "eno1")
     assert f["route"]["final"] == GROUP and f["inbounds"][0]["auto_redirect"] is True
     # The three things sing-box 1.13 refuses to start without. Each of them was
-    # found by `sing-box check`, one FATAL at a time; a template that regresses
+    # found by `sing-box check`, one FATAL at a time. A template that regresses
     # to the 1.11 shape installs a gateway that never comes up.
     assert all("type" in d for d in f["dns"]["servers"]), "the 1.12 DNS format"
     assert f["route"]["default_domain_resolver"], "dialling needs a resolver"

@@ -50,7 +50,7 @@ command -v systemctl >/dev/null || { echo "нужен systemd / systemd required
 # --- what the installed panel already knows ---------------------------------
 
 # Every answer of the previous run is in config.json. Re-reading it is what makes
-# a second run — and the upgrade button, which runs this with --yes — keep the
+# a second run, and the upgrade button that runs this with --yes, keep the
 # network it was configured with instead of detecting the host all over again.
 cfg() { # cfg key -> the value, or empty
   [ -f "$ETC/config.json" ] || return 0
@@ -62,7 +62,7 @@ print("" if v is None else v)' "$ETC/config.json" "$1" 2>/dev/null || true
 
 # --- language ---------------------------------------------------------------
 
-# An installed panel already knows its language — do not ask again on upgrade.
+# An installed panel already knows its language, so do not ask again on upgrade.
 [ -n "$UILANG" ] || UILANG=$(cfg lang)
 if [ -z "$UILANG" ] && [ "$YES" = 0 ]; then
   read -r -p "  Язык / Language [ru/en]: " UILANG </dev/tty || true
@@ -74,55 +74,55 @@ if [ "$UILANG" = en ]; then
   M_PW="Panel password";         M_WHO="Who may go out"
   M_INSTALL="Installing";        M_REMOVE="Removing"
   M_NEEDPY="python3 is required (standard library is enough)"
-  M_NONFT="nft not found and no known package manager — install nftables yourself"
+  M_NONFT="nft not found, and no package manager recognised. Install nftables yourself"
   M_INSTALLNFT="install:";       M_NFTFAIL="installing nftables failed"
   M_NONFT2="nftables is required"
-  M_FWDOFF="ip_forward is off — without it the host does not route at all."
+  M_FWDOFF="ip_forward is off. Without it the host does not route at all."
   M_FWDASK="enable it and persist in $SYSCTL ?"
   M_FWDON="enabled and persisted"
-  M_FWDLEFT="0 — the panel installs, traffic will not flow"
+  M_FWDLEFT="0: the panel installs, but traffic will not flow"
   M_IFACE="LAN interface";       M_NOIFACE="no such interface:"
   M_ADDR="gateway address";      M_NET="network";       M_PORT="panel port"
-  M_NOIP="has no IPv4 address — configure it before installing"
+  M_NOIP="has no IPv4 address. Configure it before installing"
   M_BADNET="address or network is invalid"
-  M_PWSEEN="The panel is reachable from the whole LAN; the password is the only guard."
-  M_PWHTTP="It travels over plain HTTP: fine on a network you control, not on one you do not."
+  M_PWSEEN="The panel is reachable from the whole LAN, and the password is the only guard."
+  M_PWHTTP="It goes over plain HTTP. Fine on a network you control, not on one you do not."
   M_PWSHORT="password shorter than 8 characters"
   M_PWKEPT="already set, left unchanged"
   M_PWNEW="    new password (8+ chars): "; M_PWAGAIN="    again: "
   M_PWMISMATCH="did not match, try again"; M_PWTOOSHORT="too short, try again"
   M_TOOLS="Tunnel tools"
-  M_TOOLSHINT="The panel manages subscriptions, WireGuard and AmneziaWG itself, but it runs the programs — it does not carry them."
+  M_TOOLSHINT="The panel manages subscriptions, WireGuard and AmneziaWG, but it only runs these programs. It does not ship them."
   M_TOOLSASK="install what is missing?"
-  M_TOOLSSKIP="skipped — tunnels stay unavailable until these are installed"
+  M_TOOLSSKIP="skipped: tunnels will not work until these are installed"
   M_SBOK="ok"; M_SBOLD="too old for the config the panel writes, replacing"
   M_SBFETCH="fetching the latest release"
   M_SBNOARCH="no published build for this architecture:"
-  M_SBNODL="neither curl nor wget — install sing-box yourself"
-  M_SBFAIL="could not be installed — subscriptions will not come up"
+  M_SBNODL="neither curl nor wget found. Install sing-box yourself"
+  M_SBFAIL="could not be installed: subscriptions will not come up"
   M_SBUNIT="unit written"; M_SBUNITKEPT="unit already present"
   M_SBUNITOWN="existing unit pointed at the replaced binary, ExecStart overridden"
-  M_WGOK="ok"; M_WGFAIL="not installed — WireGuard profiles will not come up"
+  M_WGOK="ok"; M_WGFAIL="not installed: WireGuard profiles will not come up"
   M_AWGNONE="AmneziaWG is in no distribution's own archive: Ubuntu has it in the project's PPA, Arch in the AUR."
   M_AWGPPA="add ppa:amnezia/ppa to this system's apt sources and install from it?"
   M_AWGAUR="build amneziawg-tools and amneziawg-go from the AUR as"
-  M_AWGBATCH="not installed — a third-party source is not added unattended; re-run without --yes"
-  M_AWGNOHELPER="not installed — no AUR helper (paru or yay) and no user to build as"
-  M_AWGGO="installed with the userspace implementation: it works without a kernel module and is slower than one"
-  M_AWGHALF="awg-quick is installed but there is nothing to build the interface with — no kernel module and no amneziawg-go. Install amneziawg-go (or amneziawg-dkms)"
-  M_PACWAIT="pacman's database is locked — waiting up to a minute for whoever has it"
+  M_AWGBATCH="not installed: a third-party source is never added unattended. Re-run without --yes"
+  M_AWGNOHELPER="not installed: no AUR helper (paru or yay), and no user to build as"
+  M_AWGGO="installed with the userspace implementation. It works without a kernel module, and is slower than one"
+  M_AWGHALF="awg-quick is installed, but there is nothing to build the interface with: no kernel module and no amneziawg-go. Install amneziawg-go (or amneziawg-dkms)"
+  M_PACWAIT="pacman's database is locked. Waiting up to a minute for whoever holds it"
   M_PACBUSY="still locked and a pacman is running: let that one finish and run this again"
   M_PACSTALE="still locked and no pacman is running — a killed one left it behind: sudo rm /var/lib/pacman/db.lck"
-  M_PACOLD="every mirror answered 404: the package database names a version they no longer carry. Upgrade the system first — sudo pacman -Syu — then run this again. (-Sy on its own is a partial upgrade; do not.)"
-  M_AWGFAIL="not installed — AmneziaWG profiles will not come up. Build: https://github.com/amnezia-vpn/amneziawg-tools ; system:"
+  M_PACOLD="every mirror answered 404: the package database names a version they no longer carry. Upgrade the system first with sudo pacman -Syu, then run this again. (-Sy on its own is a partial upgrade; do not use it.)"
+  M_AWGFAIL="not installed: AmneziaWG profiles will not come up. Build it from https://github.com/amnezia-vpn/amneziawg-tools ; system:"
   M_ONLYLIST="After this, ONLY the devices on the list will route through this host."
   M_SEEN="Currently visible on the network:"
-  M_NOARP="ARP table is empty — add devices from the panel later."
+  M_NOARP="ARP table is empty. Add devices from the panel later."
   M_KEPTOLD="previous version saved"
   M_DEVKEPT="kept, devices:";     M_DEVNEW="created, devices:"
   M_PWWRITTEN="stored (scrypt, random salt)"
-  M_SELFTEST_FAIL="selftest failed — not installing"
-  M_RULEFAIL="the kernel rejected the ruleset — not installing"
+  M_SELFTEST_FAIL="selftest failed, not installing"
+  M_RULEFAIL="the kernel rejected the ruleset, not installing"
   M_UNITOK="installed, service restarted"
   M_NOSTART="service did not come up: journalctl -u gateway-acl -n 30"
   M_NOPORT="port is not listening:"; M_NOTABLE="the nftables table was not created"
@@ -146,7 +146,7 @@ else
   M_NONFT="nft не найден, и пакетный менеджер не опознан — поставьте nftables сами"
   M_INSTALLNFT="поставить:";     M_NFTFAIL="установка nftables не удалась"
   M_NONFT2="без nftables работать нечему"
-  M_FWDOFF="ip_forward выключен — без него хост не маршрутизирует вообще."
+  M_FWDOFF="ip_forward выключен. Без него хост вообще не маршрутизирует."
   M_FWDASK="включить и закрепить в $SYSCTL ?"
   M_FWDON="включён и закреплён"
   M_FWDLEFT="0 — панель поставится, но трафик не пойдёт"
@@ -154,14 +154,14 @@ else
   M_ADDR="адрес шлюза";          M_NET="сеть";          M_PORT="порт панели"
   M_NOIP="не имеет адреса IPv4 — задайте его до установки"
   M_BADNET="адрес или сеть заданы неверно"
-  M_PWSEEN="Панель видна всей сети, пароль — единственная защита."
-  M_PWHTTP="Идёт по HTTP: в своей сети приемлемо, в чужой не используйте."
+  M_PWSEEN="Панель видна всей сети, и пароль — единственная защита."
+  M_PWHTTP="Пароль идёт по обычному HTTP. В своей сети это приемлемо, в чужой — нет."
   M_PWSHORT="пароль короче 8 символов"
   M_PWKEPT="уже задан, оставлен без изменений"
   M_PWNEW="    новый пароль (от 8 символов): "; M_PWAGAIN="    ещё раз: "
   M_PWMISMATCH="не совпали, ещё раз";  M_PWTOOSHORT="слишком короткий, ещё раз"
   M_TOOLS="Программы для туннелей"
-  M_TOOLSHINT="Подписками, WireGuard и AmneziaWG управляет панель, но она их запускает, а не содержит в себе."
+  M_TOOLSHINT="Подписками, WireGuard и AmneziaWG управляет панель, но сами программы она только запускает, а не содержит в себе."
   M_TOOLSASK="поставить недостающее?"
   M_TOOLSSKIP="пропущено — туннели не заработают, пока этого нет"
   M_SBOLD="слишком старый для конфига, который пишет панель, заменяю"
@@ -183,16 +183,16 @@ else
   M_PACWAIT="база pacman заперта — жду до минуты того, кто её занял"
   M_PACBUSY="всё ещё заперта, и pacman запущен: дождитесь его и запустите установку снова"
   M_PACSTALE="всё ещё заперта, а pacman не запущен — замок остался от убитого: sudo rm /var/lib/pacman/db.lck"
-  M_PACOLD="все зеркала ответили 404: база пакетов называет версию, которой на них уже нет. Сначала обновите систему — sudo pacman -Syu — и запустите установщик снова. (Один -Sy — это частичное обновление, так не надо.)"
+  M_PACOLD="все зеркала ответили 404: база пакетов называет версию, которой на них уже нет. Сначала обновите систему командой sudo pacman -Syu, потом запустите установщик снова. (Один -Sy — это частичное обновление, так не надо.)"
   M_AWGFAIL="не установлен — профили AmneziaWG не поднимутся. Собрать: https://github.com/amnezia-vpn/amneziawg-tools ; система:"
   M_ONLYLIST="После установки через этот хост пойдут ТОЛЬКО те, кто в списке."
   M_SEEN="Сейчас в сети видно:"
-  M_NOARP="ARP-таблица пуста — добавите устройства через панель."
+  M_NOARP="ARP-таблица пуста. Добавите устройства через панель."
   M_KEPTOLD="прежняя версия сохранена"
   M_DEVKEPT="оставлен, устройств:"; M_DEVNEW="создан, устройств:"
   M_PWWRITTEN="записан (scrypt, соль случайная)"
-  M_SELFTEST_FAIL="selftest не прошёл — не ставлю"
-  M_RULEFAIL="ruleset не принят ядром — не ставлю"
+  M_SELFTEST_FAIL="selftest не прошёл, не ставлю"
+  M_RULEFAIL="ruleset не принят ядром, не ставлю"
   M_UNITOK="установлен, служба перезапущена"
   M_NOSTART="служба не поднялась: journalctl -u gateway-acl -n 30"
   M_NOPORT="порт не слушается:";  M_NOTABLE="таблица nftables не создалась"
@@ -216,7 +216,7 @@ rollback() {
   [ "${TOUCHED:-0}" = 1 ] || return 0
   if [ "${HAD_UNIT:-0}" = 1 ] && [ -f "$ETC/panel.py.bak" ]; then
     # The upgrade failed: put the previous code back, but leave the access
-    # rules in place — dropping them would open the way out for everyone.
+    # rules in place. Dropping them would open the way out for everyone.
     install -m 755 "$ETC/panel.py.bak" "$ETC/panel.py"
     systemctl restart gateway-acl >/dev/null 2>&1 || true
     printf '\n%s\n' "$M_ROLLED_SOFT" >&2
@@ -295,19 +295,19 @@ fi
 
 # --- tunnel tools -----------------------------------------------------------
 #
-# The panel manages tunnels; it does not carry them. It shells out to sing-box
+# The panel manages tunnels but does not carry them. It shells out to sing-box
 # for a subscription and to wg-quick/awg-quick for a profile, and every one of
-# those failures reaches the browser as a two-word code — "нужная программа не
+# those failures reaches the browser as a two-word code. "нужная программа не
 # установлена" is what a panel with no sing-box says about every subscription
 # anyone ever tries to enable. So they are installed here, next to nftables,
 # and nothing in this step may abort the install: a mirror that is down must
 # not cost somebody their access-control panel.
 
-# The oldest sing-box that reads the config singbox_sub.py writes: 1.12 is
-# where `action: sniff`, the typed `dns.servers` entries and
+# The oldest sing-box that reads the config singbox_sub.py writes is 1.12. That
+# is where `action: sniff`, the typed `dns.servers` entries and
 # `default_domain_resolver` arrived, and where the older forms stopped working.
 # The distributions ship 1.8 and 1.10, which is why this is checked and not
-# assumed — an old binary rejects the config, and the panel reports the
+# assumed: an old binary rejects the config, and the panel reports the
 # subscription as failing validation with nothing to say it is the tool.
 SB_MIN_MAJOR=1
 SB_MIN_MINOR=12
@@ -357,8 +357,8 @@ sb_from_github() {
   tag=$(fetch "$SB_LATEST" 2>/dev/null \
         | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
         | head -n 1) || true
-  # Only the tag comes off the network, and only if it looks like a tag: the
-  # same rule the panel's update button follows, for the same reason.
+  # Only the tag comes off the network, and only if it looks like a tag. Same
+  # rule the panel's update button follows, for the same reason.
   case "$tag" in
     v[0-9]*) ;;
     *) return 1 ;;
@@ -383,8 +383,8 @@ sb_unit() {
      || [ -f /usr/lib/systemd/system/sing-box.service ]; then
     # A unit that came with a package points at /usr/bin/sing-box, and that is
     # the binary this script has just decided is too old. Overriding ExecStart
-    # rather than the whole unit keeps everything else the packager set, and
-    # without it the service would go on starting the version we replaced.
+    # rather than the whole unit keeps everything else the packager set.
+    # Without it the service would go on starting the version we replaced.
     if [ "$SB_OWN" = 1 ]; then
       install -d -m 755 /etc/systemd/system/sing-box.service.d
       cat > /etc/systemd/system/sing-box.service.d/10-gateway-acl.conf <<EOF
@@ -424,7 +424,7 @@ WantedBy=multi-user.target
 EOF
   # The whole step runs as `sb_unit || true`, which means `set -e` is off
   # inside it and a failed write would go by unnoticed while the line below
-  # said the unit was there. Report what is actually on disk.
+  # said the unit was there. So report what is actually on disk.
   if [ -s "$SB_UNIT" ]; then
     chmod 644 "$SB_UNIT"
     systemctl daemon-reload
@@ -449,8 +449,8 @@ pac_wait() { # 0 when pacman's database is free, 1 after saying why it is not
   local n=0
   [ -e "$PAC_LOCK" ] || return 0
   # pacman and every helper simply block on this file, and blocking with the
-  # output swallowed — which is what every other install in this step does —
-  # is a step that hangs for good with nothing on screen to say why.
+  # output swallowed, which is what every other install in this step does, is a
+  # step that hangs for good with nothing on screen to say why.
   say "$M_PACWAIT"
   while [ -e "$PAC_LOCK" ] && [ "$n" -lt 60 ]; do sleep 1; n=$((n + 1)); done
   [ -e "$PAC_LOCK" ] || return 0
@@ -471,11 +471,11 @@ pkg_install() { # pkg_install pkg... -> quietly, and never fatal
     # LC_ALL=C so the classification below reads pacman's own words and not a
     # translation of them. The output is discarded either way.
     if out=$(LC_ALL=C pacman -S --needed --noconfirm "$@" 2>&1); then return 0; fi
-    # Every mirror answering 404 is not a missing package: it is a sync
-    # database still naming a version the mirrors have already replaced.
-    # Nothing here may fix that — `pacman -Sy` on its own is the partial
-    # upgrade that breaks Arch systems — so it is named once, with the command
-    # that does fix it, instead of twenty-four mirror errors and a shrug.
+  # Every mirror answering 404 is not a missing package. It is a sync database
+  # still naming a version the mirrors have already replaced. Nothing here may
+  # fix that, because `pacman -Sy` on its own is the partial upgrade that breaks
+  # Arch systems. So it is named once, with the command that does fix it,
+  # instead of twenty-four mirror errors and a shrug.
     case "$out" in
       *404*|*"failed retrieving file"*|*"failed to retrieve"*) say "$M_PACOLD" ;;
     esac
@@ -485,11 +485,11 @@ pkg_install() { # pkg_install pkg... -> quietly, and never fatal
   else return 1; fi
 }
 
-# AmneziaWG is in no distribution's own archive: it is a kernel module plus a
-# fork of wireguard-tools, and only Ubuntu has it packaged anywhere official —
-# in the project's own PPA. Adding that PPA is a standing change to somebody's
-# apt sources, which is not something an unattended upgrade may decide, so it
-# is offered only when there is a person at the keyboard to say yes.
+# AmneziaWG is in no distribution's own archive. It is a kernel module plus a
+# fork of wireguard-tools, and only Ubuntu has it packaged anywhere official, in
+# the project's own PPA. Adding that PPA is a standing change to somebody's apt
+# sources, which is not something an unattended upgrade may decide, so it is
+# offered only when there is a person at the keyboard to say yes.
 awg_module() { # 0 when this kernel can make an amneziawg interface
   if [ -e /sys/module/amneziawg ]; then return 0; fi
   # Installed but not yet loaded answers here too; /sys/module alone misses it.
@@ -535,12 +535,12 @@ awg_arch() {
   # amneziawg-go and not amneziawg-dkms: awg-quick falls back to the userspace
   # implementation on its own when `ip link add type amneziawg` fails, and a
   # userspace binary needs neither kernel headers nor a rebuild after every
-  # kernel upgrade — which on a distribution with its own kernel is the
+  # kernel upgrade. On a distribution with its own kernel that is the
   # difference between working and not. The module is still tried below, and
   # awg-quick prefers it whenever it is there.
-  # Output is not swallowed here, unlike every other install in this step: an
+  # Output is not swallowed here, unlike every other install in this step. An
   # AUR build takes minutes, and the helper drops back to sudo for the pacman
-  # part — a password prompt into /dev/null is a hang nobody can explain.
+  # part, so a password prompt into /dev/null is a hang nobody can explain.
   case "$helper" in
     paru) set -- -S --needed --noconfirm --skipreview ;;
     *)    set -- -S --needed --noconfirm ;;
@@ -595,12 +595,12 @@ if yesno "$M_TOOLSASK"; then
     if sb_recent; then ok "sing-box" "$(sb_version)  $M_SBOK"
     else ok "sing-box" "$M_SBFAIL"; fi
   fi
-  # The unit is written whatever happened above: without one, "enable the
+  # The unit is written whatever happened above. Without one, "enable the
   # subscription" in the panel is `systemctl restart sing-box` against nothing.
   sb_unit || true
   # Enabled only once there is something to start. A unit that fails at every
   # boot because no subscription has been added yet is a red service and a
-  # question; the panel starts sing-box itself the moment one is enabled, and
+  # question. The panel starts sing-box itself the moment one is enabled, and
   # its own startup reconciliation brings it back after a reboot.
   if [ -f /etc/sing-box/config.json ]; then
     systemctl enable sing-box >/dev/null 2>&1 || true
@@ -612,8 +612,8 @@ if yesno "$M_TOOLSASK"; then
 
   awg_install || true
   if awg_usable; then
-    # Which of the two is running matters enough to say: awg-quick falls back
-    # to the userspace implementation by itself, and the tunnel works either
+    # Which of the two is running matters enough to say. awg-quick falls back
+    # to the userspace implementation by itself and the tunnel works either
     # way, but one of them is several times faster than the other.
     if awg_module; then ok "amneziawg-tools" "$M_WGOK"
     else ok "amneziawg-tools" "$M_AWGGO"; fi
@@ -635,8 +635,8 @@ fi
 
 DEF_IFACE=$(ip -o -4 route show default 2>/dev/null | awk '{print $5; exit}' || true)
 [ -n "${DEF_IFACE:-}" ] || DEF_IFACE=$(ip -o -4 addr show scope global | awk '{print $2; exit}')
-# The configured interface wins over the detected one, but only while it exists:
-# a card renamed between reboots must not turn an upgrade into a dead end.
+# The configured interface wins over the detected one, but only while it exists.
+# A card renamed between reboots must not turn an upgrade into a dead end.
 OLD_IFACE=$(cfg iface)
 [ -z "$OLD_IFACE" ] || [ ! -d "/sys/class/net/$OLD_IFACE" ] || DEF_IFACE="$OLD_IFACE"
 
