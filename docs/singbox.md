@@ -1,8 +1,12 @@
 # Using this with sing-box
 
 gateway-acl can either use a sing-box route managed elsewhere or build its
-subscription-owned outbounds from the panel. It never installs sing-box. This
-page records the things that actually bite when the two run on the same host —
+subscription-owned outbounds from the panel. The installer puts sing-box on the
+host — 1.12 or newer, because that is where `action: sniff`, the typed
+`dns.servers` entries and `default_domain_resolver` arrived and where the older
+forms stopped working, and because the distributions still ship 1.8 to 1.10. The
+running panel never installs anything; it reports what is missing. This page
+records the things that actually bite when the two run on the same host —
 learned from a working setup, not from documentation.
 
 No credentials, server addresses or subscription links belong in this repository,

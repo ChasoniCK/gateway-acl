@@ -52,6 +52,7 @@ import time
 import urllib.request
 import zlib
 import singbox_sub
+from concurrent import futures
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -60,7 +61,7 @@ from urllib.parse import urlparse, parse_qs
 # it against the newest tag on GitHub, so a forgotten bump makes every install
 # claim to be older than it is and show a banner that never goes away. CI
 # refuses a tag push where the two disagree.
-VERSION = "1.5.0"
+VERSION = "1.5.1"
 RELEASES_URL = "https://api.github.com/repos/ChasoniCK/gateway-acl/releases/latest"
 RELEASES_PAGE = "https://github.com/ChasoniCK/gateway-acl/releases/latest"
 # The one address the update button may ever download from. The repository is
@@ -144,6 +145,9 @@ _lock = threading.Lock()
 _statelock = threading.Lock()
 _conf_lock = threading.RLock()
 _vpn_lock = threading.RLock()
+# One scratch interface and one temporary config serve every probe, so two at
+# once would be two halves of each. Never taken while _vpn_lock is held.
+_probe_lock = threading.Lock()
 _vpn_closed = False
 _state = {"at": 0.0, "month": None, "val": None}   # the last answer /api gave
 _sessions = {}          # digest of the token -> when it expires
@@ -382,7 +386,19 @@ STRINGS = {
         "vpnEnable": "включить",
         "vpnDisable": "выключить",
         "vpnRefresh": "обновить",
+        "vpnCheck": "проверить",
         "vpnDelete": "удалить",
+        "vpnProbeOk": "проверка пройдена",
+        "vpnProbeNodes": "проверка: отвечают {a} из {b}",
+        "vpnProbeWhat": "Проверка не переключает шлюз: подписка собирается в "
+                        "отдельный конфиг и отдаётся sing-box на разбор, узлы "
+                        "опрашиваются по TCP, а WireGuard поднимается на "
+                        "временном интерфейсе с маршрутом в 192.0.2.1 — туда "
+                        "не ходит ничего настоящего — и удаляется сразу после "
+                        "рукопожатия.",
+        "vpnErrUnreachable": "ни один узел не ответил",
+        "vpnNoTool": "на шлюзе не установлено: {tools} — туннели этих типов "
+                     "не поднимутся. Поставит установщик: sudo ./install.sh",
         "vpnConfirmDisable": "Выключить последний активный туннель? Трафик пойдёт напрямую.",
         "vpnConfirmDelete": "Удалить этот туннель и его сохранённые данные? Если он активен, подключение будет переключено.",
         "vpnIpv6": "В конфиге нет полного маршрута IPv6",
@@ -647,7 +663,20 @@ STRINGS = {
         "vpnEnable": "enable",
         "vpnDisable": "disable",
         "vpnRefresh": "refresh",
+        "vpnCheck": "check",
         "vpnDelete": "delete",
+        "vpnProbeOk": "the check passed",
+        "vpnProbeNodes": "checked: {a} of {b} answered",
+        "vpnProbeWhat": "A check switches nothing: the subscription is built "
+                        "into a configuration of its own and handed to sing-box "
+                        "to read, its nodes are knocked on over TCP, and a "
+                        "WireGuard profile is brought up on a scratch interface "
+                        "routed to 192.0.2.1 — where nothing real is ever "
+                        "sent — and deleted again right after the handshake.",
+        "vpnErrUnreachable": "no node answered",
+        "vpnNoTool": "not installed on the gateway: {tools} — tunnels of those "
+                     "kinds will not come up. The installer adds them: "
+                     "sudo ./install.sh",
         "vpnConfirmDisable": "Disable the last active tunnel? Traffic will go direct.",
         "vpnConfirmDelete": "Delete this tunnel and its saved data? If it is active, the connection will switch.",
         "vpnIpv6": "The configuration has no full IPv6 route",
@@ -1849,6 +1878,43 @@ SAFE_VPN_ERRORS = {
 }
 VPN_COMMANDS = {"sing-box", "systemctl", "wg", "awg", "wg-quick",
                 "awg-quick", "ip", "nft"}
+# A probe never becomes a tunnel's committed state, so it has codes of its own:
+# "ok" is not an error and "unreachable" is not a reason to close transit.
+SAFE_PROBE_CODES = SAFE_VPN_ERRORS | {"ok", "unreachable"}
+
+# How long something just started is given to appear. `systemctl restart`
+# returns as soon as the process is running, and sing-box then needs a moment
+# to build the tun and install its policy route; `wg-quick up` returns before
+# the first handshake. Checking straight away therefore fails a tunnel that is
+# coming up perfectly well, and the whole switch rolls back — which is exactly
+# what "the subscription will not come up" looked like.
+#
+# A module global and never a default argument: the selftest drives a fake
+# runner where every wait is dead time, and sets this to 0. Resolved in the
+# body of the two functions that use it, per the rule in CLAUDE.md.
+BACKEND_WAIT = 20
+BACKEND_STEP = 0.5
+
+# --- probing ---
+# What one press of "check" is allowed to cost. A subscription of two hundred
+# nodes must not turn a button into a two-minute wait, and the point is a
+# sample: a provider whose first two dozen nodes all refuse is not a provider
+# that works.
+PROBE_TIMEOUT = 4
+PROBE_NODES = 24
+PROBE_WORKERS = 12
+PROBE_WAIT = 8
+# The scratch interface a WireGuard probe builds and tears down. Thirteen
+# characters like a tunnel id, but not one: `check_tunnel_id` rejects it, so it
+# can never be confused with a profile's own interface.
+PROBE_IF = "gwaclprobe"
+# TEST-NET-1 (RFC 5737). The probe has to make the kernel send *something* into
+# the tunnel to trigger a handshake, which needs one route; this block is
+# routed nowhere in the real world, so that route cannot take traffic away from
+# anything that matters. The handshake does not care where the packet was going.
+PROBE_DST = "192.0.2.1"
+PROBE_LINK = {"wireguard": "wireguard", "amneziawg": "amneziawg"}
+PROBE_CONF = {"wireguard": "wg", "amneziawg": "awg"}
 
 
 class VpnError(ValueError):
@@ -1886,9 +1952,20 @@ def _tunnel_row(row):
         nodes = max(0, int(row.get("nodes") or 0))
     except (TypeError, ValueError):
         nodes = 0
+    probe = str(row.get("probe") or "")
+    if probe not in SAFE_PROBE_CODES:
+        probe = "invalid-state"
+    try:
+        reach = max(0, int(row.get("reach") or 0))
+    except (TypeError, ValueError):
+        reach = 0
     clean = {"id": tid, "name": name, "kind": kind,
              "enabled": bool(row.get("enabled")), "error": error,
-             "nodes": nodes}
+             "nodes": nodes,
+             # What the last press of "check" found, and how much of it
+             # answered. Never a reason to change the ruleset — a profile
+             # nobody enabled is allowed to be unreachable.
+             "probe": probe, "reach": reach}
     for key in ("verified", "ipv6"):
         if key in row:
             clean[key] = bool(row[key])
@@ -2059,9 +2136,22 @@ def parse_singbox_mark(text):
     return marks.pop() if len(marks) == 1 else 0
 
 
-def backend_mark(backend, runner=None):
-    if not backend:
-        return 0
+def _wait_for(read, wait):
+    """Call `read` until it answers something truthy or the window closes.
+
+    One read when `wait` is 0, which is what a health check on the poll path
+    wants; a few over the window when something was just started and has not
+    finished appearing yet.
+    """
+    deadline = time.monotonic() + max(0.0, wait or 0.0)
+    while True:
+        value = read()
+        if value or time.monotonic() >= deadline:
+            return value
+        time.sleep(BACKEND_STEP)
+
+
+def _read_mark(backend, runner=None):
     kind = backend.get("kind")
     if kind == "singbox":
         result = vpn_exec(["nft", "list", "table", "inet", "sing-box"],
@@ -2080,6 +2170,19 @@ def backend_mark(backend, runner=None):
         except ValueError:
             return 0
     return 0
+
+
+def backend_mark(backend, runner=None, wait=0):
+    """The fwmark the running tunnel steps aside for, once it has one.
+
+    A tunnel that has just been started has not written its rules yet, and a
+    mark read as 0 there is not "this host has no mark" but "ask again in a
+    moment" — the difference is a panel that quietly stops offering to send a
+    device past the tunnel.
+    """
+    if not backend:
+        return 0
+    return _wait_for(lambda: _read_mark(backend, runner), wait)
 
 
 def backend_state(rows, runner=None):
@@ -2189,6 +2292,13 @@ def _check_singbox_candidate(config, runner=None):
         write_private_text(path, text)
         result = vpn_exec(["sing-box", "check", "-c", path], runner=runner)
     if result.returncode:
+        # The browser gets a two-word code on purpose, and a two-word code is
+        # useless to whoever has to fix it: an installed sing-box too old for
+        # this config fails here and looks exactly like a bad subscription.
+        # The journal is root-only, so the tool's own complaint goes there.
+        reason = " ".join(str(result.stderr or result.stdout or "").split())[:300]
+        print(f"gateway-acl: sing-box rejected the config: {reason}",
+              file=sys.stderr, flush=True)
         raise VpnError("validation-failed")
     return text
 
@@ -2286,6 +2396,13 @@ def _start_backend(backend, runner=None):
         return
     if backend["kind"] == "singbox":
         if "config_text" in backend:
+            # A host that never had sing-box installed by a package has no
+            # /etc/sing-box either, and writing into a directory that is not
+            # there is how the first subscription ever enabled came back as
+            # "start-failed" with nothing in the log to say why.
+            with contextlib.suppress(OSError):
+                os.makedirs(os.path.dirname(SINGBOX_CONFIG) or ".",
+                            mode=0o755, exist_ok=True)
             write_private_text(SINGBOX_CONFIG, backend["config_text"])
         argv = ["systemctl", "restart", "sing-box"]
     else:
@@ -2295,30 +2412,41 @@ def _start_backend(backend, runner=None):
         raise VpnError("start-failed")
 
 
-def _check_backend(backend, runner=None):
-    if not backend:
-        return
+def _backend_up(backend, runner=None):
+    """One reading: is this backend running and carrying a default route."""
     if backend["kind"] == "singbox":
         result = vpn_exec(["systemctl", "is-active", "sing-box"], runner=runner)
+        if result.returncode:
+            return False
         try:
             _, policy_devs = _default_route_devs(runner)
         except VpnError:
-            policy_devs = set()
-        if result.returncode or not policy_devs:
-            raise VpnError("start-failed")
-        return
+            return False
+        return bool(policy_devs)
     tid = check_tunnel_id(backend["id"])
     if vpn_exec(["ip", "link", "show", "dev", tid], runner=runner).returncode:
-        raise VpnError("start-failed")
+        return False
     routes = vpn_exec(
         ["ip", "-j", "route", "show", "table", "all", "dev", tid],
         runner=runner)
+    if routes.returncode:
+        return False
     try:
-        has_default = any(route.get("dst") in ("default", "0.0.0.0/0")
-                          for route in json.loads(routes.stdout or "[]"))
+        return any(route.get("dst") in ("default", "0.0.0.0/0")
+                   for route in json.loads(routes.stdout or "[]"))
     except (TypeError, ValueError):
-        has_default = False
-    if routes.returncode or not has_default:
+        return False
+
+
+def _check_backend(backend, runner=None, wait=0):
+    """`wait` seconds of patience, and only where something was just started.
+
+    The poll path passes nothing: there it is a health check, and a tunnel that
+    has been down for a minute must not hold the poller for twenty seconds.
+    """
+    if not backend:
+        return
+    if not _wait_for(lambda: _backend_up(backend, runner), wait):
         raise VpnError("start-failed")
 
 
@@ -2356,8 +2484,11 @@ def switch_backend(old_rows, new_rows, runner=None, applier=None,
         if new_backend:
             attempted = True
             _start_backend(new_backend, runner)
-            _check_backend(new_backend, runner)
-        mark = backend_mark(new_backend, runner)
+            _check_backend(new_backend, runner, BACKEND_WAIT)
+        # The mark is read after the tunnel is confirmed up, and still given a
+        # window of its own: sing-box writes its nftables table around the same
+        # moment it installs the route, not before it.
+        mark = backend_mark(new_backend, runner, BACKEND_WAIT)
         if before_commit:
             before_commit()
         _set_vpn_mark(mark)
@@ -2373,7 +2504,7 @@ def switch_backend(old_rows, new_rows, runner=None, applier=None,
                 on_rollback()
             if old_backend:
                 _start_backend(old_backend, runner)
-                _check_backend(old_backend, runner)
+                _check_backend(old_backend, runner, BACKEND_WAIT)
             _set_vpn_mark(old_mark)
             save_tunnels(old_rows)
             set_transit_closed(False, applier)
@@ -2466,6 +2597,9 @@ def vpn_refresh(tid, runner=None, applier=None, fetcher=None):
             raise VpnError("validation-failed")
         secret = {"url": url, "exclude": exclude, "body": content}
         target["nodes"], target["error"] = len(outs), ""
+        # The node list is a different one now, so the last probe measured a
+        # subscription that no longer exists.
+        target["probe"], target["reach"] = "", 0
         if not target["enabled"]:
             try:
                 write_private(path, secret)
@@ -2491,7 +2625,10 @@ def vpn_action(action, body, runner=None, applier=None, fetcher=None):
                "enable": lambda: vpn_enable(body.get("id"), runner, applier),
                "disable": lambda: vpn_disable(body.get("id"), runner, applier),
                "refresh": lambda: vpn_refresh(body.get("id"), runner, applier,
-                                                fetcher)}
+                                                fetcher),
+               # The only one that neither starts nor stops anything, so it is
+               # the only one that takes no applier.
+               "check": lambda: vpn_check(body.get("id"), runner)}
     try:
         call = actions[action]
     except (KeyError, TypeError):
@@ -2558,7 +2695,10 @@ def reconcile_tunnels(runner=None, applier=None):
             row["enabled"] and row["error"] == "legacy/no-cache" for row in rows))
         try:
             try:
-                _check_backend(backend, runner)
+                # This runs at startup, which on a reboot is the same moment
+                # the tunnel's own unit is starting — the wait is not patience
+                # with a broken tunnel, it is not racing a healthy one.
+                _check_backend(backend, runner, BACKEND_WAIT)
             except VpnError:
                 if legacy:
                     raise
@@ -2566,9 +2706,9 @@ def reconcile_tunnels(runner=None, applier=None):
                     raise VpnError("conflict")
                 prepared = _prepare_backend(rows, runner)
                 _start_backend(prepared, runner)
-                _check_backend(prepared, runner)
+                _check_backend(prepared, runner, BACKEND_WAIT)
                 backend = prepared
-            _set_vpn_mark(backend_mark(backend, runner))
+            _set_vpn_mark(backend_mark(backend, runner, BACKEND_WAIT))
             if not legacy:
                 for row in rows:
                     if row["enabled"]:
@@ -2666,10 +2806,16 @@ def _valid_wg_key(value):
 
 
 def _strip_quick(kind, text, runner, tid):
+    """The config as the kernel wants it, or None when the tool is not here.
+
+    The stripped text is what `wg setconf` takes — the same reading that says
+    the config is valid also produces what a probe needs, so it is handed back
+    instead of thrown away.
+    """
     tool = QUICK_TOOLS[kind]
     if runner is None:
         if shutil.which(tool) is None:
-            return False
+            return None
         runner = subprocess.run
     tid = check_tunnel_id(tid or "t000000000000")
     try:
@@ -2680,12 +2826,12 @@ def _strip_quick(kind, text, runner, tid):
             result = runner([tool, "strip", path], capture_output=True,
                             text=True, timeout=10, shell=False)
     except FileNotFoundError:
-        return False
+        return None
     except (OSError, subprocess.TimeoutExpired):
         raise ValueError("quick tool could not validate tunnel config") from None
     if result.returncode:
         raise ValueError("quick tool rejected tunnel config")
-    return True
+    return str(result.stdout or "")
 
 
 def check_quick_config(kind, value, runner=None, tid=None):
@@ -2748,8 +2894,232 @@ def check_quick_config(kind, value, runner=None, tid=None):
     if not has_v4:
         raise ValueError("tunnel must carry the IPv4 default route")
 
+    # Only public metadata comes back: this dict is merged into the catalog
+    # row, and the stripped config the strip produced is a private key in
+    # plain text. A probe that needs it asks for it separately.
     return {"ipv6": has_v6,
-            "verified": _strip_quick(kind, text, runner, tid)}
+            "verified": _strip_quick(kind, text, runner, tid) is not None}
+
+
+def quick_address(text):
+    """The interface's first IPv4 address, `10.66.66.5/32` and so on.
+
+    A probe cannot send anything into a scratch link that has no address on
+    it — the kernel has no source to put in the packet — and this is the one
+    thing beyond the stripped config that it needs.
+    """
+    for section in _quick_sections(text):
+        if section["section"] != "interface":
+            continue
+        for address in str(section["values"].get("address", "")).split(","):
+            address = address.strip()
+            with contextlib.suppress(ValueError):
+                if ipaddress.ip_interface(address).version == 4:
+                    return address
+    return ""
+
+
+# --- probing a profile without making it the tunnel --------------------------
+#
+# "Add it, then find out by switching the whole gateway onto it" is the one
+# thing a pool of profiles must not require. Everything below answers "would
+# this one work" while the live backend keeps running untouched: a subscription
+# is converted, checked by sing-box and knocked on node by node, and a
+# WireGuard profile is brought up on a scratch interface that carries no route
+# anybody uses and is deleted again whatever happens.
+
+
+def probe_tcp(host, port, timeout=None):
+    """One TCP connection, opened and dropped. Reachability, not a handshake."""
+    timeout = PROBE_TIMEOUT if timeout is None else timeout
+    try:
+        with socket.create_connection((str(host), int(port)), timeout):
+            return True
+    except (OSError, ValueError, TypeError, OverflowError):
+        return False
+
+
+def probe_nodes(outs, prober=None):
+    """How many of a subscription's servers answer, out of how many were asked.
+
+    Distinct address and port only: providers hand out the same host under a
+    dozen names, and knocking on it a dozen times measures nothing new.
+
+    All at once, because they are all waiting on the same thing: a list where
+    every node is dead costs one timeout in total rather than two dozen of
+    them, and nobody watches a button for a minute and a half.
+    """
+    prober = prober or probe_tcp
+    seen, targets = set(), []
+    for out in outs:
+        target = (out.get("server"), out.get("server_port"))
+        if not all(target) or target in seen:
+            continue
+        seen.add(target)
+        targets.append(target)
+        if len(targets) >= PROBE_NODES:
+            break
+    if not targets:
+        return 0, 0
+    with futures.ThreadPoolExecutor(max_workers=PROBE_WORKERS) as pool:
+        answers = list(pool.map(lambda t: bool(prober(*t)), targets))
+    return sum(answers), len(targets)
+
+
+def _probe_subscription(row, runner=None, prober=None):
+    """Convert what is stored, let sing-box read it, then ask the nodes.
+
+    A config of its own, not the live one and not merged into it: the question
+    is whether *this* subscription is usable, and a base that fails to check
+    for an unrelated reason would answer a different one.
+    """
+    secret = load_subscription_secret(row["id"])
+    try:
+        outs = singbox_sub.convert(secret["body"],
+                                   exclude=secret.get("exclude"),
+                                   prefix=f"sub-{row['id']}-")
+    except Exception:
+        raise VpnError("validation-failed") from None
+    if not outs:
+        raise VpnError("validation-failed")
+    _check_singbox_candidate(singbox_sub.fresh(outs, IFACE), runner)
+    reach, _ = probe_nodes(outs, prober)
+    return ("ok" if reach else "unreachable"), reach, len(outs)
+
+
+def _probe_link(kind, stripped, address, runner=None, sender=None, wait=None):
+    """Bring one scratch WireGuard link up, force a handshake, tear it down.
+
+    The link carries a single route to an address RFC 5737 reserves for
+    documentation, so nothing real is ever sent through it; the handshake does
+    not care where the packet was going, only that one was sent.
+    """
+    wait = PROBE_WAIT if wait is None else wait
+    tool = PROBE_CONF[kind]
+    # Same rule as _strip_quick: a caller that brought its own runner is not
+    # asking about this host's PATH.
+    if runner is None and shutil.which(tool) is None:
+        raise VpnError("tool-missing")
+    _ensure_tunnel_dir()
+    # Whatever a previous probe left behind, killed halfway or not.
+    vpn_exec(["ip", "link", "del", "dev", PROBE_IF], runner=runner)
+    # The mark the live tunnel steps aside for. The handshake this probe
+    # provokes leaves the host as an ordinary UDP packet to the peer, and on a
+    # gateway whose sing-box has auto_route that packet is swallowed by the tun
+    # like any other — the probe would then report every working profile as
+    # silent. It is the same mark, and the same reason, as "past the tunnel"
+    # for a device; 0 means this host has none and there is nothing to set.
+    mark = int(CFG.get("vpn_mark") or 0)
+    with tempfile.TemporaryDirectory(prefix=".probe-", dir=TUNNEL_DIR) as td:
+        os.chmod(td, 0o700)
+        path = os.path.join(td, PROBE_IF + ".conf")
+        write_private_text(path, stripped)
+        try:
+            # A link type the kernel does not know is a missing module, not a
+            # tunnel that failed to start — for amneziawg that is the whole
+            # difference between "install the dkms package" and "it is broken".
+            if vpn_exec(["ip", "link", "add", "dev", PROBE_IF, "type",
+                         PROBE_LINK[kind]], runner=runner).returncode:
+                raise VpnError("tool-missing")
+            steps = [[tool, "setconf", PROBE_IF, path]]
+            if mark:
+                steps.append([tool, "set", PROBE_IF, "fwmark", hex(mark)])
+            steps += [["ip", "-4", "addr", "add", address, "dev", PROBE_IF],
+                      ["ip", "link", "set", "dev", PROBE_IF, "up"],
+                      ["ip", "-4", "route", "add", PROBE_DST + "/32",
+                       "dev", PROBE_IF]]
+            for argv in steps:
+                if vpn_exec(argv, runner=runner).returncode:
+                    raise VpnError("start-failed")
+
+            source = address.split("/")[0]
+
+            def knocked():
+                (sender or _probe_send)(source)
+                result = vpn_exec([tool, "show", PROBE_IF,
+                                   "latest-handshakes"], runner=runner)
+                if result.returncode:
+                    return False
+                return any(
+                    part.isdigit() and int(part)
+                    for line in str(result.stdout or "").splitlines()
+                    for part in line.split()[1:2])
+
+            return "ok" if _wait_for(knocked, wait) else "unreachable"
+        finally:
+            vpn_exec(["ip", "link", "del", "dev", PROBE_IF], runner=runner)
+
+
+def _probe_send(source=None):
+    """One datagram out of the probe link — enough to start a handshake.
+
+    Bound to the device and not merely routed to it: a sing-box with auto_route
+    installs an `ip rule` that is consulted before the main table, so the one
+    host route this probe added would be stepped over and the packet would go
+    into the live tunnel instead of the link being tested.
+    """
+    with contextlib.suppress(OSError):
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.settimeout(1)
+            with contextlib.suppress(AttributeError, OSError):
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE,
+                             PROBE_IF.encode())
+            if source:
+                with contextlib.suppress(OSError):
+                    s.bind((source, 0))
+            s.sendto(b"\0", (PROBE_DST, 53))
+
+
+def _probe_quick(row, runner=None, sender=None, wait=None):
+    text = _read_quick_config(row)
+    try:
+        stripped = _strip_quick(row["kind"], text, runner, row["id"])
+        address = quick_address(text)
+    except ValueError:
+        raise VpnError("validation-failed") from None
+    if stripped is None:
+        raise VpnError("tool-missing")
+    if not address:
+        raise VpnError("validation-failed")
+    return _probe_link(row["kind"], stripped, address, runner, sender, wait)
+
+
+def vpn_check(tid, runner=None, prober=None, sender=None):
+    """Report whether one profile would work. Never changes what is running.
+
+    The reading happens outside `_vpn_lock`: a dead subscription costs one
+    connect timeout and a silent peer costs the handshake window, and holding
+    the tunnel lock for either would stall the poller behind a button. What is
+    held instead is `_probe_lock`, because both probes are built out of one
+    scratch interface and one temporary config, and two at once would be two
+    halves of each.
+    """
+    with _vpn_lock:
+        target = dict(_find_tunnel(load_tunnels(), tid))
+    reach = nodes = 0
+    try:
+        with _probe_lock:
+            if target["kind"] == "subscription":
+                probe, reach, nodes = _probe_subscription(target, runner,
+                                                          prober)
+            else:
+                probe = _probe_quick(target, runner, sender)
+    except VpnError as e:
+        probe = str(e) if str(e) in SAFE_PROBE_CODES else "invalid-state"
+    except Exception:
+        probe = "validation-failed"
+    with _vpn_lock:
+        rows = load_tunnels()
+        # Re-found, not reused: the profile may have been deleted or switched
+        # while the probe was waiting on a socket.
+        row = _find_tunnel(rows, tid)
+        row["probe"], row["reach"] = probe, reach
+        if nodes:
+            row["nodes"] = nodes
+        # Only the probe fields move: a check is a reading, and a reading must
+        # not switch a backend, close transit or clear somebody else's error.
+        save_tunnels(rows)
+        return _tunnel_row(row)
 
 
 def migrate_legacy_subscription():
@@ -3407,8 +3777,13 @@ CSS = TOKENS + """
  /* [hidden] and .sheet share specificity, so without this the display:flex
     above wins over the UA rule and the hidden attribute stops hiding anything. */
  .sheet[hidden]{display:none}
+ /* dvh, not vh: on iOS vh is the height the page would have with the browser
+    chrome hidden, so 86vh is taller than what is actually on screen and the
+    last row of the form sits under the toolbar. vh stays as the fallback for
+    a browser that does not know dvh. */
  .sheet>div{background:var(--panel);border-radius:14px;box-shadow:var(--sh);
-        width:min(30rem,100%);max-height:86vh;overflow:auto;padding:var(--s5)}
+        width:min(30rem,100%);max-height:86vh;max-height:86dvh;
+        overflow:auto;padding:var(--s5)}
 
  /* 11: above the sticky header (10) so a hover card near the top of a
     scrolled chart is not drawn under it, below the settings sheet (20) so
@@ -3417,6 +3792,14 @@ CSS = TOKENS + """
       background:var(--panel);border-radius:var(--r-ctl);box-shadow:var(--sh);
       font-size:var(--f-sec);pointer-events:none;white-space:nowrap}
  a{color:var(--blue)}
+ /* Safari zooms the page in when a field smaller than 16px takes focus, and it
+    never zooms back out — one tap on a rename box and the whole panel is off
+    screen. The type scale is 14px everywhere, so on a touch screen the fields
+    are the exception. Nothing else may declare a font-size on a field: this is
+    an element selector, and the first class that does would win over it. */
+ @media (pointer:coarse){
+  input,select,textarea{font-size:16px}
+ }
  @media (max-width:620px){body{padding:var(--s3) var(--s3) var(--s5)}
   .panel{padding:var(--s3)}}
 """
@@ -3566,6 +3949,9 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  .hero{display:flex;align-items:baseline;gap:var(--s2)}
  .hero b{font-size:var(--f-hero);font-weight:600;letter-spacing:-.02em}
  .hero em{font-style:normal;font-size:var(--f-sec);color:var(--dim)}
+ /* A sentence, not a cell: it keeps the tabular figures but is allowed to
+    wrap. Held on one line it is the widest thing on the page. */
+ #ksum{font-variant-numeric:tabular-nums}
  #chartbox{position:relative;margin-top:var(--s4)}
  #chartbox svg{display:block;width:100%;height:auto}
  svg.dim g{opacity:.4}
@@ -3613,14 +3999,19 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  #addrow form{display:flex;gap:var(--s2);flex-wrap:wrap;margin-top:var(--s2)}
  #addrow form input{flex:1;min-width:8rem}
  .bad{color:var(--red)}
+ /* Пара к .bad: проверка прошла — это не «включено», а именно «отвечает». */
+ .good{color:var(--green)}
  .drow{border-bottom:.5px solid var(--line)}
  .drow:last-child{border-bottom:0}
  .dmain{display:flex;align-items:center;gap:var(--s3);min-height:48px;
         padding:var(--s2) 0;cursor:pointer}
  .dmain .sp{flex:1}
  .dname{min-width:0;flex:0 1 14rem}
+ /* Без своего font-size: он и так `font:inherit`, то есть --f-row, а
+    объявленный здесь заново перебил бы правило, которое на сенсорном экране
+    поднимает поля до 16px. */
  .nm{background:none;border:0;border-radius:var(--r-ctl);padding:2px var(--s1);
-     width:100%;font-size:var(--f-row)}
+     width:100%}
  .nm:hover{background:var(--fill)}
  .nm:focus{background:var(--fill);outline:2px solid var(--blue);outline-offset:0}
  .dnum{text-align:right}
@@ -3664,9 +4055,18 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  a{color:var(--blue)}
  form{display:flex;gap:.5rem;flex-wrap:wrap}
  form input{flex:1;min-width:8rem}
- @media (max-width:900px){.row2{grid-template-columns:1fr}}
+ /* minmax(0,1fr), not 1fr: `1fr` is `minmax(auto,1fr)`, and `auto` is the
+    item's min-content — one line of numbers that must not break is enough to
+    push the column past the screen, and then the whole page scrolls sideways
+    on a phone. The wide rule above already guards it the same way. */
+ @media (max-width:900px){.row2{grid-template-columns:minmax(0,1fr)}}
  @media (max-width:620px){
   body{padding:1rem .7rem 3rem}
+  /* На телефоне строку устройства делят пять неуступчивых элементов, и имя
+     платит за всех: «Телефон Насти» превращался в «Телефон Н». Зазор поуже —
+     это двадцать пикселей, которые целиком достаются имени; остальное даёт
+     пара скоростей, которой разрешено встать в две строки. */
+  .dmain{gap:var(--s2)}
  }
 </style>
 <header id=hdr>
@@ -3738,6 +4138,7 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
      <button id="vpnAdd" class="btn tinted" onclick=vpnAddProfile()>{{t.vpnAdd}}</button></div>
    </div>
    <p class=hint>{{t.vpnHint}}</p>
+   <p class=hint>{{t.vpnProbeWhat}}</p>
   </div>
 
   <h2 class=grp>{{t.groupMaint}}</h2>
@@ -3778,7 +4179,7 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
    <button class=btn onclick=csv() title="{{t.csvWhat}}">CSV</button>
   </div>
   <div class=hero><b class="num" id=kt></b><em id=kdelta></em></div>
-  <div class="sec num" id=ksum></div>
+  <div class=sec id=ksum></div>
   <div id=chartbox></div>
   <h3 class=grp>{{t.byMonth}}</h3>
   <div id=mstrip></div>
@@ -4105,7 +4506,8 @@ const VPN_ERRORS = {'legacy/no-cache':T.vpnErrLegacy,
   'missing-secret':T.vpnErrMissing, 'tool-missing':T.vpnErrTool,
   stopped:T.vpnErrStopped, 'start-failed':T.vpnErrStart,
   'validation-failed':T.vpnErrValidation, 'rollback-failed':T.vpnErrRollback,
-  conflict:T.vpnErrConflict, 'invalid-state':T.vpnErrInvalid};
+  conflict:T.vpnErrConflict, 'invalid-state':T.vpnErrInvalid,
+  unreachable:T.vpnErrUnreachable};
 const vpnError = code => VPN_ERRORS[code] || T.vpnErrInvalid;
 const vpnNode = (tag, cls, text) => {
   const el = document.createElement(tag);
@@ -4130,6 +4532,16 @@ const renderVpn = () => {
     : backend.kind === 'none' ? T.vpnDirect
     : backend.active ? T.vpnRunning.replace('{kind}', VPN_TYPES[backend.kind] || backend.kind)
     : vpnError(backend.error || 'stopped');
+  // Панель умеет управлять туннелями, но запускает их чужими программами.
+  // Без sing-box любая подписка отваливается на «нужная программа не
+  // установлена», и назвать недостающее — единственный способ это объяснить.
+  const tools = VPN.tools || {};
+  const gone = [['singbox', 'sing-box'], ['wireguard', 'wg-quick'],
+                ['amneziawg', 'awg-quick']]
+    .filter(([k]) => tools[k] === false).map(([, name]) => name);
+  if (gone.length)
+    vpnList.append(vpnNode('p', 'bad hint',
+      T.vpnNoTool.replace('{tools}', gone.join(', '))));
   if (!VPN.profiles.length) vpnList.append(vpnNode('p', 'hint', T.vpnEmpty));
   VPN.profiles.forEach(p => {
     const row = vpnNode('div', 'row');
@@ -4143,6 +4555,14 @@ const renderVpn = () => {
     meta.append(vpnNode('div', 'sec', details.join(' · ')));
     if (p.ipv6 === false) meta.append(vpnNode('div', 'sec', T.vpnIpv6));
     if (p.error) meta.append(vpnNode('div', 'bad sec', vpnError(p.error)));
+    // Проверка — отдельная строка от ошибки: профиль может быть выключен и
+    // исправен, и наоборот — включён, но с узлами, которые молчат.
+    if (p.probe === 'ok')
+      meta.append(vpnNode('div', 'good sec', p.kind === 'subscription'
+        ? T.vpnProbeNodes.replace('{a}', p.reach).replace('{b}', p.nodes)
+        : T.vpnProbeOk));
+    else if (p.probe)
+      meta.append(vpnNode('div', 'bad sec', vpnError(p.probe)));
     row.append(meta);
     const acts = vpnNode('div', 'vpnacts');
     if (p.enabled) acts.append(vpnButton(T.vpnDisable, () => {
@@ -4152,6 +4572,7 @@ const renderVpn = () => {
       vpnCall('disable', {id:p.id});
     }));
     else acts.append(vpnButton(T.vpnEnable, () => vpnCall('enable', {id:p.id})));
+    acts.append(vpnButton(T.vpnCheck, () => vpnCall('check', {id:p.id})));
     if (p.kind === 'subscription')
       acts.append(vpnButton(T.vpnRefresh, () => vpnCall('refresh', {id:p.id})));
     acts.append(vpnButton(T.vpnDelete, () => vpnDeleteProfile(p), true));
@@ -4180,10 +4601,11 @@ const vpnRequest = async (method, url, body) => {
     VPN = data; csrf = data.csrf || csrf; renderVpn();
     vpnStatus.textContent = T.vpnSaved; ok = true;
   } catch (e) { vpnStatus.textContent = e.message || T.vpnErrStart; }
-  finally {
-    vpnUrl.value = ''; vpnSecret.value = '';
-    vpnBusy = false; renderVpn();
-  }
+  // Форма не трогается: она принадлежит добавлению, а сюда приходят ещё
+  // включение, проверка и удаление — раньше нажатие любой из них стирало
+  // наполовину вставленный конфиг, и он же стирался, когда добавление
+  // не прошло, то есть ровно тогда, когда его надо было поправить.
+  finally { vpnBusy = false; renderVpn(); }
   return ok;
 };
 const vpnCall = (action, body={}) => vpnRequest('POST', '/vpn', {action, ...body});
@@ -4195,7 +4617,9 @@ const vpnAddProfile = () => {
   if (!name || (kind === 'subscription' ? !body.url : !body.config)) {
     vpnStatus.textContent = T.vpnBadForm; return;
   }
-  vpnCall('add', body).then(ok => { if (ok) vpnName.value = ''; });
+  vpnCall('add', body).then(ok => { if (ok) {
+    vpnName.value = ''; vpnUrl.value = ''; vpnSecret.value = '';
+  } });
 };
 const vpnDeleteProfile = p => {
   if (!confirm(T.vpnConfirmDelete)) return;
@@ -4366,8 +4790,11 @@ const draw = () => {
      + `${me ? ' · ' + T.youAre : ''} · ${x.seen ? ago(S.now - x.seen) : '—'}</div>`
      + `</div><span class=sp></span>`
      + `<div class=dnum><b class=num>${fmt(t)}</b>`
-     + `<div class="sec num">${r > 0 ? `↓ ${fmt(x.rate[1])}${T.perSec}`
-        + `  ↑ ${fmt(x.rate[0])}${T.perSec}` : '—'}</div></div>`
+     // Каждая скорость — своя неразрывная половина, а между ними перенос
+     // разрешён: на телефоне пара встаёт в две строки, и полсотни пикселей
+     // достаются имени устройства вместо того, чтобы его обрезать.
+     + `<div class=sec>${r > 0 ? `<span class=num>↓ ${fmt(x.rate[1])}${T.perSec}</span>`
+        + ` <span class=num>↑ ${fmt(x.rate[0])}${T.perSec}</span>` : '—'}</div></div>`
      + `<span class=chev>›</span>`
      + `<input class=sw type=checkbox${x.on ? ' checked' : ''} `
      + `aria-label="${esc(x.name || x.ip)}" `
@@ -4874,6 +5301,7 @@ def selftest():
     global save_tunnels
     global _set_vpn_mark
     global _vpn_closed
+    global BACKEND_WAIT, BACKEND_STEP
 
     class BombReader:
         def read(self, *unused):
@@ -5364,6 +5792,42 @@ PersistentKeepalive = 25
                                                    "meta mark 0x2024 return\n", "")
             return subprocess.CompletedProcess(argv, 0, "", "")
 
+    # A backend that is up is up on the first reading here, so every second of
+    # the real window would be dead time — and a failure that is meant to stay
+    # a failure would be retried into a pass. The wait itself is asserted just
+    # below, against a runner that fails once and then works.
+    slow = [0]
+
+    def flaky_up(argv, **kwargs):
+        """A tunnel that is still coming up: the link appears on the third ask."""
+        if argv[:4] == ["ip", "link", "show", "dev"]:
+            slow[0] += 1
+            return subprocess.CompletedProcess(
+                argv, 0 if slow[0] > 2 else 1, "link\n", "")
+        return subprocess.CompletedProcess(
+            argv, 0, json.dumps([{"dst": "default", "dev": argv[-1]}]), "")
+
+    probe_row = {"kind": "wireguard", "id": "t000000000009"}
+    try:
+        _check_backend(probe_row, flaky_up)
+        raise AssertionError("a check with no wait must not retry")
+    except VpnError:
+        pass
+    assert slow[0] == 1, "one reading per impatient check"
+    # The window is spent in BACKEND_STEP slices, so the loop needs one shorter
+    # than the test's patience.
+    step, BACKEND_STEP, slow[0] = BACKEND_STEP, 0.01, 0
+    try:
+        _check_backend(probe_row, flaky_up, 1)
+        assert slow[0] > 1, "a waiting check must read more than once"
+    finally:
+        BACKEND_STEP = step
+
+    # From here the fake runner answers on the first reading, so every second
+    # of the real window would be dead time — and a failure that is meant to
+    # stay a failure would be retried into a pass.
+    BACKEND_WAIT = 0
+
     with tempfile.TemporaryDirectory() as td:
         old_paths = CONFIG, TUNNELS, TUNNEL_DIR, SINGBOX_CONFIG
         old_mark, old_closed = CFG.get("vpn_mark"), _vpn_closed
@@ -5678,6 +6142,117 @@ PersistentKeepalive = 25
         finally:
             (CONFIG, TUNNELS, TUNNEL_DIR, SINGBOX_CONFIG) = old_paths
             CFG["vpn_mark"], _vpn_closed = old_mark, old_closed
+
+    # --- checking a profile without switching onto it ---
+    assert probe_nodes([], lambda *a: True) == (0, 0)
+    assert probe_nodes([{"server": "a", "server_port": 1},
+                        {"server": "a", "server_port": 1},
+                        {"server": "b", "server_port": 2},
+                        {"server": "", "server_port": 3}],
+                       lambda host, port: host == "a") == (1, 2), \
+        "the same address and port is one node, and a blank one is none"
+    assert probe_nodes([{"server": f"h{i}", "server_port": 1}
+                        for i in range(PROBE_NODES * 3)],
+                       lambda *a: True) == (PROBE_NODES, PROBE_NODES), \
+        "a long subscription must not turn one button into a long wait"
+
+    with tempfile.TemporaryDirectory() as td:
+        old_paths = TUNNELS, TUNNEL_DIR, SINGBOX_CONFIG
+        TUNNELS = os.path.join(td, "tunnels.json")
+        TUNNEL_DIR = os.path.join(td, "tunnels")
+        SINGBOX_CONFIG = os.path.join(td, "sing-box.json")
+        try:
+            save_tunnels([])
+            uid = "5eb99d66-0000-0000-0000-000000000000"
+            body = (f"vless://{uid}@a.example:443?security=tls#A\n"
+                    f"vless://{uid}@b.example:443?security=tls#B")
+            sub = vpn_add({"kind": "subscription", "name": "probe me",
+                           "url": "https://provider.example/token"},
+                          fetcher=lambda url: body)
+            assert sub["probe"] == "" and sub["reach"] == 0, \
+                "a new profile has not been checked yet"
+            wire = vpn_add({"kind": "wireguard", "name": "probe wg",
+                            "config": wg}, runner=quick_ok)
+
+            probe_calls = []
+
+            def probe_runner(argv, **kwargs):
+                probe_calls.append(list(argv))
+                if argv[:2] == ["sing-box", "check"]:
+                    return subprocess.CompletedProcess(argv, 0, "", "")
+                return subprocess.CompletedProcess(argv, 0, "", "")
+
+            checked = vpn_check(sub["id"], runner=probe_runner,
+                                prober=lambda host, port: host == "a.example")
+            assert checked["probe"] == "ok" and checked["reach"] == 1
+            assert checked["nodes"] == 2 and not checked["enabled"], \
+                "a check must not enable anything"
+            assert any(argv[:2] == ["sing-box", "check"] for argv in probe_calls)
+            assert not os.path.exists(SINGBOX_CONFIG), \
+                "a check must not write the live sing-box config"
+            assert _find_tunnel(load_tunnels(), sub["id"])["probe"] == "ok"
+
+            checked = vpn_check(sub["id"], runner=probe_runner,
+                                prober=lambda host, port: False)
+            assert checked["probe"] == "unreachable" and checked["reach"] == 0
+
+            refused = lambda argv, **k: subprocess.CompletedProcess(argv, 1, "", "")
+            assert vpn_check(sub["id"], runner=refused,
+                             prober=lambda *a: True)["probe"] == "validation-failed"
+
+            # The scratch link is torn down even when the tunnel never answers,
+            # and the config it was given never touches the catalog.
+            link_calls = []
+
+            def link_runner(argv, **kwargs):
+                link_calls.append(list(argv))
+                if argv[:2] in (["wg", "show"], ["awg", "show"]):
+                    return subprocess.CompletedProcess(
+                        argv, 0, "somekey\t0\n", "")
+                if argv[:2] == ["wg-quick", "strip"]:
+                    return subprocess.CompletedProcess(argv, 0, wg, "")
+                return subprocess.CompletedProcess(argv, 0, "", "")
+
+            step, BACKEND_STEP = BACKEND_STEP, 0.01
+            try:
+                checked = vpn_check(wire["id"], runner=link_runner,
+                                    sender=lambda source=None: None)
+            finally:
+                BACKEND_STEP = step
+            assert checked["probe"] == "unreachable", checked["probe"]
+            assert link_calls.count(
+                ["ip", "link", "del", "dev", PROBE_IF]) >= 2, \
+                "the probe link must be removed before and after"
+            assert ["ip", "-4", "addr", "add", "10.66.66.5/32",
+                    "dev", PROBE_IF] in link_calls
+            # Without the mark the handshake this provokes is swallowed by a
+            # live sing-box, and every healthy profile reads as silent.
+            mark = int(CFG.get("vpn_mark") or 0)
+            assert (["wg", "set", PROBE_IF, "fwmark", hex(mark)]
+                    in link_calls) == bool(mark), link_calls
+            assert PROBE_IF not in open(TUNNELS).read(), \
+                "the probe leaked into the catalog"
+            assert key not in open(TUNNELS).read(), \
+                "the probe leaked a private key into the catalog"
+            def no_link_type(argv, **kwargs):
+                code = 1 if argv[:3] == ["ip", "link", "add"] else 0
+                return subprocess.CompletedProcess(argv, code, wg, "")
+
+            assert vpn_check(wire["id"], runner=no_link_type,
+                             sender=lambda source=None: None)["probe"] \
+                == "tool-missing", \
+                "a link type the kernel does not know is a missing module"
+
+            try:
+                check_tunnel_id(PROBE_IF)
+                raise AssertionError("the probe interface must not read as a tunnel")
+            except ValueError:
+                pass
+        finally:
+            TUNNELS, TUNNEL_DIR, SINGBOX_CONFIG = old_paths
+
+    assert quick_address(wg) == "10.66.66.5/32"
+    assert quick_address("[Interface]\nPrivateKey = x\n") == ""
 
     assert accrue(0, 100) == 100
     assert accrue(100, 250) == 150
@@ -6352,7 +6927,12 @@ def main():
     if "--version" in sys.argv:
         print(VERSION)
     elif "--selftest" in sys.argv:
-        selftest()
+        # Several tests exercise the paths that report a damaged file or a
+        # rejected config to the journal, and those reports are the point of
+        # those paths — printed here they read as an install going wrong. A
+        # failure still escapes: its traceback is written after this ends.
+        with contextlib.redirect_stderr(io.StringIO()):
+            selftest()
     elif "--dump" in sys.argv:
         print(ruleset(load()), end="")
     elif "--set-password" in sys.argv:

@@ -504,7 +504,13 @@ A switch is one serialized transaction. `ruleset()` first adds a forward-only
 drop chain at filter priority while host-bound traffic remains reachable. The
 old managed backend is stopped, the candidate is checked and started, its real
 fwmark is read, and only then are config and catalog committed and the guard
-removed. Every candidate path has the inverse rollback: restore the sing-box
+removed. The check and the fwmark reading are given a window rather than one
+reading: `systemctl restart` returns when the process is running, and sing-box
+installs its policy route and its nftables table a moment later — checking at
+once failed a tunnel that was coming up perfectly well and rolled the whole
+switch back, which is what "the subscription will not come up" looked like from
+the browser. On the poll path there is no window: there it is a health check,
+and a tunnel down for a minute must not hold the poller. Every candidate path has the inverse rollback: restore the sing-box
 bytes and mode if they changed, restart the previous backend, restore its mark
 and catalog, then remove the guard. If rollback itself fails, the guard stays.
 An unrelated default-route tunnel is a conflict, not something the panel stops.
@@ -526,8 +532,31 @@ opened intentionally.
 Old `sub.url` and `sub.exclude` files are imported once as an enabled
 `legacy/no-cache` subscription. Its running sing-box service is not rebuilt;
 the first successful refresh creates the private cache and moves ownership to
-the panel. The installer therefore copies and self-tests the converter but does
-not fetch a subscription or restart a tunnel during an update.
+the panel. The installer copies and self-tests the converter and installs the
+programs the panel shells out to, but does not fetch a subscription or restart a
+tunnel during an update.
+
+## Checking a profile without switching onto it
+
+A pool of saved profiles is only useful if one of them can be tried without
+making it the gateway's tunnel, so `vpn_check()` is a reading and commits
+nothing but its own result. A subscription is converted into a config of its own
+— `fresh()`, not the live file and not merged into it, because a base that fails
+to check for an unrelated reason answers a different question — handed to
+`sing-box check`, and its nodes knocked on over TCP: distinct address and port
+only, capped, and all at once, so a list where every node is dead costs one
+timeout rather than two dozen. A WireGuard or AmneziaWG profile is brought up on
+one scratch interface carrying a single route to an address RFC 5737 reserves
+for documentation. Nothing real is ever sent there; the handshake does not care
+where the packet was going, only that one was sent. The interface is deleted in
+a `finally`, and again before the next probe builds it.
+
+It runs outside the tunnel lock, under a lock of its own. A dead subscription
+costs a connect timeout and a silent peer costs the handshake window, and the
+poller must not queue behind a button somebody pressed. Only `probe`, `reach`
+and the node count are written back, and the row is looked up again under the
+lock afterwards, because the profile may have been deleted while a socket was
+still waiting.
 
 ## The version constant
 

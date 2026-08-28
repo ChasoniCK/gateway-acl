@@ -60,7 +60,9 @@ device ──► this Linux host ──► uplink or tunnel (sing-box / WireGuar
 - **Manage tunnels from Settings.** Add or remove any number of HTTPS
   subscriptions, or save WireGuard and AmneziaWG `.conf` profiles. Profiles are
   created disabled; enabling one validates it and switches the managed backend
-  with rollback if the candidate does not come up.
+  with rollback if the candidate does not come up. A *check* button answers
+  whether a profile works **without** switching the gateway onto it, so a pool
+  of subscriptions and profiles can be worked through without breaking anything.
 - **Turn everyone off at once**, except the address that pressed the button.
   The same button brings them back.
 - **A warning when an address is answering as somebody else** — the entry is
@@ -111,9 +113,9 @@ the panel works with no internet at all.
 
 - Linux with systemd and `nftables`
 - Python 3.9+ (standard library only)
-- For managed tunnels, install the tool you intend to use: `sing-box`,
-  `wg-quick`, or `awg-quick`. The installer does not install them. Plain NAT or
-  another already configured route still works without any of them.
+- For managed tunnels: `sing-box` 1.12+, `wg-quick` and `awg-quick` — the
+  installer offers to install them. Plain NAT or another already configured
+  route still works without any of them.
 
 ## Install
 
@@ -137,9 +139,18 @@ devices currently visible in the ARP table so you can allow them before the rule
 takes effect. It refuses to enable anything until `panel.py --selftest` passes
 and the kernel accepts the generated ruleset.
 
-Tunnel setup is under **Settings → Tunnels**. The installer neither installs a
-VPN program nor fetches, rewrites or restarts a tunnel, including during
-`--yes` upgrades.
+A step of its own installs the programs the panel runs tunnels with:
+`sing-box` (1.12 and newer only — older ones cannot read the config the panel
+writes, so where a distribution ships an outdated one the published build for
+this architecture goes into `/usr/local/bin` along with a systemd unit),
+`wireguard-tools` and, where it is packaged at all, `amneziawg-tools`. Nothing
+in that step can fail the install: an upstream that happens to be down must not
+cost you your access control. The installer still does not fetch a subscription
+or rewrite a tunnel's config — that is the panel's job alone.
+
+Tunnel setup is under **Settings → Tunnels**. Anything missing from the list
+above is named there, in the tunnel list — the only trace of it before was "the
+required program is not installed" on every attempt to enable a tunnel.
 
 Each subscription has its own HTTPS link and optional exclusion regular
 expression. Several may be enabled together: their nodes are merged into the
@@ -169,11 +180,27 @@ custom table and all `PreUp`/`PostUp`/`PreDown`/`PostDown` hooks are refused;
 panel uses fixed `wg-quick`/`awg-quick` commands and never runs text from a
 profile as a shell command.
 
+A **check** button sits on every profile and switches nothing — it answers
+"would this one work" while the current tunnel keeps running. A subscription is
+built into a configuration of its own, handed to `sing-box check` to read, and
+its nodes (up to 24 distinct addresses, all at once) are knocked on over TCP:
+the list then says "checked: 21 of 24 answered". A WireGuard or AmneziaWG
+profile is brought up on a scratch interface carrying a single route to
+`192.0.2.1` — an address from the block reserved for documentation, where
+nothing real is ever sent — the panel sends one packet through it, waits for the
+handshake, and deletes the interface. That is how a pool of profiles can be
+collected and sorted into working and not without switching the whole gateway
+onto each one.
+
 Only one backend class is active at a time: the aggregate sing-box subscriptions,
 one WireGuard profile, one AmneziaWG profile, or direct routing. A switch first
 closes forwarded traffic, checks the candidate, records the real fwmark, and
-then reopens it. Failure restores the previous config, service and mark; if that
-rollback fails, forwarding stays closed. A crash outside a managed switch is
+then reopens it. A tunnel that was just started is given up to twenty seconds
+to appear: `systemctl restart` returns as soon as the process is running, and
+sing-box installs its route and mark a moment later — checking straight away saw
+a healthy tunnel as a failed one and rolled the whole switch back. Failure
+restores the previous config, service and mark; if that rollback fails,
+forwarding stays closed. A crash outside a managed switch is
 noticed on the next panel poll, not instantly.
 
 Metadata is stored in `/etc/gateway-acl/tunnels.json`; subscription links,
@@ -285,8 +312,9 @@ test a ruleset without touching your host: [docs/design.md](docs/design.md).
 
 - IPv4 only. IPv6 is passed through untouched.
 - Managed quick profiles require a full IPv4 default route and the matching
-  tool already installed. The panel does not install `sing-box`, WireGuard or
-  AmneziaWG, does not support profile hooks or custom routing tables, and
+  tool installed. Installing those is the installer's job, not the running
+  panel's: the panel reports what is missing but never fetches a program on its
+  own. It does not support profile hooks or custom routing tables either, and
   deliberately refuses a switch while an unmanaged default-route tunnel is
   present.
 - The forwarding guard is transactional during a panel-managed switch. A

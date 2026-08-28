@@ -91,6 +91,19 @@ if [ "$UILANG" = en ]; then
   M_PWKEPT="already set, left unchanged"
   M_PWNEW="    new password (8+ chars): "; M_PWAGAIN="    again: "
   M_PWMISMATCH="did not match, try again"; M_PWTOOSHORT="too short, try again"
+  M_TOOLS="Tunnel tools"
+  M_TOOLSHINT="The panel manages subscriptions, WireGuard and AmneziaWG itself, but it runs the programs — it does not carry them."
+  M_TOOLSASK="install what is missing?"
+  M_TOOLSSKIP="skipped — tunnels stay unavailable until these are installed"
+  M_SBOK="ok"; M_SBOLD="too old for the config the panel writes, replacing"
+  M_SBFETCH="fetching the latest release"
+  M_SBNOARCH="no published build for this architecture:"
+  M_SBNODL="neither curl nor wget — install sing-box yourself"
+  M_SBFAIL="could not be installed — subscriptions will not come up"
+  M_SBUNIT="unit written"; M_SBUNITKEPT="unit already present"
+  M_SBUNITOWN="existing unit pointed at the replaced binary, ExecStart overridden"
+  M_WGOK="ok"; M_WGFAIL="not installed — WireGuard profiles will not come up"
+  M_AWGFAIL="not installed — AmneziaWG profiles will not come up; the package is"
   M_ONLYLIST="After this, ONLY the devices on the list will route through this host."
   M_SEEN="Currently visible on the network:"
   M_NOARP="ARP table is empty — add devices from the panel later."
@@ -136,6 +149,20 @@ else
   M_PWKEPT="уже задан, оставлен без изменений"
   M_PWNEW="    новый пароль (от 8 символов): "; M_PWAGAIN="    ещё раз: "
   M_PWMISMATCH="не совпали, ещё раз";  M_PWTOOSHORT="слишком короткий, ещё раз"
+  M_TOOLS="Программы для туннелей"
+  M_TOOLSHINT="Подписками, WireGuard и AmneziaWG управляет панель, но она их запускает, а не содержит в себе."
+  M_TOOLSASK="поставить недостающее?"
+  M_TOOLSSKIP="пропущено — туннели не заработают, пока этого нет"
+  M_SBOLD="слишком старый для конфига, который пишет панель, заменяю"
+  M_SBOK="ok"
+  M_SBFETCH="качаю последний релиз"
+  M_SBNOARCH="под эту архитектуру сборки нет:"
+  M_SBNODL="нет ни curl, ни wget — поставьте sing-box сами"
+  M_SBFAIL="поставить не удалось — подписки не поднимутся"
+  M_SBUNIT="юнит записан"; M_SBUNITKEPT="юнит уже есть"
+  M_SBUNITOWN="юнит указывал на заменённый бинарник, ExecStart переопределён"
+  M_WGOK="ok"; M_WGFAIL="не установлен — профили WireGuard не поднимутся"
+  M_AWGFAIL="не установлен — профили AmneziaWG не поднимутся; пакет"
   M_ONLYLIST="После установки через этот хост пойдут ТОЛЬКО те, кто в списке."
   M_SEEN="Сейчас в сети видно:"
   M_NOARP="ARP-таблица пуста — добавите устройства через панель."
@@ -242,6 +269,197 @@ if [ "$(cat /proc/sys/net/ipv4/ip_forward)" != 1 ]; then
   fi
 else
   ok "ip_forward" "1"
+fi
+
+# --- tunnel tools -----------------------------------------------------------
+#
+# The panel manages tunnels; it does not carry them. It shells out to sing-box
+# for a subscription and to wg-quick/awg-quick for a profile, and every one of
+# those failures reaches the browser as a two-word code — "нужная программа не
+# установлена" is what a panel with no sing-box says about every subscription
+# anyone ever tries to enable. So they are installed here, next to nftables,
+# and nothing in this step may abort the install: a mirror that is down must
+# not cost somebody their access-control panel.
+
+# The oldest sing-box that reads the config singbox_sub.py writes: 1.12 is
+# where `action: sniff`, the typed `dns.servers` entries and
+# `default_domain_resolver` arrived, and where the older forms stopped working.
+# The distributions ship 1.8 and 1.10, which is why this is checked and not
+# assumed — an old binary rejects the config, and the panel reports the
+# subscription as failing validation with nothing to say it is the tool.
+SB_MIN_MAJOR=1
+SB_MIN_MINOR=12
+SB_LATEST="https://api.github.com/repos/SagerNet/sing-box/releases/latest"
+SB_DOWNLOAD="https://github.com/SagerNet/sing-box/releases/download"
+SB_UNIT=/etc/systemd/system/sing-box.service
+SB_BIN=/usr/local/bin/sing-box
+SB_OWN=0                  # 1 once this script has put its own binary in place
+
+sb_version() { sing-box version 2>/dev/null | awk '/^sing-box version/{print $3; exit}'; }
+
+sb_recent() { # sb_recent -> 0 when the installed sing-box can read our config
+  local v major minor
+  v=$(sb_version) || return 1
+  [ -n "$v" ] || return 1
+  major=${v%%.*}; v=${v#*.}; minor=${v%%.*}
+  case "$major$minor" in *[!0-9]*|"") return 1 ;; esac
+  # Written as an if and not as `[ ] && return 0`: a false AND-list is a failed
+  # statement, and under `set -e` that is an exit rather than a "no".
+  if [ "$major" -gt "$SB_MIN_MAJOR" ]; then return 0; fi
+  [ "$major" -eq "$SB_MIN_MAJOR" ] && [ "$minor" -ge "$SB_MIN_MINOR" ]
+}
+
+fetch() { # fetch url -> stdout; whichever of the two this host has
+  if   command -v curl >/dev/null; then curl -fsSL --max-time 60 "$1"
+  elif command -v wget >/dev/null; then wget -qO- --timeout=60 "$1"
+  else return 1; fi
+}
+
+sb_arch() {
+  case "$(uname -m)" in
+    x86_64|amd64)   echo amd64 ;;
+    aarch64|arm64)  echo arm64 ;;
+    armv7l|armv7|armhf) echo armv7 ;;
+    i686|i386)      echo 386 ;;
+    riscv64)        echo riscv64 ;;
+    *)              return 1 ;;
+  esac
+}
+
+sb_from_github() {
+  local arch tag ver tmp url
+  arch=$(sb_arch) || { ok "sing-box" "$M_SBNOARCH $(uname -m)"; return 1; }
+  command -v curl >/dev/null || command -v wget >/dev/null \
+    || { ok "sing-box" "$M_SBNODL"; return 1; }
+  ok "sing-box" "$M_SBFETCH"
+  tag=$(fetch "$SB_LATEST" 2>/dev/null \
+        | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+        | head -n 1) || true
+  # Only the tag comes off the network, and only if it looks like a tag: the
+  # same rule the panel's update button follows, for the same reason.
+  case "$tag" in
+    v[0-9]*) ;;
+    *) return 1 ;;
+  esac
+  case "$tag" in *[!v0-9.]*) return 1 ;; esac
+  ver=${tag#v}
+  url="$SB_DOWNLOAD/$tag/sing-box-$ver-linux-$arch.tar.gz"
+  tmp=$(mktemp -d) || return 1
+  if fetch "$url" > "$tmp/sb.tgz" 2>/dev/null \
+     && tar -xzf "$tmp/sb.tgz" -C "$tmp" "sing-box-$ver-linux-$arch/sing-box" \
+     && install -m 755 "$tmp/sing-box-$ver-linux-$arch/sing-box" "$SB_BIN"; then
+    rm -rf "$tmp"
+    hash -r 2>/dev/null || true
+    return 0
+  fi
+  rm -rf "$tmp"
+  return 1
+}
+
+sb_unit() {
+  if [ -f "$SB_UNIT" ] || [ -f /lib/systemd/system/sing-box.service ] \
+     || [ -f /usr/lib/systemd/system/sing-box.service ]; then
+    # A unit that came with a package points at /usr/bin/sing-box, and that is
+    # the binary this script has just decided is too old. Overriding ExecStart
+    # rather than the whole unit keeps everything else the packager set, and
+    # without it the service would go on starting the version we replaced.
+    if [ "$SB_OWN" = 1 ]; then
+      install -d -m 755 /etc/systemd/system/sing-box.service.d
+      cat > /etc/systemd/system/sing-box.service.d/10-gateway-acl.conf <<EOF
+[Service]
+ExecStart=
+ExecStart=$SB_BIN -D /var/lib/sing-box -c /etc/sing-box/config.json run
+EOF
+      chmod 644 /etc/systemd/system/sing-box.service.d/10-gateway-acl.conf
+      install -d -m 755 /etc/sing-box /var/lib/sing-box
+      systemctl daemon-reload
+      ok "sing-box.service" "$M_SBUNITOWN"
+      return 0
+    fi
+    ok "sing-box.service" "$M_SBUNITKEPT"
+    return 0
+  fi
+  install -d -m 755 /etc/sing-box /var/lib/sing-box
+  # -c and not -C: -C loads every .json in the directory, and the panel keeps
+  # exactly one config there. The path is the one panel.py writes and the one
+  # `sing-box check` is run against, so what starts is what was checked.
+  cat > "$SB_UNIT" <<EOF
+[Unit]
+Description=sing-box service
+Documentation=https://sing-box.sagernet.org
+After=network.target nss-lookup.target network-online.target
+
+[Service]
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
+ExecStart=$(command -v sing-box || echo "$SB_BIN") -D /var/lib/sing-box -c /etc/sing-box/config.json run
+Restart=on-failure
+RestartSec=10s
+LimitNOFILE=infinity
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  # The whole step runs as `sb_unit || true`, which means `set -e` is off
+  # inside it and a failed write would go by unnoticed while the line below
+  # said the unit was there. Report what is actually on disk.
+  if [ -s "$SB_UNIT" ]; then
+    chmod 644 "$SB_UNIT"
+    systemctl daemon-reload
+    ok "sing-box.service" "$M_SBUNIT"
+  else
+    ok "sing-box.service" "$M_SBFAIL"
+  fi
+}
+
+pkg_install() { # pkg_install pkg... -> quietly, and never fatal
+  if   command -v pacman  >/dev/null; then pacman -S --needed --noconfirm "$@" >/dev/null 2>&1
+  elif command -v apt-get >/dev/null; then
+    DEBIAN_FRONTEND=noninteractive apt-get install -y "$@" >/dev/null 2>&1
+  else return 1; fi
+}
+
+step "$M_TOOLS"
+say "$M_TOOLSHINT"
+if yesno "$M_TOOLSASK"; then
+  if sb_recent; then
+    ok "sing-box" "$(sb_version)  $M_SBOK"
+  else
+    [ -z "$(sb_version)" ] || ok "sing-box" "$(sb_version)  $M_SBOLD"
+    # The distributions are tried first and kept only if what they ship is new
+    # enough; otherwise the published build for this architecture goes into
+    # /usr/local/bin, which comes before /usr/bin on every sane PATH.
+    pkg_install sing-box || true
+    hash -r 2>/dev/null || true
+    if ! sb_recent; then
+      if sb_from_github; then SB_OWN=1; fi
+    fi
+    if sb_recent; then ok "sing-box" "$(sb_version)  $M_SBOK"
+    else ok "sing-box" "$M_SBFAIL"; fi
+  fi
+  # The unit is written whatever happened above: without one, "enable the
+  # subscription" in the panel is `systemctl restart sing-box` against nothing.
+  sb_unit || true
+  # Enabled only once there is something to start. A unit that fails at every
+  # boot because no subscription has been added yet is a red service and a
+  # question; the panel starts sing-box itself the moment one is enabled, and
+  # its own startup reconciliation brings it back after a reboot.
+  [ -f /etc/sing-box/config.json ] && systemctl enable sing-box >/dev/null 2>&1 || true
+
+  command -v wg-quick >/dev/null || pkg_install wireguard-tools || true
+  if command -v wg-quick >/dev/null; then ok "wireguard-tools" "$M_WGOK"
+  else ok "wireguard-tools" "$M_WGFAIL"; fi
+
+  # AmneziaWG is not in the distributions' own archives; where it is packaged
+  # at all it is under these names. Best effort, and the message names the
+  # package so somebody can go and get it.
+  command -v awg-quick >/dev/null \
+    || pkg_install amneziawg-tools amneziawg-dkms \
+    || pkg_install amneziawg-tools || true
+  if command -v awg-quick >/dev/null; then ok "amneziawg-tools" "$M_WGOK"
+  else ok "amneziawg-tools" "$M_AWGFAIL amneziawg-tools"; fi
+else
+  ok "sing-box / wireguard" "$M_TOOLSSKIP"
 fi
 
 # --- settings ---------------------------------------------------------------
