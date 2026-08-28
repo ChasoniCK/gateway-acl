@@ -61,7 +61,7 @@ from urllib.parse import urlparse, parse_qs
 # it against the newest tag on GitHub, so a forgotten bump makes every install
 # claim to be older than it is and show a banner that never goes away. CI
 # refuses a tag push where the two disagree.
-VERSION = "1.5.2"
+VERSION = "1.5.3"
 RELEASES_URL = "https://api.github.com/repos/ChasoniCK/gateway-acl/releases/latest"
 RELEASES_PAGE = "https://github.com/ChasoniCK/gateway-acl/releases/latest"
 # The one address the update button may ever download from. The repository is
@@ -1905,7 +1905,7 @@ SAFE_VPN_ERRORS = {
     "invalid-state",
 }
 VPN_COMMANDS = {"sing-box", "systemctl", "wg", "awg", "wg-quick",
-                "awg-quick", "ip", "nft"}
+                "awg-quick", "wireguard-go", "amneziawg-go", "ip", "nft"}
 # A probe never becomes a tunnel's committed state, so it has codes of its own:
 # "ok" is not an error and "unreachable" is not a reason to close transit.
 SAFE_PROBE_CODES = SAFE_VPN_ERRORS | {"ok", "unreachable"}
@@ -1943,6 +1943,13 @@ PROBE_IF = "gwaclprobe"
 PROBE_DST = "192.0.2.1"
 PROBE_LINK = {"wireguard": "wireguard", "amneziawg": "amneziawg"}
 PROBE_CONF = {"wireguard": "wg", "amneziawg": "awg"}
+# What wg-quick and awg-quick fall back to when `ip link add ... type X` fails,
+# and therefore what a probe has to fall back to as well: a host running the
+# userspace implementation has a perfectly working tunnel, and a probe that
+# only knows the kernel module would call every one of its profiles missing.
+# On a distribution with its own kernel that is the usual way to have AmneziaWG
+# at all — a module needs headers and a rebuild after every kernel upgrade.
+PROBE_USERSPACE = {"wireguard": "wireguard-go", "amneziawg": "amneziawg-go"}
 
 
 class VpnError(ValueError):
@@ -3137,12 +3144,24 @@ def _probe_link(kind, stripped, address, runner=None, sender=None, wait=None):
         path = os.path.join(td, PROBE_IF + ".conf")
         write_private_text(path, stripped)
         try:
-            # A link type the kernel does not know is a missing module, not a
-            # tunnel that failed to start — for amneziawg that is the whole
-            # difference between "install the dkms package" and "it is broken".
+            # The same two steps wg-quick takes, in the same order: ask the
+            # kernel for the link type, and when it does not have one, hand the
+            # interface to the userspace implementation. Only when neither
+            # answers is the tunnel's program actually missing.
             if vpn_exec(["ip", "link", "add", "dev", PROBE_IF, "type",
                          PROBE_LINK[kind]], runner=runner).returncode:
-                raise VpnError("tool-missing")
+                spare = PROBE_USERSPACE[kind]
+                if runner is None and shutil.which(spare) is None:
+                    raise VpnError("tool-missing")
+                if vpn_exec([spare, PROBE_IF], runner=runner).returncode:
+                    raise VpnError("tool-missing")
+                # It daemonises once the device is up, but the socket the next
+                # step writes through is its own — wait for the link to exist
+                # rather than race it.
+                if not _wait_for(lambda: not vpn_exec(
+                        ["ip", "link", "show", "dev", PROBE_IF],
+                        runner=runner).returncode, PROBE_WAIT):
+                    raise VpnError("tool-missing")
             steps = [[tool, "setconf", PROBE_IF, path]]
             if mark:
                 steps.append([tool, "set", PROBE_IF, "fwmark", hex(mark)])
@@ -6555,14 +6574,43 @@ PersistentKeepalive = 25
                 "the probe leaked into the catalog"
             assert key not in open(TUNNELS).read(), \
                 "the probe leaked a private key into the catalog"
-            def no_link_type(argv, **kwargs):
-                code = 1 if argv[:3] == ["ip", "link", "add"] else 0
-                return subprocess.CompletedProcess(argv, code, wg, "")
+            # No kernel link type and no userspace binary either: only then is
+            # the tunnel's program actually missing.
+            def nothing_at_all(argv, **kwargs):
+                dead = (argv[:3] == ["ip", "link", "add"]
+                        or argv[0] in PROBE_USERSPACE.values())
+                return subprocess.CompletedProcess(argv, 1 if dead else 0, wg, "")
 
-            assert vpn_check(wire["id"], runner=no_link_type,
+            assert vpn_check(wire["id"], runner=nothing_at_all,
                              sender=lambda source=None: None)["probe"] \
                 == "tool-missing", \
-                "a link type the kernel does not know is a missing module"
+                "neither a kernel module nor a userspace implementation"
+
+            # No kernel link type but wireguard-go answers: that host has a
+            # working tunnel, and the probe must go on to actually test it.
+            userspace = []
+
+            def via_userspace(argv, **kwargs):
+                userspace.append(list(argv))
+                if argv[:3] == ["ip", "link", "add"]:
+                    return subprocess.CompletedProcess(argv, 1, "", "")
+                if argv[:2] in (["wg", "show"], ["awg", "show"]):
+                    return subprocess.CompletedProcess(argv, 0, "somekey\t0\n", "")
+                if argv[:2] == ["wg-quick", "strip"]:
+                    return subprocess.CompletedProcess(argv, 0, wg, "")
+                return subprocess.CompletedProcess(argv, 0, "", "")
+
+            step, BACKEND_STEP = BACKEND_STEP, 0.01
+            try:
+                probed = vpn_check(wire["id"], runner=via_userspace,
+                                   sender=lambda source=None: None)
+            finally:
+                BACKEND_STEP = step
+            assert probed["probe"] == "unreachable", probed["probe"]
+            assert ["wireguard-go", PROBE_IF] in userspace, \
+                "the userspace implementation was never tried"
+            assert ["ip", "link", "del", "dev", PROBE_IF] in userspace, \
+                "a userspace probe link must be removed too"
 
             try:
                 check_tunnel_id(PROBE_IF)

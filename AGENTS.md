@@ -213,7 +213,12 @@ into a `fresh()` config of its own, checked by `sing-box check` and knocked on
 node by node over TCP (deduplicated, capped at `PROBE_NODES`, all at once); a
 quick profile is brought up on `PROBE_IF` with one route to `PROBE_DST` — an
 RFC 5737 address, so the route cannot take real traffic — and torn down in a
-`finally` whatever happens. It runs **outside** `_vpn_lock`, under `_probe_lock`
+`finally` whatever happens. It takes the same two steps `wg-quick`'s `add_if`
+does, in the same order: ask the kernel for the link type, and fall back to
+`PROBE_USERSPACE` (`wireguard-go` / `amneziawg-go`) when it has none. Skipping
+that fallback would call every profile on a host without the kernel module
+`tool-missing` while `awg-quick up` worked perfectly — which on a distribution
+with its own kernel is the normal way to have AmneziaWG at all. It runs **outside** `_vpn_lock`, under `_probe_lock`
 of its own: a dead subscription costs a connect timeout and a silent peer costs
 the handshake window, and the poller must not queue behind a button. Only
 `probe`/`reach`/`nodes` are written back, and the row is re-found under the lock

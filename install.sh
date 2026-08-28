@@ -103,9 +103,12 @@ if [ "$UILANG" = en ]; then
   M_SBUNIT="unit written"; M_SBUNITKEPT="unit already present"
   M_SBUNITOWN="existing unit pointed at the replaced binary, ExecStart overridden"
   M_WGOK="ok"; M_WGFAIL="not installed — WireGuard profiles will not come up"
-  M_AWGNONE="AmneziaWG is in no distribution's own archive. Ubuntu has it in the project's PPA; elsewhere it is built by hand."
+  M_AWGNONE="AmneziaWG is in no distribution's own archive: Ubuntu has it in the project's PPA, Arch in the AUR."
   M_AWGPPA="add ppa:amnezia/ppa to this system's apt sources and install from it?"
-  M_AWGBATCH="not installed — a third-party apt source is not added unattended; re-run without --yes"
+  M_AWGAUR="build amneziawg-tools and amneziawg-go from the AUR as"
+  M_AWGBATCH="not installed — a third-party source is not added unattended; re-run without --yes"
+  M_AWGNOHELPER="not installed — no AUR helper (paru or yay) and no user to build as"
+  M_AWGGO="installed with the userspace implementation: it works without a kernel module and is slower than one"
   M_AWGFAIL="not installed — AmneziaWG profiles will not come up. Build: https://github.com/amnezia-vpn/amneziawg-tools ; system:"
   M_ONLYLIST="After this, ONLY the devices on the list will route through this host."
   M_SEEN="Currently visible on the network:"
@@ -165,9 +168,12 @@ else
   M_SBUNIT="юнит записан"; M_SBUNITKEPT="юнит уже есть"
   M_SBUNITOWN="юнит указывал на заменённый бинарник, ExecStart переопределён"
   M_WGOK="ok"; M_WGFAIL="не установлен — профили WireGuard не поднимутся"
-  M_AWGNONE="AmneziaWG нет в собственных репозиториях дистрибутивов. У Ubuntu он в PPA проекта, в остальных случаях собирается руками."
+  M_AWGNONE="AmneziaWG нет в собственных репозиториях дистрибутивов: у Ubuntu он в PPA проекта, у Arch — в AUR."
   M_AWGPPA="добавить ppa:amnezia/ppa в источники apt этой системы и поставить оттуда?"
-  M_AWGBATCH="не установлен — сторонний источник apt в неинтерактивном режиме не добавляется; запустите без --yes"
+  M_AWGAUR="собрать amneziawg-tools и amneziawg-go из AUR от имени"
+  M_AWGBATCH="не установлен — сторонний источник в неинтерактивном режиме не добавляется; запустите без --yes"
+  M_AWGNOHELPER="не установлен — нет ни paru, ни yay, и некому собирать: makepkg от root не работает"
+  M_AWGGO="поставлен с реализацией в пространстве пользователя: работает без модуля ядра и медленнее него"
   M_AWGFAIL="не установлен — профили AmneziaWG не поднимутся. Собрать: https://github.com/amnezia-vpn/amneziawg-tools ; система:"
   M_ONLYLIST="После установки через этот хост пойдут ТОЛЬКО те, кто в списке."
   M_SEEN="Сейчас в сети видно:"
@@ -439,20 +445,8 @@ pkg_install() { # pkg_install pkg... -> quietly, and never fatal
 # in the project's own PPA. Adding that PPA is a standing change to somebody's
 # apt sources, which is not something an unattended upgrade may decide, so it
 # is offered only when there is a person at the keyboard to say yes.
-awg_install() {
-  if command -v awg-quick >/dev/null; then return 0; fi
-  pkg_install amneziawg-tools amneziawg-dkms || pkg_install amneziawg-tools || true
-  hash -r 2>/dev/null || true
-  if command -v awg-quick >/dev/null; then return 0; fi
-  say "$M_AWGNONE"
-  case "$(os_id)" in
-    *ubuntu*) ;;
-    *) return 1 ;;
-  esac
-  if [ "$YES" = 1 ]; then
-    ok "amneziawg-tools" "$M_AWGBATCH"
-    return 1
-  fi
+awg_ubuntu() {
+  if [ "$YES" = 1 ]; then ok "amneziawg-tools" "$M_AWGBATCH"; return 1; fi
   command -v add-apt-repository >/dev/null \
     || pkg_install software-properties-common || true
   command -v add-apt-repository >/dev/null || return 1
@@ -463,6 +457,56 @@ awg_install() {
     || pkg_install amneziawg-tools amneziawg-dkms || true
   hash -r 2>/dev/null || true
   command -v awg-quick >/dev/null
+}
+
+awg_arch() {
+  local helper builder
+  # makepkg refuses to run as root and so do paru and yay, so a build needs
+  # both a helper and the account that typed sudo. Neither is something this
+  # script can conjure.
+  for helper in paru yay; do command -v "$helper" >/dev/null && break; helper=""; done
+  builder="${SUDO_USER:-}"
+  if [ -z "$helper" ] || [ -z "$builder" ] || [ "$builder" = root ]; then
+    ok "amneziawg-tools" "$M_AWGNOHELPER"
+    return 1
+  fi
+  if [ "$YES" = 1 ]; then ok "amneziawg-tools" "$M_AWGBATCH"; return 1; fi
+  yesno "$M_AWGAUR $builder ($helper) ?" || return 1
+  # amneziawg-go and not amneziawg-dkms: awg-quick falls back to the userspace
+  # implementation on its own when `ip link add type amneziawg` fails, and a
+  # userspace binary needs neither kernel headers nor a rebuild after every
+  # kernel upgrade — which on a distribution with its own kernel is the
+  # difference between working and not. The module is still tried below, and
+  # awg-quick prefers it whenever it is there.
+  # Output is not swallowed here, unlike every other install in this step: an
+  # AUR build takes minutes, and the helper drops back to sudo for the pacman
+  # part — a password prompt into /dev/null is a hang nobody can explain.
+  case "$helper" in
+    paru) set -- -S --needed --noconfirm --skipreview ;;
+    *)    set -- -S --needed --noconfirm ;;
+  esac
+  sudo -u "$builder" "$helper" "$@" amneziawg-tools amneziawg-go || true
+  hash -r 2>/dev/null || true
+  # The module too, but only where it could build at all, and never as a
+  # condition: awg-quick uses it when it is there and the userspace binary
+  # when it is not.
+  if [ -d "/usr/lib/modules/$(uname -r)/build" ]; then
+    sudo -u "$builder" "$helper" "$@" amneziawg-dkms || true
+  fi
+  command -v awg-quick >/dev/null
+}
+
+awg_install() {
+  if command -v awg-quick >/dev/null; then return 0; fi
+  pkg_install amneziawg-tools amneziawg-go || pkg_install amneziawg-tools || true
+  hash -r 2>/dev/null || true
+  if command -v awg-quick >/dev/null; then return 0; fi
+  say "$M_AWGNONE"
+  case "$(os_id)" in
+    *ubuntu*) awg_ubuntu ;;
+    *arch*)   awg_arch ;;
+    *)        return 1 ;;
+  esac
 }
 
 step "$M_TOOLS"
@@ -499,7 +543,12 @@ if yesno "$M_TOOLSASK"; then
   else ok "wireguard-tools" "$M_WGFAIL"; fi
 
   awg_install || true
-  if command -v awg-quick >/dev/null; then ok "amneziawg-tools" "$M_WGOK"
+  if command -v awg-quick >/dev/null; then
+    # Which of the two is running matters enough to say: awg-quick falls back
+    # to the userspace implementation by itself, and the tunnel works either
+    # way, but one of them is several times faster than the other.
+    if [ -e /sys/module/amneziawg ]; then ok "amneziawg-tools" "$M_WGOK"
+    else ok "amneziawg-tools" "$M_AWGGO"; fi
   else
     # The failure names the system, because what to do next depends on it and
     # this line is the only thing the person reading it can send on.

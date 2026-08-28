@@ -155,10 +155,19 @@ work. A kind you do not use yet is mentioned where you would reach for it —
 under the type selector in the add form.
 
 `amneziawg-tools` is in no distribution's own archive: Ubuntu has it in the
-project's PPA (the installer offers to add it — but only with a person at the
-keyboard, never during a `--yes` upgrade), and elsewhere it is built by hand. If
-it could not be installed, the installer prints which system this is, which is
-enough to know what to do next.
+project's PPA, Arch in the AUR. The installer offers both, but only with a person
+at the keyboard — a third-party package source and a build of somebody else's
+PKGBUILD are not decisions to make on their behalf during a `--yes` upgrade. An
+AUR build runs as whoever typed `sudo` (`makepkg` refuses to run as root) and
+needs `paru` or `yay`.
+
+What gets installed is `amneziawg-tools` and `amneziawg-go`; the kernel module
+`amneziawg-dkms` is attempted only where headers for the running kernel are
+present, and its failure changes nothing — `awg-quick` picks the module when it
+is there and the userspace implementation when it is not. On a distribution with
+its own kernel that is the difference between working and rebuilding after every
+kernel upgrade; the cost is speed, and the installer says which of the two you
+ended up with. If nothing could be installed, it prints which system this is.
 
 Each subscription has its own HTTPS link and optional exclusion regular
 expression. Several may be enabled together: their nodes are merged into the
