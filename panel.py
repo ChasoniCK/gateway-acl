@@ -176,6 +176,20 @@ def conf():
         return dict(DEFAULTS)
 
 
+def _fsync_dir(path):
+    """Make a rename inside this directory survive a power cut.
+
+    `os.replace` is atomic against a reader, not against the disk: until the
+    directory entry itself is flushed the old name can come back. Both writers
+    below end with this for that reason.
+    """
+    dfd = os.open(os.path.dirname(path) or ".", os.O_RDONLY)
+    try:
+        os.fsync(dfd)
+    finally:
+        os.close(dfd)
+
+
 def _write_private_bytes(path, data):
     """Atomically replace one owner-only file and make the rename durable."""
     parent = os.path.dirname(path) or "."
@@ -190,11 +204,7 @@ def _write_private_bytes(path, data):
             os.fsync(f.fileno())
         os.replace(tmp, path)
         os.chmod(path, 0o600)
-        dfd = os.open(parent, os.O_RDONLY)
-        try:
-            os.fsync(dfd)
-        finally:
-            os.close(dfd)
+        _fsync_dir(path)
     finally:
         if fd >= 0:
             os.close(fd)
@@ -211,22 +221,36 @@ def write_private_text(path, text):
     _write_private_bytes(path, text.encode())
 
 
-def write_atomic(path, obj):
+def write_atomic(path, obj, **dump):
     """Write json so that a power cut leaves either the old file or the new one.
 
     `open(path, "w")` truncates first. Cut the power in that window and what
     comes back up is half a file, which is not json and takes the panel with it
-    on the next start. The rename is the atomic step, and the fsync is what
-    makes it mean anything: without it the rename can reach the disk before the
-    bytes do. Compact separators, because nobody reads these two files by hand
-    and every comma is written FLUSH_EVERY seconds apart, for ever.
+    on the next start. The rename is the atomic step, and the two fsyncs are
+    what make it mean anything: the first so the bytes reach the disk before
+    the rename, the second so the rename itself does.
+
+    Compact separators by default, because nobody reads the two history files
+    by hand and every comma is written FLUSH_EVERY seconds apart, for ever. The
+    device list asks for `indent=1` instead: that one a person does open.
+
+    The mode of a file that is already there is kept. A fresh temporary file
+    carries the process umask, and replacing an owner-only file with it would
+    quietly widen it.
     """
+    try:
+        mode = os.stat(path).st_mode & 0o777
+    except OSError:
+        mode = None
     tmp = f"{path}.tmp"
-    with open(tmp, "w") as f:
-        json.dump(obj, f, separators=(",", ":"))
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f, **(dump or {"separators": (",", ":")}))
         f.flush()
         os.fsync(f.fileno())
     os.replace(tmp, path)
+    if mode is not None:
+        os.chmod(path, mode)
+    _fsync_dir(path)
 
 
 def save_conf(c):
@@ -1016,7 +1040,7 @@ def reboot_due(at, now, up, window):
     return up > 2 * 3600 and 0 <= since_midnight - target < window
 
 
-_devs = {"mtime": None, "val": []}
+_devs = {"mtime": None, "val": [], "bad": 0}
 
 
 def _devs_stamp():
@@ -1041,21 +1065,49 @@ def load():
     copy of each row, because callers mutate what they get and then call save().
     Lending out the cached list itself would let a change that was never written
     take effect anyway, and a failed request would leave it behind.
+
+    A file that will not parse hands back the last list that did, and says so.
+    Raising instead took the process down, and systemd restarted it into the
+    same crash for ever. Handing back an empty list would be worse than either:
+    an empty list is a valid answer, and applying it drops the whole network
+    without a word. So: the newest good answer, a line in the journal, and a red
+    banner on the page until somebody fixes the file. The stamp is deliberately
+    not stored, so a repaired file is picked up on the very next call.
     """
     try:
         m = os.stat(DEVICES).st_mtime_ns
     except OSError:
         return []
     if m != _devs["mtime"]:
-        with open(DEVICES) as f:
-            _devs["val"] = json.load(f)
-        _devs["mtime"] = m
+        try:
+            with open(DEVICES, encoding="utf-8") as f:
+                val = json.load(f)
+            if not isinstance(val, list) or not all(
+                    isinstance(d, dict) and "ip" in d for d in val):
+                raise ValueError("not a list of devices")
+        except (OSError, ValueError, UnicodeDecodeError) as e:
+            if not _devs["bad"]:   # once per breakage, not once per poll
+                print(f"gateway-acl: {DEVICES}: {e}", file=sys.stderr, flush=True)
+            _devs["bad"] = int(time.time())
+            _state["val"] = None   # the banner has to reach the open page
+            return [dict(d) for d in _devs["val"]]
+        _devs["val"], _devs["mtime"] = val, m
+        if _devs["bad"]:
+            _devs["bad"] = 0
+            _state["val"] = None
     return [dict(d) for d in _devs["val"]]
 
 
+def devices_ok():
+    """Whether what load() hands back is the file or a stand-in for it."""
+    return not _devs["bad"]
+
+
 def save(devs):
-    with open(DEVICES, "w") as f:
-        json.dump(devs, f, indent=1, ensure_ascii=False)
+    # Atomically, like everything else this program writes. `open(path, "w")`
+    # truncates first, and the device list is the one file this gateway cannot
+    # be brought up without: half of it is a panel that will not start.
+    write_atomic(DEVICES, devs, indent=1, ensure_ascii=False)
     # Not "store what we just wrote": mtime_ns is the cheap check, and a write
     # from anywhere else has to invalidate it just the same.
     _devs["mtime"] = None
@@ -1386,6 +1438,16 @@ def blocked():
 
 
 def apply(devs):
+    if not devs and not devices_ok():
+        # The device list would not parse and nothing earlier is held in
+        # memory to stand in for it. An empty table is not "no devices", it is
+        # every device on the network dropped, silently, for as long as the
+        # file stays broken. Leaving the rules as they are lets everyone
+        # through the way `bypass` does; the page says so and offers the
+        # diagnostics bundle.
+        print(f"gateway-acl: {DEVICES} is unreadable, the table is left as it "
+              f"is", file=sys.stderr, flush=True)
+        return
     poll(force=True)  # sample the counters before the rebuild zeroes them
     with _lock:
         # ...and get that reading onto the disk. The rebuild zeroes the
@@ -8015,6 +8077,41 @@ PersistentKeepalive = 25
         assert load()[0]["name"] == "x", "the cache lent out its own list"
         save([{"ip": a, "name": "y", "on": True}])
         assert load()[0]["name"] == "y", "a written file must be read again"
+
+        # The list is written atomically and read back defensively. A cut in
+        # the middle of a write used to leave half a file, which is not json,
+        # which took the process down on every start for ever.
+        assert not os.path.exists(DEVICES + ".tmp"), "a temporary file was left"
+        os.chmod(DEVICES, 0o600)
+        save([{"ip": a, "name": "y", "on": True}])
+        assert os.stat(DEVICES).st_mode & 0o777 == 0o600, \
+            "an atomic write must not widen the mode it replaces"
+        save([{"ip": a, "name": "имя", "on": True}])
+        assert load()[0]["name"] == "имя", "a name is written and read as UTF-8"
+
+        for damage in ('[{"ip": "1.2.3.4", "na', "null", '{"ip": "1.2.3.4"}',
+                       "[1, 2]", '["x"]'):
+            with open(DEVICES, "w") as f:
+                f.write(damage)
+            _devs["mtime"] = None
+            assert load()[0]["name"] == "имя", \
+                f"damage must hand back the last good list, not {damage!r}"
+            assert not devices_ok(), "and must say the file is not being read"
+        save([{"ip": a, "name": "z", "on": True}])
+        assert load()[0]["name"] == "z" and devices_ok(), \
+            "a repaired file is picked up on the next call"
+
+        # Nothing in memory to stand in for it: the table is left alone rather
+        # than rebuilt from an empty list, which would drop the whole network.
+        keep_run, _devs["bad"], _devs["val"] = subprocess.run, 1, []
+        try:
+            subprocess.run = lambda *a, **k: (_ for _ in ()).throw(
+                AssertionError("the table was rebuilt from an unreadable list"))
+            keep_dev[3]([])
+        finally:
+            subprocess.run = keep_run
+            _devs["bad"], _devs["mtime"] = 0, None
+        assert load()[0]["name"] == "z", "and the good list is still there"
 
         save([{"ip": a, "on": True, "until": 100}])
         assert not expire(50), "a timer that has not run out must not fire"
