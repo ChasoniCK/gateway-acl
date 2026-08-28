@@ -302,10 +302,7 @@ STRINGS = {
         "blockedHint": "Адреса, чьи пакеты ядро отбросило за последние 6 часов.",
         "noData": "за этот месяц данных ещё нет",
         "youAre": "Вы",
-        "turnOff": "выключить",
-        "turnOn": "включить",
         "vpnOff": "мимо VPN",
-        "vpnOn": "через VPN",
         "vpnWhat": "Выпустить устройство мимо туннеля. Интернет у него "
                    "остаётся, но идёт напрямую через шлюз. Пакеты помечаются "
                    "fwmark, по которой туннель их не забирает. Метка задаётся "
@@ -414,7 +411,6 @@ STRINGS = {
         "vpnDirect": "Сейчас трафик идёт напрямую",
         "vpnClosed": "Транзит закрыт: активный туннель не работает",
         "vpnRunning": "Активен: {kind}",
-        "vpnStopped": "туннель остановлен",
         "vpnEnabled": "включён",
         "vpnDisabled": "выключен",
         "vpnNodes": "узлов: {n}",
@@ -615,10 +611,7 @@ STRINGS = {
         "blockedHint": "Addresses whose packets the kernel dropped in the last 6 hours.",
         "noData": "no data for this month yet",
         "youAre": "You",
-        "turnOff": "turn off",
-        "turnOn": "turn on",
         "vpnOff": "no VPN",
-        "vpnOn": "via VPN",
         "vpnWhat": "Send the device around the tunnel. It keeps its internet, "
                    "but goes straight out through the gateway instead of the "
                    "VPN. Its packets carry an fwmark the tunnel ignores. The "
@@ -728,7 +721,6 @@ STRINGS = {
         "vpnDirect": "Traffic is currently going direct",
         "vpnClosed": "Forwarding is closed: the active tunnel is down",
         "vpnRunning": "Active: {kind}",
-        "vpnStopped": "tunnel stopped",
         "vpnEnabled": "enabled",
         "vpnDisabled": "disabled",
         "vpnNodes": "nodes: {n}",
@@ -5164,6 +5156,7 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
     <input id=s_reboot_at class=field type=time lang=en-GB value="{{REBOOT_AT}}"{{RB_OFF}}>
     <input id=s_rb class=sw type=checkbox{{RB}} aria-label="{{t.sRebootAt}}"
       onchange="s_reboot_at.disabled=!this.checked"></div>
+   <p class=hint>{{t.sRebootAtWhat}}</p>
    <div class=row><span class=sp>{{t.sUpdate}}</span><input id=s_upd class=sw
      type=checkbox{{UPD}} aria-label="{{t.sUpdate}}" onchange="s_ntf.disabled=!this.checked"></div>
    <div class=row><span class=sp>{{t.sNotify}}</span><input id=s_ntf class=sw
@@ -8720,6 +8713,22 @@ PersistentKeepalive = 25
     assert "prefers-color-scheme" in TOKENS, "тёмная тема потерялась"
     assert "gwacl_theme" in HEAD, "тема будет мигать: нет скрипта в HEAD"
     assert "[data-theme=dark]" in TOKENS, "ручной выбор тёмной не переопределяет"
+
+    # A string nobody shows is a string nobody maintains, and it rots into a
+    # difference between the two languages that no reader can find. Four ways
+    # reach one: {{t.key}} in a template, T.key and ["key"] in either language,
+    # and a bare 'key' in one of the script's own little tables (TIMES, BYP,
+    # the sort menu). sRebootAtWhat sat written in both languages and wired to
+    # nothing, which is how this check came to exist.
+    with open(__file__, encoding="utf-8") as f:
+        source = f.read()
+    shown = set(re.findall(r"\{\{t\.([A-Za-z0-9_]+)\}\}", source))
+    shown |= set(re.findall(r"\bT\.([A-Za-z0-9_]+)", source))
+    shown |= set(re.findall(r"""\[\s*["']([A-Za-z0-9_]+)["']\s*\]""", source))
+    shown |= set(re.findall(r"'([A-Za-z][A-Za-z0-9_]*)'",
+                            PAGE_T.split("<script>", 1)[-1]))
+    assert not set(STRINGS["ru"]) - shown, \
+        f"strings nobody shows: {sorted(set(STRINGS['ru']) - shown)}"
 
     ru = set(STRINGS["ru"])
     for lang, t in STRINGS.items():
