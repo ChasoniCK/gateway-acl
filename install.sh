@@ -282,7 +282,15 @@ ok "nftables" "$(nft --version | awk '{print $2}')"
 
 if [ "$(cat /proc/sys/net/ipv4/ip_forward)" != 1 ]; then
   say "$M_FWDOFF"
-  if yesno "$M_FWDASK"; then
+  # --yes means the answers from last time, and the update button runs with it.
+  # On a host this installer has already been through, forwarding that is still
+  # off is somebody's answer: they were asked and they said no. yesno() says yes
+  # to everything under --yes, so it would answer for them and write a sysctl
+  # file they declined. A fresh install has nobody to have said anything, and
+  # there forwarding stays what --yes says: on, or the gateway does not route.
+  if [ "$YES" = 1 ] && [ -f "$ETC/config.json" ]; then
+    ok "ip_forward" "$M_FWDLEFT"
+  elif yesno "$M_FWDASK"; then
     echo 'net.ipv4.ip_forward=1' > "$SYSCTL"
     sysctl -qw net.ipv4.ip_forward=1
     ok "ip_forward" "$M_FWDON"
