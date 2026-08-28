@@ -4076,6 +4076,24 @@ def _redact_diagnostics(text, known=()):
     text = str(text)
     for value in sorted(set(known), key=len, reverse=True):
         text = text.replace(value, "[REDACTED_SECRET]")
+    # A named secret first, before anything else can rewrite half of its value
+    # and leave the rest of the punctuation standing. However the line that
+    # carries it is written: two shapes got through the plain `key[:=]\S+` this
+    # used to be, and both are ordinary in a journal.
+    #
+    #   {"token":"…"}   the quote sits between the name and the colon, so the
+    #                   name never matched. sing-box logs json.
+    #   Authorization: Bearer …
+    #                   `\S+` took the word `Bearer` and left the credential
+    #                   standing, in a report whose first line says the secrets
+    #                   were removed.
+    #
+    # The value stops at a quote or a json delimiter rather than at whitespace,
+    # so the line it was embedded in survives around it.
+    text = re.sub(r"(?i)(\b(?:privatekey|presharedkey|endpoint|password|token|"
+                  r"secret|authorization)\b\"?\s*[:=]\s*\"?)"
+                  r"(?:(?:bearer|basic|digest|token)\s+)?[^\s\"',;}\]]+",
+                  r"\1[REDACTED_SECRET]", text)
     text = re.sub(r"(?i)\b(?:https?|vless|vmess|trojan|ss)://[^\s<>\"']+",
                   "[REDACTED_URL]", text)
     text = re.sub(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
@@ -4083,9 +4101,6 @@ def _redact_diagnostics(text, known=()):
     text = re.sub(r"(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{43}=?"
                   r"(?![A-Za-z0-9+/=])",
                   "[REDACTED_KEY]", text)
-    text = re.sub(r"(?i)\b(privatekey|presharedkey|endpoint|password|token|"
-                  r"secret|authorization)(\s*[:=]\s*)\S+",
-                  r"\1\2[REDACTED_SECRET]", text)
     text = re.sub(r"(?i)\b(?:[a-z0-9-]+\.)+[a-z]{2,63}(?=:\d{1,5}\b)",
                   "[REDACTED_ENDPOINT]", text)
 
@@ -7616,6 +7631,33 @@ PersistentKeepalive = 25
                             "## managed tunnels", "## files", "## commands"):
                 assert heading in report, heading
             assert "[REDACTED" in report and len(report) <= DIAG_REPORT_MAX
+
+            # A named secret goes, however the line around it is punctuated.
+            # A quote between the name and the colon used to hide the name
+            # from the pattern, and an auth scheme used to be taken for the
+            # value, leaving the credential standing.
+            hides = {
+                '{"token":"raw-secret-abc"}': "raw-secret-abc",
+                '{"password": "hunter2hunter2"}': "hunter2hunter2",
+                "Authorization: Bearer sk-live-9f8e": "sk-live-9f8e",
+                "authorization = Basic dXNlcjpwYXNz": "dXNlcjpwYXNz",
+                "token: Bearer eyJhbGciOiJIUzI1NiJ9.p.s": "eyJhbGciOiJIUzI1NiJ9",
+                "Authorization:Bearer abc123def": "abc123def",
+                "Endpoint = de-1.provider.net:51820": "de-1.provider.net",
+                '{"secret":"s3cr3t","other":"kept"}': "s3cr3t",
+            }
+            for line, secret in hides.items():
+                cleaned = _redact_diagnostics(line)
+                assert secret not in cleaned, f"diagnostics leaked {line!r}"
+                assert "[REDACTED_SECRET]" in cleaned, line
+            assert "kept" in _redact_diagnostics('{"secret":"s3cr3t","other":"kept"}'), \
+                "the value stops at the json delimiter, not at the end of line"
+            # ...and nothing that is not a secret goes with it.
+            for keep in ("inet 192.168.1.10/24 brd 192.168.1.255",
+                         'level=error msg="dial tcp timeout"',
+                         "224.0.0.0/4 dev eno1", "fe80::1%eno1/64",
+                         "link/ether aa:bb:cc:dd:ee:ff"):
+                assert "REDACTED" not in _redact_diagnostics(keep), keep
         finally:
             TUNNELS, TUNNEL_DIR, SINGBOX_CONFIG = old_paths
 
