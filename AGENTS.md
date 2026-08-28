@@ -348,7 +348,14 @@ older version.
   the future and `flush()` returned False for that hour, with the history in memory the
   whole time. Anything a person reads or that outlives the process stays wall clock:
   `seen`, `until`, `bypass`, session expiry, `probe_at`, `refresh_at`. `poll()` takes
-  both, on purpose.
+  both, on purpose. The "never happened" sentinel for a monotonic window is
+  `LONG_AGO`, never `0`: the monotonic clock counts from boot, so on a machine
+  that came up a minute ago `0` means a minute ago. CI caught a panel started
+  on a fresh runner buffering its whole history until `FLUSH_EVERY` had passed;
+  the same arithmetic skips the daily update check for the first day of uptime.
+  `selftest()` asserts no window can reach back to `LONG_AGO`, and running it
+  under a small `time.monotonic()` is how that class of bug shows up on a
+  developer machine that has been up for a week.
 - A string in `STRINGS` that nothing shows is a string that rots into a difference
   between the two languages. `selftest()` looks for one along all four roads to a
   string: `{{t.key}}`, `T.key`, `["key"]` in either language, and a bare `'key'` inside

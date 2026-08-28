@@ -137,6 +137,14 @@ FLUSH_EVERY = 300
 # A rate is measured over a window; below this one there is nothing new to
 # divide, so a poll inside it would spend an nft call to learn nothing.
 POLL_MIN = 2
+# "This has never happened", for every window measured on the monotonic clock.
+# Not 0: the monotonic clock counts from boot, so on a machine that came up a
+# minute ago 0 is a minute ago, and `now - 0 < FLUSH_EVERY` was still true. The
+# whole history then waited for the window rather than being written at once,
+# and the once-a-day update check was skipped for the first day of uptime.
+# A number far enough back that no window can reach it, and finite, because
+# these are also divided by.
+LONG_AGO = -1e9
 # Months kept day by day, from "keep_months". Older ones are folded into a
 # single figure per month: monthly totals stay exact to the byte, what is given
 # up is the per-day chart of a month that far back. Set by reload_conf.
@@ -154,12 +162,12 @@ _probe_lock = threading.Lock()
 # of everything on a machine that is already being asked what is wrong with it.
 _diag_lock = threading.Lock()
 _vpn_closed = False
-_state = {"at": 0.0, "month": None, "val": None}   # the last answer /api gave
+_state = {"at": LONG_AGO, "month": None, "val": None}  # the last answer /api gave
 _sessions = {}          # digest of the token -> when it expires
 _csrf_secret = secrets.token_bytes(32)
 _fails = {}             # address -> (misses, blocked until)
-_upd = {"at": 0, "new": None, "manual": 0}  # last check, the tag worth showing,
-                                            # and when a hand last asked
+# The last check, the tag worth showing, and when a hand last asked.
+_upd = {"at": LONG_AGO, "new": None, "manual": LONG_AGO}
 
 
 def conf():
@@ -1625,7 +1633,7 @@ def _read_history():
 
 
 _hist = None            # the history itself; the files are a copy taken now and then
-_flushed = 0.0          # when that copy was last brought up to date
+_flushed = LONG_AGO     # when that copy was last brought up to date
 _dirty = False          # whether it is behind
 _cold = False           # ...and whether the closed days behind it moved too
 _hot_date = None        # the day the hot file is holding
@@ -1842,7 +1850,7 @@ def roll_up(days, month, keep=None):
     return len(old)
 
 
-_polled = 0.0
+_polled = LONG_AGO
 
 
 def poll(force=False):
@@ -3938,7 +3946,8 @@ def migrate_legacy_subscription():
 
 LEASES = ("/var/lib/misc/dnsmasq.leases", "/var/lib/dnsmasq/dnsmasq.leases")
 _syslock = threading.Lock()
-_sys = {"at": 0.0, "cpu": None, "net": None, "pct": None, "bps": [0, 0], "out": None}
+_sys = {"at": LONG_AGO, "cpu": None, "net": None, "pct": None,
+        "bps": [0, 0], "out": None}
 
 
 def _read(path):
@@ -6405,7 +6414,7 @@ class H(BaseHTTPRequestHandler):
             # so drop the once-a-day timer and let the next tick go and look.
             # Without it a release cut this morning stays invisible until
             # tomorrow, and there would be no way to ask short of a restart.
-            _upd["at"] = 0
+            _upd["at"] = LONG_AGO
             if (c["iface"], c["lan"], c["self_ip"]) != \
                     (base["iface"], base["lan"], base["self_ip"]):
                 apply(load())      # the rules are written against the new network
@@ -8242,6 +8251,17 @@ PersistentKeepalive = 25
     assert roll_up({"2026-08-01": {"a": [1, 1]}}, "2026-08") == 0, \
         "a fresh install has nothing to fold"
 
+    # Every window is measured against the monotonic clock, which counts from
+    # boot. A sentinel of 0 therefore means "a moment ago" on a machine that
+    # has just come up, not "never": CI caught a panel started on a fresh
+    # runner buffering its whole history until FLUSH_EVERY had passed, and the
+    # same arithmetic would skip the daily update check for the first day of
+    # uptime. LONG_AGO has to be further back than the widest window there is.
+    for window in (FLUSH_EVERY, POLL_MIN, UPDATE_EVERY, MANUAL_EVERY,
+                   STATE_CACHE, FAIL_BLOCK):
+        assert time.monotonic() - LONG_AGO >= window, \
+            f"a window of {window}s reaches back to LONG_AGO on a fresh boot"
+
     # The files lag memory on purpose. A poll that moved nothing has nothing to
     # write; a poll that moved bytes waits for the window; and what waits must
     # not be lost, so the same reading has to come back after a restart.
@@ -8260,15 +8280,24 @@ PersistentKeepalive = 25
         # Everything a fresh process starts with. Not named restart(): that is
         # already a function in this module, and one that re-execs the panel.
         reboot = lambda: globals().update(
-            _hist=None, _flushed=0.0, _dirty=False, _cold=False, _hot_date=None)
+            _hist=None, _flushed=LONG_AGO, _dirty=False, _cold=False,
+            _hot_date=None)
         reboot()
         today = time.strftime("%Y-%m-%d")
 
+        # A process that starts a minute after the machine came up. The
+        # monotonic clock is small there, so a sentinel of 0 would say the last
+        # flush was a minute ago rather than never, and the first poll would
+        # buffer instead of writing. CI caught exactly that, on a fresh runner.
+        assert _flushed <= LONG_AGO, \
+            "'never flushed' has to be further back than any window"
         poll(force=True)                     # first reading, window wide open
+        assert os.path.exists(TODAY), \
+            "the first poll of a process has to reach the disk"
         stamp = os.stat(TODAY).st_mtime_ns
         cold_stamp = os.stat(TRAFFIC).st_mtime_ns
         time.sleep(0.01)                     # so any write shows in the mtime
-        _flushed = 0.0                       # even with the window wide open
+        _flushed = LONG_AGO                  # even with the window wide open
         poll(force=True)
         assert os.stat(TODAY).st_mtime_ns == stamp, "an idle poll wrote the file"
 
@@ -8278,7 +8307,7 @@ PersistentKeepalive = 25
         assert os.stat(TODAY).st_mtime_ns == stamp, "the write was not buffered"
         assert history()["days"][today] == {"10.0.0.5": [700, 900]}, \
             "the increment must be in memory the moment it is measured"
-        _flushed = 0.0
+        _flushed = LONG_AGO
         poll(force=True)
         assert os.stat(TODAY).st_mtime_ns != stamp, "the buffer was never flushed"
         assert json.load(open(TODAY))["day"] == {"10.0.0.5": [700, 900]}
@@ -8308,7 +8337,7 @@ PersistentKeepalive = 25
         y = time.strftime("%Y-%m-%d", time.localtime(time.time() - 86400))
         _hist["days"][y] = {"10.0.0.5": [11, 22]}
         _hot_date = y
-        _flushed = 0.0
+        _flushed = LONG_AGO
         nft_table = lambda: table(1600, 900)
         poll(force=True)
         cold, hot = json.load(open(TRAFFIC)), json.load(open(TODAY))
