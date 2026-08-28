@@ -374,6 +374,9 @@ STRINGS = {
                     "Задайте: {cmd} --set-password",
         "cfgUnreadable": "{cfg} читается только под root — беру значения по умолчанию",
         "pwShort": "пароль короче 8 символов",
+        "devsBroken": "Файл списка устройств не читается. Панель показывает "
+                      "последнюю разобранную копию, правила на шлюзе оставлены "
+                      "как были. Соберите диагностику и посмотрите журнал.",
         "updateTitle": "Есть обновление",
         "updateNew": "Вышла версия {v}, установлена {{VERSION}}.",
         "updateHint": "Кнопка скачает релиз с GitHub и запустит тот же "
@@ -682,6 +685,10 @@ STRINGS = {
                     "Set one: {cmd} --set-password",
         "cfgUnreadable": "{cfg} is readable by root only — using defaults",
         "pwShort": "password shorter than 8 characters",
+        "devsBroken": "The device list file will not parse. The panel is "
+                      "showing the last copy that did, and the rules on the "
+                      "gateway are as they were. Collect the diagnostics and "
+                      "read the journal.",
         "updateTitle": "Update available",
         "updateNew": "Version {v} is out, you have {{VERSION}}.",
         "updateHint": "The button downloads the release from GitHub and runs "
@@ -4494,6 +4501,11 @@ def build_state(month=None):
                 if ip not in known and lan_client(ip)],
         "sys": sysinfo(),
         "update": _upd["new"],
+        # Nonzero when devices.json stopped parsing: what the page is drawing
+        # is the last list that did, and the rules are whatever they were.
+        # Nothing else on the page would say so, and everything on it would
+        # look ordinary.
+        "broken": _devs["bad"],
     }
 
 
@@ -5719,7 +5731,15 @@ const csv = () => {
 // того, как приедет первое состояние, и сказать об этом надо всё равно.
 const renderBanners = () => {
   banners.innerHTML =
-      (S && S.bypass > S.now
+    // Первым: пока список устройств не читается, всё остальное на странице —
+    // последняя разобранная копия, и это надо сказать раньше всего прочего.
+    // Рядом кнопка сбора диагностики: причина лежит в журнале, а не здесь.
+      (S && S.broken
+        ? banner('red', esc(T.devsBroken),
+                 `<button class=btn onclick=diagnostics(false)>`
+                 + `${T.diagDownload}</button>`)
+        : '')
+    + (S && S.bypass > S.now
         ? banner('red', `${T.bypOn} ${left(S.bypass - S.now)}`,
                  `<button class="btn bad" onclick="bypass(0)">${T.close}</button>`)
         : '')
@@ -7517,6 +7537,13 @@ PersistentKeepalive = 25
     assert quick_address(wg) == "10.66.66.5/32"
     assert quick_address("[Interface]\nPrivateKey = x\n") == ""
     assert "checkAllVpn" in PAGE and "diagnostics(true)" in PAGE
+    # An unreadable device list is the one fault the page has to announce by
+    # itself: everything else on it looks perfectly ordinary while it lasts.
+    assert "S.broken" in PAGE and "diagnostics(false)" in PAGE, \
+        "the broken-list banner and its diagnostics button must be on the page"
+    for lang in STRINGS:
+        assert STRINGS[lang]["devsBroken"] in render(PAGE_T, STRINGS[lang]), \
+            f"{lang}: the broken-list message never reaches the page"
 
     # --- what a quick profile needs before the panel may offer to enable it ---
     real_which, seen_modinfo = shutil.which, []
