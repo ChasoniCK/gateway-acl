@@ -506,7 +506,7 @@ old managed backend is stopped, the candidate is checked and started, its real
 fwmark is read, and only then are config and catalog committed and the guard
 removed. The check and the fwmark reading are given a window rather than one
 reading: `systemctl restart` returns when the process is running, and sing-box
-installs its policy route and its nftables table a moment later — checking at
+installs its nftables table a moment later — checking at
 once failed a tunnel that was coming up perfectly well and rolled the whole
 switch back, which is what "the subscription will not come up" looked like from
 the browser. On the poll path there is no window: there it is a health check,

@@ -164,6 +164,14 @@ update is running, or a killed `pacman` left the lock behind — the installer
 waits a minute and then says which of the two it is, instead of sitting on
 `:: Pacman is currently in use` for good.
 
+Packages are installed one at a time rather than as one transaction:
+`amneziawg-tools` sits in a binary repository on some of these systems while
+`amneziawg-go` is AUR-only, and one failing must not take the other with it —
+that is exactly how a host ends up with an `awg-quick` that has nothing to build
+an interface with. That state now has a name: neither the installer nor the panel
+counts the tools alone as ready, because `awg-quick up` on such a host prints
+`Unknown device type` and stops.
+
 What gets installed is `amneziawg-tools` and `amneziawg-go`; the kernel module
 `amneziawg-dkms` is attempted only where headers for the running kernel are
 present, and its failure changes nothing — `awg-quick` picks the module when it

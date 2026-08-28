@@ -186,10 +186,19 @@ enable path dies in `_check_singbox_candidate` as `tool-missing`, and with an ol
 one as `validation-failed` — which reads as a bad subscription. `vpn_public()`
 reports `tools` for exactly that reason and the page names what is missing.
 
+**A running sing-box is checked by its unit and by nothing else.**
+`_backend_up()` used to also demand a default route in a policy table, and that
+is wrong on any host using `auto_redirect`: forwarded traffic is put into the
+tun by nftables rather than routed, so a working tunnel has no such route and
+the panel closed transit, rolled the switch back and stopped a sing-box that was
+proxying happily — every single time. Never make health depend on one of the two
+routing mechanisms. The unit is a real check because the candidate has already
+passed `sing-box check`, so a config it cannot run makes the process exit.
+
 **Nothing that was just started is checked immediately.** `systemctl restart`
-returns when the process is running, and sing-box installs its policy route and
-its nftables mark a moment later; `_check_backend`/`backend_mark` therefore take
-a `wait` and poll over `BACKEND_WAIT`. The default is 0 — the poll path is a
+returns when the process is running, and sing-box installs its nftables mark a
+moment later; `_check_backend`/`backend_mark` therefore take a `wait` and poll
+over `BACKEND_WAIT`. The default is 0 — the poll path is a
 health check, not a start — and the callers that started something pass the
 constant. `BACKEND_WAIT` is a module global resolved in the body, never a default
 argument, because `selftest()` sets it to 0.

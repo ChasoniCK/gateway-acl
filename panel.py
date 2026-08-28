@@ -61,7 +61,7 @@ from urllib.parse import urlparse, parse_qs
 # it against the newest tag on GitHub, so a forgotten bump makes every install
 # claim to be older than it is and show a banner that never goes away. CI
 # refuses a tag push where the two disagree.
-VERSION = "1.5.5"
+VERSION = "1.5.6"
 RELEASES_URL = "https://api.github.com/repos/ChasoniCK/gateway-acl/releases/latest"
 RELEASES_PAGE = "https://github.com/ChasoniCK/gateway-acl/releases/latest"
 # The one address the update button may ever download from. The repository is
@@ -1905,7 +1905,8 @@ SAFE_VPN_ERRORS = {
     "invalid-state",
 }
 VPN_COMMANDS = {"sing-box", "systemctl", "wg", "awg", "wg-quick",
-                "awg-quick", "wireguard-go", "amneziawg-go", "ip", "nft"}
+                "awg-quick", "wireguard-go", "amneziawg-go", "ip", "nft",
+                "modinfo"}
 # A probe never becomes a tunnel's committed state, so it has codes of its own:
 # "ok" is not an error and "unreachable" is not a reason to close transit.
 SAFE_PROBE_CODES = SAFE_VPN_ERRORS | {"ok", "unreachable"}
@@ -2058,8 +2059,35 @@ def vpn_public(runner=None):
                    "error": code if code in SAFE_VPN_ERRORS else "invalid-state"}
     return {"profiles": rows, "backend": backend, "closed": _vpn_closed,
             "tools": {"singbox": bool(shutil.which("sing-box")),
-                      "wireguard": bool(shutil.which("wg-quick")),
-                      "amneziawg": bool(shutil.which("awg-quick"))}}
+                      "wireguard": quick_usable("wireguard", runner),
+                      "amneziawg": quick_usable("amneziawg", runner)}}
+
+
+def have_link_type(name, runner=None):
+    """Whether this kernel can make an interface of that type at all."""
+    if os.path.exists(f"/sys/module/{name}"):
+        return True
+    with contextlib.suppress(Exception):
+        # Installed but not yet loaded, and built into the kernel, both answer
+        # here; /sys/module alone misses the first and can miss the second.
+        return not vpn_exec(["modinfo", "-F", "name", name],
+                            runner=runner).returncode
+    return False
+
+
+def quick_usable(kind, runner=None):
+    """Whether a WireGuard-family profile could actually be brought up.
+
+    `wg-quick` on its own is not enough and saying otherwise is a lie the
+    panel told: on a host with the tools but no kernel module and no userspace
+    implementation, awg-quick prints `Unknown device type` and gives up, while
+    the settings page cheerfully offered to enable the profile. It needs one
+    of the two ways to build the interface, exactly as the script does.
+    """
+    if shutil.which(QUICK_TOOLS[kind]) is None:
+        return False
+    return bool(shutil.which(PROBE_USERSPACE[kind])
+                or have_link_type(PROBE_LINK[kind], runner))
 
 
 def _ensure_tunnel_dir():
@@ -2530,16 +2558,20 @@ def _log_vpn(argv, result):
 
 
 def _backend_up(backend, runner=None):
-    """One reading: is this backend running and carrying a default route."""
+    """One reading: is this backend running.
+
+    For sing-box that is the unit and nothing else. It used to also demand a
+    default route in a policy table, and that was wrong: `auto_redirect` sends
+    forwarded traffic into the tun with nftables instead of routing it, so a
+    perfectly working tunnel has no such route at all — the panel then closed
+    transit, rolled the switch back and stopped a sing-box that was proxying
+    happily, once every time. The unit is a real check: the candidate has
+    already passed `sing-box check`, so a config it cannot run makes the
+    process exit and the unit is not active.
+    """
     if backend["kind"] == "singbox":
-        result = vpn_exec(["systemctl", "is-active", "sing-box"], runner=runner)
-        if result.returncode:
-            return False
-        try:
-            _, policy_devs = _default_route_devs(runner)
-        except VpnError:
-            return False
-        return bool(policy_devs)
+        return not vpn_exec(["systemctl", "is-active", "sing-box"],
+                            runner=runner).returncode
     tid = check_tunnel_id(backend["id"])
     if vpn_exec(["ip", "link", "show", "dev", tid], runner=runner).returncode:
         return False
@@ -6234,12 +6266,18 @@ PersistentKeepalive = 25
             assert next(r for r in load_tunnels() if r["id"] == sub["id"])["enabled"]
             assert json.load(open(CONFIG))["vpn_mark"] == 0x2024
             assert os.path.exists(SINGBOX_CONFIG)
+            # A sing-box with auto_redirect installs nftables rules and no
+            # policy route at all, so a missing one is not a broken tunnel.
+            # Demanding it rolled back every healthy switch on such a host.
             fake.no_tunnel_route = True
+            _check_backend({"kind": "singbox", "ids": [sub["id"]]}, fake)
+            fake.active = None
             try:
                 _check_backend({"kind": "singbox", "ids": [sub["id"]]}, fake)
-                raise AssertionError("sing-box without policy route was healthy")
+                raise AssertionError("a stopped sing-box was healthy")
             except VpnError:
                 pass
+            fake.active = "singbox"
             fake.no_tunnel_route = False
             assert not _unmanaged_tunnel(
                 {"kind": "singbox", "ids": [sub["id"]]}, fake)
@@ -6659,6 +6697,38 @@ PersistentKeepalive = 25
 
     assert quick_address(wg) == "10.66.66.5/32"
     assert quick_address("[Interface]\nPrivateKey = x\n") == ""
+
+    # --- what a quick profile needs before the panel may offer to enable it ---
+    real_which, seen_modinfo = shutil.which, []
+
+    def only(*present):
+        return lambda name: f"/usr/bin/{name}" if name in present else None
+
+    def no_module(argv, **kwargs):
+        seen_modinfo.append(list(argv))
+        return subprocess.CompletedProcess(argv, 1, "", "")
+
+    def has_module(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 0, "amneziawg\n", "")
+
+    try:
+        shutil.which = only()
+        assert not quick_usable("amneziawg", no_module), "no tools at all"
+        # The state this host was actually in: awg-quick installed, no kernel
+        # module and no amneziawg-go, so `awg-quick up` prints "Unknown device
+        # type" — and the panel used to call that ready to use.
+        shutil.which = only("awg-quick")
+        assert not quick_usable("amneziawg", no_module), \
+            "awg-quick alone cannot bring up a tunnel"
+        assert seen_modinfo and seen_modinfo[-1][:1] == ["modinfo"]
+        shutil.which = only("awg-quick", "amneziawg-go")
+        assert quick_usable("amneziawg", no_module), \
+            "the userspace implementation is a way to build the interface"
+        shutil.which = only("awg-quick")
+        assert quick_usable("amneziawg", has_module), \
+            "so is a kernel module the host actually has"
+    finally:
+        shutil.which = real_which
 
     # --- picking nodes of a subscription by hand ---
     assert _skip_list("Germany") == [] and _skip_list(None) == []

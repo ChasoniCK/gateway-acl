@@ -109,6 +109,7 @@ if [ "$UILANG" = en ]; then
   M_AWGBATCH="not installed — a third-party source is not added unattended; re-run without --yes"
   M_AWGNOHELPER="not installed — no AUR helper (paru or yay) and no user to build as"
   M_AWGGO="installed with the userspace implementation: it works without a kernel module and is slower than one"
+  M_AWGHALF="awg-quick is installed but there is nothing to build the interface with — no kernel module and no amneziawg-go. Install amneziawg-go (or amneziawg-dkms)"
   M_PACWAIT="pacman's database is locked — waiting up to a minute for whoever has it"
   M_PACBUSY="still locked and a pacman is running: let that one finish and run this again"
   M_PACSTALE="still locked and no pacman is running — a killed one left it behind: sudo rm /var/lib/pacman/db.lck"
@@ -178,6 +179,7 @@ else
   M_AWGBATCH="не установлен — сторонний источник в неинтерактивном режиме не добавляется; запустите без --yes"
   M_AWGNOHELPER="не установлен — нет ни paru, ни yay, и некому собирать: makepkg от root не работает"
   M_AWGGO="поставлен с реализацией в пространстве пользователя: работает без модуля ядра и медленнее него"
+  M_AWGHALF="awg-quick есть, но собрать интерфейс нечем: ни модуля ядра, ни amneziawg-go. Поставьте amneziawg-go (или amneziawg-dkms)"
   M_PACWAIT="база pacman заперта — жду до минуты того, кто её занял"
   M_PACBUSY="всё ещё заперта, и pacman запущен: дождитесь его и запустите установку снова"
   M_PACSTALE="всё ещё заперта, а pacman не запущен — замок остался от убитого: sudo rm /var/lib/pacman/db.lck"
@@ -488,6 +490,18 @@ pkg_install() { # pkg_install pkg... -> quietly, and never fatal
 # in the project's own PPA. Adding that PPA is a standing change to somebody's
 # apt sources, which is not something an unattended upgrade may decide, so it
 # is offered only when there is a person at the keyboard to say yes.
+awg_module() { # 0 when this kernel can make an amneziawg interface
+  if [ -e /sys/module/amneziawg ]; then return 0; fi
+  # Installed but not yet loaded answers here too; /sys/module alone misses it.
+  modinfo -F name amneziawg >/dev/null 2>&1
+}
+
+awg_usable() { # 0 when awg-quick has something to build the interface with
+  command -v awg-quick >/dev/null || return 1
+  if command -v amneziawg-go >/dev/null; then return 0; fi
+  awg_module
+}
+
 awg_ubuntu() {
   if [ "$YES" = 1 ]; then ok "amneziawg-tools" "$M_AWGBATCH"; return 1; fi
   command -v add-apt-repository >/dev/null \
@@ -496,10 +510,13 @@ awg_ubuntu() {
   yesno "$M_AWGPPA" || return 1
   add-apt-repository -y ppa:amnezia/ppa >/dev/null 2>&1 || true
   DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1 || true
-  pkg_install amneziawg amneziawg-tools amneziawg-dkms \
-    || pkg_install amneziawg-tools amneziawg-dkms || true
+  # One package per call: pacman and apt fail a whole transaction when a
+  # single target is missing, and the tools without the thing that builds the
+  # interface are exactly the half-install this step is meant to avoid.
+  pkg_install amneziawg-tools || pkg_install amneziawg || true
+  pkg_install amneziawg-dkms || true
   hash -r 2>/dev/null || true
-  command -v awg-quick >/dev/null
+  awg_usable
 }
 
 awg_arch() {
@@ -529,7 +546,13 @@ awg_arch() {
     *)    set -- -S --needed --noconfirm ;;
   esac
   pac_wait || return 1
-  sudo -u "$builder" "$helper" "$@" amneziawg-tools amneziawg-go || true
+  # One package per call, for the same reason as above: amneziawg-tools comes
+  # from a binary repository on some of these systems and amneziawg-go only
+  # from the AUR, and one of them failing must not take the other with it.
+  # Getting only the tools is precisely how a host ends up with an awg-quick
+  # that cannot bring anything up.
+  sudo -u "$builder" "$helper" "$@" amneziawg-tools || true
+  sudo -u "$builder" "$helper" "$@" amneziawg-go || true
   hash -r 2>/dev/null || true
   # The module too, but only where it could build at all, and never as a
   # condition: awg-quick uses it when it is there and the userspace binary
@@ -537,14 +560,15 @@ awg_arch() {
   if [ -d "/usr/lib/modules/$(uname -r)/build" ]; then
     sudo -u "$builder" "$helper" "$@" amneziawg-dkms || true
   fi
-  command -v awg-quick >/dev/null
+  awg_usable
 }
 
 awg_install() {
-  if command -v awg-quick >/dev/null; then return 0; fi
-  pkg_install amneziawg-tools amneziawg-go || pkg_install amneziawg-tools || true
+  if awg_usable; then return 0; fi
+  pkg_install amneziawg-tools || true
+  pkg_install amneziawg-go || true
   hash -r 2>/dev/null || true
-  if command -v awg-quick >/dev/null; then return 0; fi
+  if awg_usable; then return 0; fi
   say "$M_AWGNONE"
   case "$(os_id)" in
     *ubuntu*) awg_ubuntu ;;
@@ -587,12 +611,17 @@ if yesno "$M_TOOLSASK"; then
   else ok "wireguard-tools" "$M_WGFAIL"; fi
 
   awg_install || true
-  if command -v awg-quick >/dev/null; then
+  if awg_usable; then
     # Which of the two is running matters enough to say: awg-quick falls back
     # to the userspace implementation by itself, and the tunnel works either
     # way, but one of them is several times faster than the other.
-    if [ -e /sys/module/amneziawg ]; then ok "amneziawg-tools" "$M_WGOK"
+    if awg_module; then ok "amneziawg-tools" "$M_WGOK"
     else ok "amneziawg-tools" "$M_AWGGO"; fi
+  elif command -v awg-quick >/dev/null; then
+    # The tools alone. `awg-quick up` on this host prints "Unknown device
+    # type" and stops, so calling it installed would be the same lie the panel
+    # used to tell.
+    ok "amneziawg-tools" "$M_AWGHALF"
   else
     # The failure names the system, because what to do next depends on it and
     # this line is the only thing the person reading it can send on.
