@@ -205,7 +205,19 @@ def tag_for(link, taken, prefix=OWNED):
     return tag
 
 
-def convert(body, warn=lambda s: None, exclude=None, prefix=OWNED, taken=None):
+def label_of(tag, prefix=OWNED):
+    """A tag without its ownership prefix — how one node is named to a person.
+
+    This is the key a hand-picked selection is stored under, so it has to be
+    the tag and not the provider's raw name: two nodes called the same thing
+    get `Germany` and `Germany 2`, and a selection keyed on the raw name could
+    not tell them apart.
+    """
+    return tag[len(prefix):] if tag.startswith(prefix) else tag
+
+
+def convert(body, warn=lambda s: None, exclude=None, prefix=OWNED, taken=None,
+            skip=None):
     """Every usable node of a subscription, in the order the provider listed.
 
     `exclude` is a regular expression matched against the provider's name for
@@ -214,6 +226,11 @@ def convert(body, warn=lambda s: None, exclude=None, prefix=OWNED, taken=None):
     one chosen — the tunnel then exits in the country it was meant to leave.
     Nothing here can tell where a node is; only its name can, and only the
     person reading it knows what the names mean.
+
+    `skip` is the other half of the same idea, chosen by hand instead of by
+    pattern: a set of labels (see `label_of`) left out of the result. A node it
+    names still gets its tag allocated before it is dropped, so leaving one out
+    does not renumber its namesakes and turn every other selection stale.
     """
     try:
         rx = re.compile(exclude, re.I) if exclude else None
@@ -222,13 +239,18 @@ def convert(body, warn=lambda s: None, exclude=None, prefix=OWNED, taken=None):
                          f"bad regular expression: {e}") from None
     outs = []
     taken = taken if taken is not None else set()
+    skip = set(skip or ())
     for link in links(body):
         name = node_name(link)
         if rx and rx.search(name):
             warn(f"{name}: исключён / excluded")
             continue
+        tag = tag_for(link, taken, prefix)
+        if label_of(tag, prefix) in skip:
+            warn(f"{name}: снят вручную / turned off by hand")
+            continue
         try:
-            outs.append(outbound(link, tag_for(link, taken, prefix)))
+            outs.append(outbound(link, tag))
         except Unsupported as e:
             warn(f"{urlsplit(link).scheme}://{urlsplit(link).hostname}: {e}")
         except Exception as e:  # a malformed link is one node, not the run

@@ -61,7 +61,7 @@ from urllib.parse import urlparse, parse_qs
 # it against the newest tag on GitHub, so a forgotten bump makes every install
 # claim to be older than it is and show a banner that never goes away. CI
 # refuses a tag push where the two disagree.
-VERSION = "1.5.1"
+VERSION = "1.5.2"
 RELEASES_URL = "https://api.github.com/repos/ChasoniCK/gateway-acl/releases/latest"
 RELEASES_PAGE = "https://github.com/ChasoniCK/gateway-acl/releases/latest"
 # The one address the update button may ever download from. The repository is
@@ -397,8 +397,21 @@ STRINGS = {
                         "не ходит ничего настоящего — и удаляется сразу после "
                         "рукопожатия.",
         "vpnErrUnreachable": "ни один узел не ответил",
-        "vpnNoTool": "на шлюзе не установлено: {tools} — туннели этих типов "
-                     "не поднимутся. Поставит установщик: sudo ./install.sh",
+        "vpnNoTool": "на шлюзе не установлено: {tools} — сохранённые туннели "
+                     "этих типов не поднимутся. Поставит установщик: "
+                     "sudo ./install.sh",
+        "vpnNoToolKind": "На шлюзе нет {tool}: профиль сохранится, но включить "
+                         "его будет нечем. Поставит sudo ./install.sh",
+        "vpnPickNodes": "узлы",
+        "vpnHideNodes": "свернуть",
+        "vpnNodesSave": "сохранить выбор",
+        "vpnNodeUp": "отвечает",
+        "vpnNodeDown": "молчит",
+        "vpnNodesWhat": "Снятые узлы не попадают в конфиг вовсе, поэтому группа "
+                        "не сможет их выбрать. Отметки «отвечает» и «молчит» — "
+                        "от последней проверки; узлы, до которых она не дошла, "
+                        "остаются без отметки. Хотя бы один узел должен "
+                        "остаться.",
         "vpnConfirmDisable": "Выключить последний активный туннель? Трафик пойдёт напрямую.",
         "vpnConfirmDelete": "Удалить этот туннель и его сохранённые данные? Если он активен, подключение будет переключено.",
         "vpnIpv6": "В конфиге нет полного маршрута IPv6",
@@ -674,9 +687,22 @@ STRINGS = {
                         "routed to 192.0.2.1 — where nothing real is ever "
                         "sent — and deleted again right after the handshake.",
         "vpnErrUnreachable": "no node answered",
-        "vpnNoTool": "not installed on the gateway: {tools} — tunnels of those "
-                     "kinds will not come up. The installer adds them: "
-                     "sudo ./install.sh",
+        "vpnNoTool": "not installed on the gateway: {tools} — the saved "
+                     "tunnels of those kinds will not come up. The installer "
+                     "adds them: sudo ./install.sh",
+        "vpnNoToolKind": "The gateway has no {tool}: the profile will be saved, "
+                         "but there is nothing to bring it up with. "
+                         "sudo ./install.sh adds it",
+        "vpnPickNodes": "nodes",
+        "vpnHideNodes": "collapse",
+        "vpnNodesSave": "save the selection",
+        "vpnNodeUp": "answers",
+        "vpnNodeDown": "silent",
+        "vpnNodesWhat": "A node turned off here does not reach the "
+                        "configuration at all, so the group cannot pick it. "
+                        "\"answers\" and \"silent\" come from the last check; "
+                        "nodes it did not reach carry no mark. At least one "
+                        "node has to stay.",
         "vpnConfirmDisable": "Disable the last active tunnel? Traffic will go direct.",
         "vpnConfirmDelete": "Delete this tunnel and its saved data? If it is active, the connection will switch.",
         "vpnIpv6": "The configuration has no full IPv6 route",
@@ -1864,6 +1890,8 @@ def install_update(tag):
 
 VPN_MAX = 128 << 10
 SUB_URL_MAX = 4096
+SUB_LABEL_MAX = 128
+SUB_NODES_MAX = 1024
 TUNNEL_ID_RE = re.compile(r"t[0-9a-f]{12}\Z")
 TUNNEL_KINDS = ("subscription", "wireguard", "amneziawg")
 TUNNEL_SUFFIXES = (".json", ".conf")
@@ -2048,6 +2076,26 @@ def check_subscription(url, exclude):
     return url, exclude
 
 
+def _skip_list(value):
+    """The stored by-hand selection, read defensively off a file on disk."""
+    if not isinstance(value, list):
+        return []
+    return [label for label in value
+            if isinstance(label, str) and 0 < len(label) <= SUB_LABEL_MAX
+            ][:SUB_NODES_MAX]
+
+
+def node_id(label):
+    """A short opaque name for one node, and the only one the browser learns.
+
+    The label itself cannot go on the wire: a link with no `#fragment` is named
+    after its own server, and a server address is the one thing about a
+    subscription no page is allowed to receive. A digest travels instead, and
+    the panel maps it back against the list it just built.
+    """
+    return hashlib.sha256(label.encode("utf-8")).hexdigest()[:16]
+
+
 def load_subscription_secret(tid):
     try:
         with open(tunnel_path(tid, ".json")) as f:
@@ -2057,6 +2105,51 @@ def load_subscription_secret(tid):
     if not isinstance(secret, dict) or not isinstance(secret.get("body"), str):
         raise VpnError("missing-secret")
     return secret
+
+
+def sub_prefix(tid):
+    return f"sub-{check_tunnel_id(tid)}-"
+
+
+def sub_convert(tid, secret, skip=None, taken=None):
+    """One subscription's outbounds, with everything it is stored with applied.
+
+    The single place a cached body turns into nodes: the provider's exclusion
+    regex and the by-hand selection are both part of what the subscription
+    *is*, and a caller that forgot one of them would quietly build a config the
+    panel does not claim to have built. `skip=()` asks for the whole list —
+    which is what listing the nodes to choose from needs, and nothing else.
+    """
+    return singbox_sub.convert(
+        secret["body"], exclude=secret.get("exclude"), prefix=sub_prefix(tid),
+        taken=taken,
+        skip=secret.get("skip") if skip is None else skip)
+
+
+def sub_labels(tid, secret):
+    """Every node the subscription offers, in order, whether picked or not."""
+    return [singbox_sub.label_of(out["tag"], sub_prefix(tid))
+            for out in sub_convert(tid, secret, skip=())]
+
+
+def sub_nodes(tid, secret):
+    """The node list as the settings page may see it: id, shown name, state.
+
+    No label and no address: a node the provider gave no name to is named
+    after its own server, so what is shown for one of those is its position in
+    the list, and what identifies it on the wire is a digest.
+    """
+    skip = set(_skip_list(secret.get("skip")))
+    up = secret.get("up") if isinstance(secret.get("up"), dict) else {}
+    prefix, nodes = sub_prefix(tid), []
+    for n, out in enumerate(sub_convert(tid, secret, skip=()), 1):
+        label = singbox_sub.label_of(out["tag"], prefix)
+        server = str(out.get("server") or "")
+        named = server and label.rsplit(" ", 1)[0] != server and label != server
+        nodes.append({"id": node_id(label), "name": label if named else f"#{n}",
+                      "on": label not in skip,
+                      "up": bool(up[label]) if label in up else None})
+    return nodes
 
 
 def build_singbox(rows, base=None, secrets_map=None):
@@ -2069,9 +2162,7 @@ def build_singbox(rows, base=None, secrets_map=None):
         tid = check_tunnel_id(row.get("id"))
         try:
             secret = getter(tid)
-            one = singbox_sub.convert(
-                secret["body"], exclude=secret.get("exclude"),
-                prefix=f"sub-{tid}-", taken=taken)
+            one = sub_convert(tid, secret, taken=taken)
         except VpnError:
             raise
         except Exception:
@@ -2235,15 +2326,18 @@ def vpn_add(body, runner=None, fetcher=None):
                 if (not isinstance(content, str)
                         or len(content.encode("utf-8")) > singbox_sub.SUB_BODY_MAX):
                     raise ValueError
-                outs = singbox_sub.convert(content, exclude=exclude,
-                                            prefix=f"sub-{tid}-")
+                outs = sub_convert(tid, {"body": content, "exclude": exclude},
+                                   skip=())
             except Exception:
                 raise VpnError("validation-failed") from None
             if not outs:
                 raise VpnError("validation-failed")
+            # A new subscription starts with every node it offers turned on;
+            # picking among them is a separate, deliberate act.
             row["nodes"] = len(outs)
             write_private(tunnel_path(tid, ".json"),
-                          {"url": url, "exclude": exclude, "body": content})
+                          {"url": url, "exclude": exclude, "body": content,
+                           "skip": []})
         else:
             config = body.get("config")
             try:
@@ -2589,13 +2683,20 @@ def vpn_refresh(tid, runner=None, applier=None, fetcher=None):
             if (not isinstance(content, str)
                     or len(content.encode("utf-8")) > singbox_sub.SUB_BODY_MAX):
                 raise ValueError
-            outs = singbox_sub.convert(content, exclude=exclude,
-                                        prefix=f"sub-{target['id']}-")
+            fresh_secret = {"url": url, "exclude": exclude, "body": content}
+            # The by-hand selection survives a refresh — that is the point of
+            # keying it on the label rather than on a position in the list —
+            # but only the part of it the provider still lists: a name that has
+            # gone would otherwise sit in the file for good.
+            offered = set(sub_labels(target["id"], fresh_secret))
+            skip = [label for label in _skip_list(old_secret.get("skip"))
+                    if label in offered]
+            outs = sub_convert(target["id"], fresh_secret, skip=skip)
         except Exception:
             raise VpnError("validation-failed") from None
         if not outs:
             raise VpnError("validation-failed")
-        secret = {"url": url, "exclude": exclude, "body": content}
+        secret = dict(fresh_secret, skip=skip)
         target["nodes"], target["error"] = len(outs), ""
         # The node list is a different one now, so the last probe measured a
         # subscription that no longer exists.
@@ -2628,7 +2729,9 @@ def vpn_action(action, body, runner=None, applier=None, fetcher=None):
                                                 fetcher),
                # The only one that neither starts nor stops anything, so it is
                # the only one that takes no applier.
-               "check": lambda: vpn_check(body.get("id"), runner)}
+               "check": lambda: vpn_check(body.get("id"), runner),
+               "nodes": lambda: vpn_nodes(body.get("id"), body.get("off"),
+                                          runner, applier)}
     try:
         call = actions[action]
     except (KeyError, TypeError):
@@ -2950,20 +3053,26 @@ def probe_nodes(outs, prober=None):
     them, and nobody watches a button for a minute and a half.
     """
     prober = prober or probe_tcp
-    seen, targets = set(), []
+    seen, targets = {}, []
     for out in outs:
         target = (out.get("server"), out.get("server_port"))
-        if not all(target) or target in seen:
+        if not all(target):
             continue
-        seen.add(target)
-        targets.append(target)
-        if len(targets) >= PROBE_NODES:
-            break
+        if target not in seen and len(targets) < PROBE_NODES:
+            seen[target] = None
+            targets.append(target)
     if not targets:
-        return 0, 0
+        return 0, 0, {}
     with futures.ThreadPoolExecutor(max_workers=PROBE_WORKERS) as pool:
         answers = list(pool.map(lambda t: bool(prober(*t)), targets))
-    return sum(answers), len(targets)
+    seen.update(zip(targets, answers))
+    # Back to the nodes: several of them share one address, and the one
+    # connection made for it is the answer for all of them. A node past the cap
+    # has no entry rather than a made-up one.
+    by_tag = {out["tag"]: seen[(out["server"], out["server_port"])]
+              for out in outs
+              if seen.get((out.get("server"), out.get("server_port"))) is not None}
+    return sum(answers), len(targets), by_tag
 
 
 def _probe_subscription(row, runner=None, prober=None):
@@ -2973,18 +3082,31 @@ def _probe_subscription(row, runner=None, prober=None):
     is whether *this* subscription is usable, and a base that fails to check
     for an unrelated reason would answer a different one.
     """
-    secret = load_subscription_secret(row["id"])
+    tid = row["id"]
+    secret = load_subscription_secret(tid)
     try:
-        outs = singbox_sub.convert(secret["body"],
-                                   exclude=secret.get("exclude"),
-                                   prefix=f"sub-{row['id']}-")
+        # Every node the subscription lists, not only the picked ones: the
+        # answer this produces is what somebody picks *from*, and a node
+        # nobody probed cannot be turned on with any confidence.
+        outs = sub_convert(tid, secret, skip=())
     except Exception:
         raise VpnError("validation-failed") from None
     if not outs:
         raise VpnError("validation-failed")
-    _check_singbox_candidate(singbox_sub.fresh(outs, IFACE), runner)
-    reach, _ = probe_nodes(outs, prober)
-    return ("ok" if reach else "unreachable"), reach, len(outs)
+    picked = sub_convert(tid, secret)
+    if not picked:
+        raise VpnError("validation-failed")
+    _check_singbox_candidate(singbox_sub.fresh(picked, IFACE), runner)
+    # Picked ones first, so that when the cap cuts the list short it cuts the
+    # nodes nobody chose — otherwise "отвечают 24 из 60" would be the answer
+    # for a subscription where all sixty work.
+    chosen = {out["tag"] for out in picked}
+    _, _, by_tag = probe_nodes(
+        picked + [out for out in outs if out["tag"] not in chosen], prober)
+    reach = sum(1 for tag in chosen if by_tag.get(tag))
+    prefix = sub_prefix(tid)
+    up = {singbox_sub.label_of(tag, prefix): ok for tag, ok in by_tag.items()}
+    return ("ok" if reach else "unreachable"), reach, len(picked), up
 
 
 def _probe_link(kind, stripped, address, runner=None, sender=None, wait=None):
@@ -3084,6 +3206,93 @@ def _probe_quick(row, runner=None, sender=None, wait=None):
     return _probe_link(row["kind"], stripped, address, runner, sender, wait)
 
 
+def vpn_node_list(tid):
+    """One subscription's nodes, browser-safe, for the settings page."""
+    with _vpn_lock:
+        row = _find_tunnel(load_tunnels(), tid)
+        if row["kind"] != "subscription":
+            raise VpnError("validation-failed")
+        secret = load_subscription_secret(row["id"])
+    try:
+        return sub_nodes(row["id"], secret)
+    except Exception:
+        raise VpnError("validation-failed") from None
+
+
+def _remember_probe(tid, up):
+    """Fold one probe's per-node result into the stored secret, nothing else.
+
+    Re-read and merged rather than written from the copy the probe was holding:
+    a refresh may have committed a whole new body while that probe was waiting
+    on sockets, and writing the old dict back would undo it. Called under
+    `_vpn_lock` for the same reason.
+    """
+    with contextlib.suppress(Exception):
+        secret = load_subscription_secret(tid)
+        offered = set(sub_labels(tid, secret))
+        kept = {label: bool(ok) for label, ok in up.items() if label in offered}
+        write_private(tunnel_path(tid, ".json"), dict(secret, up=kept))
+
+
+def vpn_nodes(tid, ids, runner=None, applier=None):
+    """Turn individual nodes of one subscription off and on by hand.
+
+    The same shape as a refresh, because it is the same event: the set of
+    outbounds the profile stands for changes, so an enabled profile goes
+    through a full switch with the secret written at commit and put back on
+    rollback, and a disabled one is only a file and a row.
+    """
+    with _vpn_lock:
+        old_rows = load_tunnels()
+        rows = [dict(row) for row in old_rows]
+        target = _find_tunnel(rows, tid)
+        if target["kind"] != "subscription":
+            raise VpnError("validation-failed")
+        path = tunnel_path(target["id"], ".json")
+        snapshot = _file_snapshot(path)
+        if snapshot is None:
+            raise VpnError("missing-secret")
+        old_secret = load_subscription_secret(tid)
+        if not isinstance(ids, list) or len(ids) > SUB_NODES_MAX:
+            raise VpnError("validation-failed")
+        wanted = {i for i in ids if isinstance(i, str)}
+        labels = sub_labels(tid, old_secret)
+        skip = [label for label in labels if node_id(label) in wanted]
+        # A subscription with nothing left in it is not a subscription; the
+        # way to have none of it is to disable or delete the profile.
+        if len(skip) >= len(labels):
+            raise VpnError("validation-failed")
+        secret = dict(old_secret, skip=skip)
+        try:
+            outs = sub_convert(tid, secret)
+        except Exception:
+            raise VpnError("validation-failed") from None
+        if not outs:
+            raise VpnError("validation-failed")
+        target["nodes"], target["error"] = len(outs), ""
+        # The summary counted a different set of nodes; the per-node readings
+        # in the secret are still true and are what the next choice is made on.
+        target["probe"], target["reach"] = "", 0
+        if not target["enabled"]:
+            try:
+                write_private(path, secret)
+                save_tunnels(rows)
+            except Exception:
+                _restore_file(path, snapshot)
+                raise VpnError("start-failed") from None
+            return target
+
+        def secrets_for(profile_id):
+            return secret if profile_id == target["id"] else \
+                load_subscription_secret(profile_id)
+
+        committed = switch_backend(
+            old_rows, rows, runner, applier, secrets_for,
+            before_commit=lambda: write_private(path, secret),
+            on_rollback=lambda: _restore_file(path, snapshot))
+        return _find_tunnel(committed, tid)
+
+
 def vpn_check(tid, runner=None, prober=None, sender=None):
     """Report whether one profile would work. Never changes what is running.
 
@@ -3097,11 +3306,12 @@ def vpn_check(tid, runner=None, prober=None, sender=None):
     with _vpn_lock:
         target = dict(_find_tunnel(load_tunnels(), tid))
     reach = nodes = 0
+    up = None
     try:
         with _probe_lock:
             if target["kind"] == "subscription":
-                probe, reach, nodes = _probe_subscription(target, runner,
-                                                          prober)
+                probe, reach, nodes, up = _probe_subscription(target, runner,
+                                                              prober)
             else:
                 probe = _probe_quick(target, runner, sender)
     except VpnError as e:
@@ -3116,6 +3326,8 @@ def vpn_check(tid, runner=None, prober=None, sender=None):
         row["probe"], row["reach"] = probe, reach
         if nodes:
             row["nodes"] = nodes
+        if up is not None:
+            _remember_probe(tid, up)
         # Only the probe fields move: a check is a reading, and a reading must
         # not switch a backend, close transit or clear somebody else's error.
         save_tunnels(rows)
@@ -3784,6 +3996,9 @@ CSS = TOKENS + """
  .sheet>div{background:var(--panel);border-radius:14px;box-shadow:var(--sh);
         width:min(30rem,100%);max-height:86vh;max-height:86dvh;
         overflow:auto;padding:var(--s5)}
+ /* Фокус на нём — программный, чтобы открытые настройки не начинались с
+    распахнутого нативного выбора языка; рамку он при этом рисовать не должен. */
+ .sheet>div:focus{outline:none}
 
  /* 11: above the sticky header (10) so a hover card near the top of a
     scrolled chart is not drawn under it, below the settings sheet (20) so
@@ -4050,6 +4265,13 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  .vpnlist .row{align-items:flex-start;flex-wrap:wrap}
  .vpnmeta{min-width:12rem;flex:1}
  .vpnacts{display:flex;gap:var(--s1);flex-wrap:wrap;justify-content:flex-end}
+ /* Узлы одной подписки: вложенный список под её строкой, отступлен слева —
+    тот же приём, что и у .list.inset, показывает, чьи они. */
+ .nodes{margin:0 0 var(--s3) var(--s5);display:flex;flex-direction:column}
+ .noderow{display:flex;align-items:center;gap:var(--s2);min-height:36px;
+          padding:var(--s1) 0;border-bottom:.5px solid var(--line);cursor:pointer}
+ .noderow:last-of-type{border-bottom:0}
+ .noderow .sp{flex:1;min-width:0;overflow-wrap:anywhere}
  .sheet input:disabled{opacity:1;color:var(--dim);-webkit-text-fill-color:var(--dim);
    cursor:not-allowed}
  a{color:var(--blue)}
@@ -4076,7 +4298,8 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
 </header>
 <div id=banners></div>
 <div class=sheet id=sheet hidden onclick="if(event.target===this)closeSheet()">
- <div>
+ <div id=sheetbox tabindex=-1 role=dialog aria-modal=true
+   aria-label="{{t.settingsTitle}}">
   <div class=shead><h1>{{t.settingsTitle}}</h1><span class=sp></span>
    <button class=btn onclick=closeSheet()>{{t.close}}</button></div>
 
@@ -4133,6 +4356,7 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
      <textarea id="vpnSecret" class=field autocomplete="off" spellcheck=false
        placeholder="{{t.vpnConfigPh}}"></textarea>
     </div>
+    <p id="vpnToolHint" class="bad hint" hidden></p>
     <div class=srow2><span id="vpnStatus" class="hint sp" role="status"
       aria-live="polite"></span>
      <button id="vpnAdd" class="btn tinted" onclick=vpnAddProfile()>{{t.vpnAdd}}</button></div>
@@ -4520,9 +4744,74 @@ const vpnButton = (text, action, bad=false) => {
   b.type = 'button'; b.disabled = vpnBusy; b.onclick = action;
   return b;
 };
+// Раскрытая подписка: чей список узлов показан, что в нём и что снято. NODES
+// живёт отдельно от VPN, потому что приходит отдельным запросом и только по
+// просьбе — узлы читаются из кэша подписки, и платить за это на каждом открытии
+// настроек для каждого профиля незачем.
+let openNodes = null, NODES = null, nodesOff = new Set();
+const toggleNodes = id => {
+  if (openNodes === id) { openNodes = NODES = null; renderVpn(); return; }
+  openNodes = id; NODES = null; renderVpn(); loadNodes(id);
+};
+const loadNodes = async id => {
+  try {
+    const r = await fetch('/vpn?id=' + encodeURIComponent(id));
+    if (r.status === 401) { location.reload(); return; }
+    const data = await r.json();
+    if (!r.ok) throw new Error(vpnError(data.error));
+    if (openNodes !== id) return;          // успели закрыть, пока читали
+    NODES = data.nodes;
+    nodesOff = new Set(NODES.filter(n => !n.on).map(n => n.id));
+    renderVpn();
+  } catch (e) {
+    if (openNodes === id) vpnStatus.textContent = e.message || T.vpnErrStart;
+  }
+};
+const nodeList = p => {
+  const box = vpnNode('div', 'nodes');
+  if (!NODES) { box.append(vpnNode('p', 'hint', T.vpnLoading)); return box; }
+  box.append(vpnNode('p', 'hint', T.vpnNodesWhat));
+  NODES.forEach(n => {
+    const line = vpnNode('label', 'noderow');
+    const box2 = document.createElement('input');
+    box2.type = 'checkbox'; box2.className = 'sw'; box2.checked = !nodesOff.has(n.id);
+    box2.disabled = vpnBusy;
+    box2.onchange = () => {
+      if (box2.checked) nodesOff.delete(n.id); else nodesOff.add(n.id);
+      nodesSave.disabled = vpnBusy || nodesOff.size >= NODES.length;
+    };
+    line.append(box2, vpnNode('span', 'sp', n.name));
+    // Что показала последняя проверка. Ничего — значит этот узел ещё не
+    // спрашивали: у проверки есть потолок, и дальше него она не ходит.
+    if (n.up === true) line.append(vpnNode('span', 'good sec', T.vpnNodeUp));
+    else if (n.up === false) line.append(vpnNode('span', 'bad sec', T.vpnNodeDown));
+    box.append(line);
+  });
+  const foot = vpnNode('div', 'vpnacts');
+  const save = vpnButton(T.vpnNodesSave, () =>
+    vpnCall('nodes', {id: p.id, off: [...nodesOff]}).then(ok => {
+      if (ok) loadNodes(p.id);
+    }));
+  save.id = 'nodesSave';
+  save.disabled = vpnBusy || nodesOff.size >= NODES.length;
+  foot.append(save);
+  box.append(foot);
+  return box;
+};
+
+// Тип профиля → ключ в VPN.tools → имя программы, которой он запускается.
+const TOOL_OF = [['subscription', 'singbox', 'sing-box'],
+                 ['wireguard', 'wireguard', 'wg-quick'],
+                 ['amneziawg', 'amneziawg', 'awg-quick']];
 const vpnFields = () => {
-  const sub = vpnKind.value === 'subscription';
+  const kind = vpnKind.value, sub = kind === 'subscription';
   vpnSubFields.hidden = !sub; vpnQuickFields.hidden = sub;
+  // Про недостающую программу — здесь, где выбирают тип: сохранить профиль
+  // такого типа всё ещё можно, а включить его будет нечем.
+  const entry = TOOL_OF.find(([k]) => k === kind);
+  const missing = entry && (VPN && VPN.tools || {})[entry[1]] === false;
+  vpnToolHint.hidden = !missing;
+  if (missing) vpnToolHint.textContent = T.vpnNoToolKind.replace('{tool}', entry[2]);
 };
 const renderVpn = () => {
   vpnList.replaceChildren();
@@ -4533,12 +4822,15 @@ const renderVpn = () => {
     : backend.active ? T.vpnRunning.replace('{kind}', VPN_TYPES[backend.kind] || backend.kind)
     : vpnError(backend.error || 'stopped');
   // Панель умеет управлять туннелями, но запускает их чужими программами.
-  // Без sing-box любая подписка отваливается на «нужная программа не
-  // установлена», и назвать недостающее — единственный способ это объяснить.
-  const tools = VPN.tools || {};
-  const gone = [['singbox', 'sing-box'], ['wireguard', 'wg-quick'],
-                ['amneziawg', 'awg-quick']]
-    .filter(([k]) => tools[k] === false).map(([, name]) => name);
+  // Красным — только то, чего не хватает уже сохранённому профилю: это его
+  // «включить» не сработает. Отсутствие awg-quick у того, у кого нет ни одного
+  // профиля AmneziaWG, — не авария, и красная строка над списком, которую
+  // нечем убрать, быстро перестаёт что-либо значить. Про такое говорится
+  // ровно там, где оно понадобится: под выбором типа в форме добавления.
+  const kinds = new Set(VPN.profiles.map(p => p.kind));
+  const gone = TOOL_OF.filter(([kind, key]) =>
+      (VPN.tools || {})[key] === false && kinds.has(kind))
+    .map(([, , name]) => name);
   if (gone.length)
     vpnList.append(vpnNode('p', 'bad hint',
       T.vpnNoTool.replace('{tools}', gone.join(', '))));
@@ -4573,10 +4865,15 @@ const renderVpn = () => {
     }));
     else acts.append(vpnButton(T.vpnEnable, () => vpnCall('enable', {id:p.id})));
     acts.append(vpnButton(T.vpnCheck, () => vpnCall('check', {id:p.id})));
-    if (p.kind === 'subscription')
+    if (p.kind === 'subscription') {
       acts.append(vpnButton(T.vpnRefresh, () => vpnCall('refresh', {id:p.id})));
+      acts.append(vpnButton(openNodes === p.id ? T.vpnHideNodes : T.vpnPickNodes,
+        () => toggleNodes(p.id)));
+    }
     acts.append(vpnButton(T.vpnDelete, () => vpnDeleteProfile(p), true));
     row.append(acts); vpnList.append(row);
+    if (p.kind === 'subscription' && openNodes === p.id)
+      vpnList.append(nodeList(p));
   });
   vpnAdd.disabled = vpnBusy;
   vpnFields();
@@ -4627,7 +4924,11 @@ const vpnDeleteProfile = p => {
 };
 
 // details закрывался сам; шит — нет, поэтому Esc и клик мимо пишутся руками.
-const openSheet = () => { sheet.hidden = false; s_lang.focus(); loadVpn(); };
+// Фокус на сам шит, а не на первый select: на телефоне фокус в <select> —
+// это сразу открытое колесо выбора языка поверх настроек, которые человек
+// только что открыл. Диалогу фокус всё равно нужен — с него начинают и Tab,
+// и озвучивание, — поэтому его берёт контейнер с tabindex=-1.
+const openSheet = () => { sheet.hidden = false; sheetbox.focus(); loadVpn(); };
 const closeSheet = () => {
   sheet.hidden = true; vpnUrl.value = ''; vpnSecret.value = '';
 };
@@ -5040,7 +5341,22 @@ class H(BaseHTTPRequestHandler):
             s["csrf"] = csrf_for(self._session_token())
             self._send(200, json.dumps(s), "application/json")
         else:
-            s = vpn_public()
+            # /vpn?id=… is one subscription's node list, asked for only when
+            # somebody opens it: it means reading a cached body and converting
+            # it, and the settings page has no business paying for that on
+            # every open for every profile.
+            tid = parse_qs(urlparse(self.path).query).get("id", [None])[0]
+            if tid is None:
+                s = vpn_public()
+            else:
+                try:
+                    s = {"id": check_tunnel_id(tid),
+                         "nodes": vpn_node_list(tid)}
+                except (VpnError, ValueError) as e:
+                    code = str(e) if str(e) in SAFE_VPN_ERRORS else "invalid-state"
+                    self._send(409, json.dumps({"ok": False, "error": code}),
+                               "application/json")
+                    return
             s["csrf"] = csrf_for(self._session_token())
             self._send(200, json.dumps(s), "application/json")
 
@@ -6144,17 +6460,22 @@ PersistentKeepalive = 25
             CFG["vpn_mark"], _vpn_closed = old_mark, old_closed
 
     # --- checking a profile without switching onto it ---
-    assert probe_nodes([], lambda *a: True) == (0, 0)
-    assert probe_nodes([{"server": "a", "server_port": 1},
-                        {"server": "a", "server_port": 1},
-                        {"server": "b", "server_port": 2},
-                        {"server": "", "server_port": 3}],
-                       lambda host, port: host == "a") == (1, 2), \
-        "the same address and port is one node, and a blank one is none"
-    assert probe_nodes([{"server": f"h{i}", "server_port": 1}
-                        for i in range(PROBE_NODES * 3)],
-                       lambda *a: True) == (PROBE_NODES, PROBE_NODES), \
+    assert probe_nodes([], lambda *a: True) == (0, 0, {})
+    shared = [{"tag": "one", "server": "a", "server_port": 1},
+              {"tag": "two", "server": "a", "server_port": 1},
+              {"tag": "three", "server": "b", "server_port": 2},
+              {"tag": "four", "server": "", "server_port": 3}]
+    reach, asked, by_tag = probe_nodes(shared, lambda host, port: host == "a")
+    assert (reach, asked) == (1, 2), \
+        "the same address and port is one connection, and a blank one is none"
+    assert by_tag == {"one": True, "two": True, "three": False}, by_tag
+    long_list = [{"tag": f"t{i}", "server": f"h{i}", "server_port": 1}
+                 for i in range(PROBE_NODES * 3)]
+    reach, asked, by_tag = probe_nodes(long_list, lambda *a: True)
+    assert (reach, asked) == (PROBE_NODES, PROBE_NODES), \
         "a long subscription must not turn one button into a long wait"
+    assert len(by_tag) == PROBE_NODES, \
+        "a node past the cap gets no reading rather than a made-up one"
 
     with tempfile.TemporaryDirectory() as td:
         old_paths = TUNNELS, TUNNEL_DIR, SINGBOX_CONFIG
@@ -6253,6 +6574,83 @@ PersistentKeepalive = 25
 
     assert quick_address(wg) == "10.66.66.5/32"
     assert quick_address("[Interface]\nPrivateKey = x\n") == ""
+
+    # --- picking nodes of a subscription by hand ---
+    assert _skip_list("Germany") == [] and _skip_list(None) == []
+    assert _skip_list(["ok", 7, "", "x" * (SUB_LABEL_MAX + 1), "fine"]) == \
+        ["ok", "fine"], "the stored selection is read defensively"
+    assert node_id("Germany") == node_id("Germany") != node_id("Germany 2")
+
+    with tempfile.TemporaryDirectory() as td:
+        old_paths = TUNNELS, TUNNEL_DIR, SINGBOX_CONFIG
+        TUNNELS = os.path.join(td, "tunnels.json")
+        TUNNEL_DIR = os.path.join(td, "tunnels")
+        SINGBOX_CONFIG = os.path.join(td, "sing-box.json")
+        try:
+            save_tunnels([])
+            uid = "5eb99d66-0000-0000-0000-000000000000"
+            # Two nodes the provider named, two it named the same, and one it
+            # did not name at all.
+            body = "\n".join((
+                f"vless://{uid}@a.example:443?security=tls#Frankfurt",
+                f"vless://{uid}@b.example:443?security=tls#Amsterdam",
+                f"vless://{uid}@c.example:443?security=tls#Amsterdam",
+                f"vless://{uid}@secret.example:443?security=tls"))
+            picker = vpn_add({"kind": "subscription", "name": "picker",
+                              "url": "https://provider.example/token"},
+                             fetcher=lambda url: body)
+            tid = picker["id"]
+            assert picker["nodes"] == 4, "a new subscription starts whole"
+            nodes = vpn_node_list(tid)
+            assert [n["name"] for n in nodes] == \
+                ["Frankfurt", "Amsterdam", "Amsterdam 2", "#4"], nodes
+            assert all(n["on"] and n["up"] is None for n in nodes)
+            page = json.dumps(nodes)
+            for leaked in ("secret.example", "a.example", uid):
+                assert leaked not in page, "a node's address reached the page"
+
+            off = [n["id"] for n in nodes if n["name"] in ("Amsterdam", "#4")]
+            after = vpn_nodes(tid, off)
+            assert after["nodes"] == 2, after
+            secret = load_subscription_secret(tid)
+            assert secret["skip"] == ["Amsterdam", "secret.example"], secret["skip"]
+            kept = [singbox_sub.label_of(o["tag"], sub_prefix(tid))
+                    for o in sub_convert(tid, secret)]
+            assert kept == ["Frankfurt", "Amsterdam 2"], kept
+            # Dropping one namesake must not renumber the other, or every
+            # stored selection would go stale on the next save.
+            assert [n["name"] for n in vpn_node_list(tid)] == \
+                ["Frankfurt", "Amsterdam", "Amsterdam 2", "#4"]
+            assert [n["on"] for n in vpn_node_list(tid)] == \
+                [True, False, True, False]
+
+            try:
+                vpn_nodes(tid, [n["id"] for n in nodes])
+                raise AssertionError("a subscription with no nodes was accepted")
+            except VpnError as e:
+                assert str(e) == "validation-failed"
+            assert load_subscription_secret(tid)["skip"] == \
+                ["Amsterdam", "secret.example"], "a refused selection was written"
+
+            # A refresh keeps the choice, and forgets only what the provider
+            # has stopped listing.
+            vpn_refresh(tid, fetcher=lambda url: body.replace(
+                f"vless://{uid}@secret.example:443?security=tls", "").strip())
+            assert load_subscription_secret(tid)["skip"] == ["Amsterdam"]
+            assert _find_tunnel(load_tunnels(), tid)["nodes"] == 2
+
+            def answers(host, port):
+                return host != "b.example"
+
+            checked = vpn_check(tid, runner=lambda argv, **k:
+                                subprocess.CompletedProcess(argv, 0, "", ""),
+                                prober=answers)
+            assert (checked["reach"], checked["nodes"]) == (2, 2), checked
+            marks = {n["name"]: n["up"] for n in vpn_node_list(tid)}
+            assert marks == {"Frankfurt": True, "Amsterdam": False,
+                             "Amsterdam 2": True}, marks
+        finally:
+            TUNNELS, TUNNEL_DIR, SINGBOX_CONFIG = old_paths
 
     assert accrue(0, 100) == 100
     assert accrue(100, 250) == 150

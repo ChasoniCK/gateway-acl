@@ -194,6 +194,19 @@ health check, not a start — and the callers that started something pass the
 constant. `BACKEND_WAIT` is a module global resolved in the body, never a default
 argument, because `selftest()` sets it to 0.
 
+**A subscription's node selection lives with the subscription, not in the
+catalog.** `tunnels/<id>.json` holds `skip` (labels the user turned off) and `up`
+(what the last probe found per label) beside the link and the cached body;
+`_tunnel_row()` whitelists the catalog and would drop them anyway. A *label* is
+an outbound tag minus its `sub-<id>-` prefix — `Germany` / `Germany 2` — and
+`convert()` allocates the tag before honouring `skip`, so dropping one node never
+renumbers its namesakes and never invalidates the other stored labels. The label
+does **not** go to the browser: a link with no `#fragment` is named after its own
+server, so the page gets `node_id()` (a digest) plus a name that falls back to
+`#N` whenever the label is the address. Every read of a cached body goes through
+`sub_convert()`, which applies both the exclusion regex and `skip` — a caller
+that forgets one builds a config the panel does not claim to have built.
+
 **A probe is a reading and changes nothing.** `vpn_check()` answers "would this
 profile work" while the live backend keeps running: a subscription is converted
 into a `fresh()` config of its own, checked by `sing-box check` and knocked on
@@ -252,6 +265,12 @@ older version.
 - README.md is primary; README.ru.md is a full translation, not a summary — user-visible
   changes need both. `AGENTS.md` is a byte-for-byte copy of this file with its first
   line swapped; regenerate it rather than editing it twice.
+- Never focus a `<select>` to move focus into something: on a phone that is an
+  open native picker, which is what greeted anyone opening Settings before
+  v1.5.2. The sheet's own container carries `tabindex=-1` for this.
+- A missing tool is only red when a *saved* profile needs it. A red line nobody
+  can act on — "install awg-quick" to somebody who has never wanted AmneziaWG —
+  is a line that trains people to ignore the red lines that matter.
 - The page must not scroll sideways on a phone. Two rules that keep it that way:
   a grid column is `minmax(0,1fr)` and never `1fr` (`1fr` is `minmax(auto,1fr)`,
   and `auto` is the item's min-content — one `white-space:nowrap` line is enough

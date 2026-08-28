@@ -536,6 +536,34 @@ the panel. The installer copies and self-tests the converter and installs the
 programs the panel shells out to, but does not fetch a subscription or restart a
 tunnel during an update.
 
+## Picking a subscription's nodes by hand
+
+The selection is stored in the subscription's own owner-only file, next to the
+link and the cached body, as a list of labels — a label being an outbound's tag
+without its ownership prefix, which is what makes `Germany` and `Germany 2`
+distinguishable where the provider's raw name is not. `convert()` allocates a
+node's tag *before* deciding whether the selection drops it, so leaving one out
+does not renumber its namesakes and turn every other stored label stale.
+
+The label itself never reaches the browser. A link with no `#fragment` is named
+after its own server, and a server address is the one thing about a subscription
+no page may receive, so the page is given a digest of the label as an id and a
+name that is the label only when it demonstrably is not the address; otherwise
+it is the node's position. A saved selection arrives back as ids and is resolved
+against the list the panel has just built from the same body.
+
+Changing the selection is the same event as a refresh — the set of outbounds the
+profile stands for changes — so it takes the same path: a disabled profile is a
+file and a row, and an enabled one goes through a full switch with the secret
+written at commit and put back on rollback. A selection that leaves nothing
+behind is refused; the way to use none of a subscription is to disable or delete
+it.
+
+A check writes what it found per node into the same file, merged into a freshly
+re-read copy rather than the one it was holding, because a refresh may have
+committed a whole new body while it waited on sockets. Picked nodes are probed
+first, so that when the cap cuts the list short it cuts the ones nobody chose.
+
 ## Checking a profile without switching onto it
 
 A pool of saved profiles is only useful if one of them can be tried without

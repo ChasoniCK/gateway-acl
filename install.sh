@@ -103,7 +103,10 @@ if [ "$UILANG" = en ]; then
   M_SBUNIT="unit written"; M_SBUNITKEPT="unit already present"
   M_SBUNITOWN="existing unit pointed at the replaced binary, ExecStart overridden"
   M_WGOK="ok"; M_WGFAIL="not installed — WireGuard profiles will not come up"
-  M_AWGFAIL="not installed — AmneziaWG profiles will not come up; the package is"
+  M_AWGNONE="AmneziaWG is in no distribution's own archive. Ubuntu has it in the project's PPA; elsewhere it is built by hand."
+  M_AWGPPA="add ppa:amnezia/ppa to this system's apt sources and install from it?"
+  M_AWGBATCH="not installed — a third-party apt source is not added unattended; re-run without --yes"
+  M_AWGFAIL="not installed — AmneziaWG profiles will not come up. Build: https://github.com/amnezia-vpn/amneziawg-tools ; system:"
   M_ONLYLIST="After this, ONLY the devices on the list will route through this host."
   M_SEEN="Currently visible on the network:"
   M_NOARP="ARP table is empty — add devices from the panel later."
@@ -162,7 +165,10 @@ else
   M_SBUNIT="юнит записан"; M_SBUNITKEPT="юнит уже есть"
   M_SBUNITOWN="юнит указывал на заменённый бинарник, ExecStart переопределён"
   M_WGOK="ok"; M_WGFAIL="не установлен — профили WireGuard не поднимутся"
-  M_AWGFAIL="не установлен — профили AmneziaWG не поднимутся; пакет"
+  M_AWGNONE="AmneziaWG нет в собственных репозиториях дистрибутивов. У Ubuntu он в PPA проекта, в остальных случаях собирается руками."
+  M_AWGPPA="добавить ppa:amnezia/ppa в источники apt этой системы и поставить оттуда?"
+  M_AWGBATCH="не установлен — сторонний источник apt в неинтерактивном режиме не добавляется; запустите без --yes"
+  M_AWGFAIL="не установлен — профили AmneziaWG не поднимутся. Собрать: https://github.com/amnezia-vpn/amneziawg-tools ; система:"
   M_ONLYLIST="После установки через этот хост пойдут ТОЛЬКО те, кто в списке."
   M_SEEN="Сейчас в сети видно:"
   M_NOARP="ARP-таблица пуста — добавите устройства через панель."
@@ -412,11 +418,51 @@ EOF
   fi
 }
 
+os_id() { # os_id -> "ubuntu debian" and so on, for the one case that differs
+  ( [ -r /etc/os-release ] || exit 0
+    # In a subshell on purpose: this file sets ID, NAME, VERSION and more, and
+    # none of that belongs in the installer's own scope.
+    # shellcheck source=/dev/null
+    . /etc/os-release
+    printf '%s %s' "${ID:-}" "${ID_LIKE:-}" )
+}
+
 pkg_install() { # pkg_install pkg... -> quietly, and never fatal
   if   command -v pacman  >/dev/null; then pacman -S --needed --noconfirm "$@" >/dev/null 2>&1
   elif command -v apt-get >/dev/null; then
     DEBIAN_FRONTEND=noninteractive apt-get install -y "$@" >/dev/null 2>&1
   else return 1; fi
+}
+
+# AmneziaWG is in no distribution's own archive: it is a kernel module plus a
+# fork of wireguard-tools, and only Ubuntu has it packaged anywhere official —
+# in the project's own PPA. Adding that PPA is a standing change to somebody's
+# apt sources, which is not something an unattended upgrade may decide, so it
+# is offered only when there is a person at the keyboard to say yes.
+awg_install() {
+  if command -v awg-quick >/dev/null; then return 0; fi
+  pkg_install amneziawg-tools amneziawg-dkms || pkg_install amneziawg-tools || true
+  hash -r 2>/dev/null || true
+  if command -v awg-quick >/dev/null; then return 0; fi
+  say "$M_AWGNONE"
+  case "$(os_id)" in
+    *ubuntu*) ;;
+    *) return 1 ;;
+  esac
+  if [ "$YES" = 1 ]; then
+    ok "amneziawg-tools" "$M_AWGBATCH"
+    return 1
+  fi
+  command -v add-apt-repository >/dev/null \
+    || pkg_install software-properties-common || true
+  command -v add-apt-repository >/dev/null || return 1
+  yesno "$M_AWGPPA" || return 1
+  add-apt-repository -y ppa:amnezia/ppa >/dev/null 2>&1 || true
+  DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1 || true
+  pkg_install amneziawg amneziawg-tools amneziawg-dkms \
+    || pkg_install amneziawg-tools amneziawg-dkms || true
+  hash -r 2>/dev/null || true
+  command -v awg-quick >/dev/null
 }
 
 step "$M_TOOLS"
@@ -452,14 +498,13 @@ if yesno "$M_TOOLSASK"; then
   if command -v wg-quick >/dev/null; then ok "wireguard-tools" "$M_WGOK"
   else ok "wireguard-tools" "$M_WGFAIL"; fi
 
-  # AmneziaWG is not in the distributions' own archives; where it is packaged
-  # at all it is under these names. Best effort, and the message names the
-  # package so somebody can go and get it.
-  command -v awg-quick >/dev/null \
-    || pkg_install amneziawg-tools amneziawg-dkms \
-    || pkg_install amneziawg-tools || true
+  awg_install || true
   if command -v awg-quick >/dev/null; then ok "amneziawg-tools" "$M_WGOK"
-  else ok "amneziawg-tools" "$M_AWGFAIL amneziawg-tools"; fi
+  else
+    # The failure names the system, because what to do next depends on it and
+    # this line is the only thing the person reading it can send on.
+    ok "amneziawg-tools" "$M_AWGFAIL $(os_id)"
+  fi
 else
   ok "sing-box / wireguard" "$M_TOOLSSKIP"
 fi

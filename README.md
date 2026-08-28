@@ -63,6 +63,7 @@ device ──► this Linux host ──► uplink or tunnel (sing-box / WireGuar
   with rollback if the candidate does not come up. A *check* button answers
   whether a profile works **without** switching the gateway onto it, so a pool
   of subscriptions and profiles can be worked through without breaking anything.
+  A subscription can be expanded to pick by hand which of its nodes to use.
 - **Turn everyone off at once**, except the address that pressed the button.
   The same button brings them back.
 - **A warning when an address is answering as somebody else** — the entry is
@@ -148,9 +149,16 @@ in that step can fail the install: an upstream that happens to be down must not
 cost you your access control. The installer still does not fetch a subscription
 or rewrite a tunnel's config — that is the panel's job alone.
 
-Tunnel setup is under **Settings → Tunnels**. Anything missing from the list
-above is named there, in the tunnel list — the only trace of it before was "the
-required program is not installed" on every attempt to enable a tunnel.
+Tunnel setup is under **Settings → Tunnels**. A program a *saved* profile is
+missing is named in red above the list, because that profile's *enable* will not
+work. A kind you do not use yet is mentioned where you would reach for it —
+under the type selector in the add form.
+
+`amneziawg-tools` is in no distribution's own archive: Ubuntu has it in the
+project's PPA (the installer offers to add it — but only with a person at the
+keyboard, never during a `--yes` upgrade), and elsewhere it is built by hand. If
+it could not be installed, the installer prints which system this is, which is
+enough to know what to do next.
 
 Each subscription has its own HTTPS link and optional exclusion regular
 expression. Several may be enabled together: their nodes are merged into the
@@ -179,6 +187,18 @@ custom table and all `PreUp`/`PostUp`/`PreDown`/`PostDown` hooks are refused;
 `SaveConfig` is refused too. Missing `::/0` is shown as an IPv6 warning. The
 panel uses fixed `wg-quick`/`awg-quick` commands and never runs text from a
 profile as a shell command.
+
+A subscription can be **expanded** — the *nodes* button — to pick which of its
+servers to connect to. A node turned off here does not reach the configuration at
+all, so the `urltest` group cannot choose it: the same thing the exclusion regular
+expression does, but one at a time and without guessing a pattern. Each node
+carries the mark from the last check — *answers* or *silent* — so the choice is
+made by looking at the result rather than at the name. The selection lives in the
+subscription's owner-only file beside its link and survives a refresh: it is keyed
+on the node's name rather than its position in the list, and a refresh prunes from
+it only what the provider has stopped listing. There is no such thing as an empty
+subscription — at least one node has to stay; to use none of it, disable or delete
+the profile.
 
 A **check** button sits on every profile and switches nothing — it answers
 "would this one work" while the current tunnel keeps running. A subscription is
