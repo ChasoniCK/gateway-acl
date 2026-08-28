@@ -1264,12 +1264,13 @@ _sessions.update(_load_sessions())
 
 def note_fail(ip):
     n, until = _fails.get(ip, (0, 0))
-    n = 1 if 0 < until < time.time() else n + 1
-    _fails[ip] = (n, time.time() + FAIL_BLOCK if n >= FAIL_LIMIT else until)
+    n = 1 if 0 < until < time.monotonic() else n + 1
+    _fails[ip] = (n, time.monotonic() + FAIL_BLOCK
+                  if n >= FAIL_LIMIT else until)
 
 
 def fail_blocked(ip):
-    return time.time() < _fails.get(ip, (0, 0))[1]
+    return time.monotonic() < _fails.get(ip, (0, 0))[1]
 
 
 # --- nftables ---------------------------------------------------------------
@@ -1676,9 +1677,14 @@ def flush(force=False):
     record the last five minutes: hundreds of megabytes a day onto the flash of
     a machine that is never turned off. So traffic.json is written when a day
     closes or a month is folded, and today.json on the clock.
+
+    On the monotonic clock, not the wall one. A wall clock can step backwards,
+    and one NTP correction of an hour put `_flushed` an hour into the future,
+    so this returned False for an hour: the history stayed in memory the whole
+    time, and a power cut in that window took all of it.
     """
     global _flushed, _dirty, _cold
-    if not _dirty or (not force and time.time() - _flushed < FLUSH_EVERY):
+    if not _dirty or (not force and time.monotonic() - _flushed < FLUSH_EVERY):
         return False
     if _cold:
         write_atomic(TRAFFIC, {"days": {k: v for k, v in _hist["days"].items()
@@ -1686,7 +1692,7 @@ def flush(force=False):
         _cold = False
     write_atomic(TODAY, {"date": _hot_date, "day": _hist["days"].get(_hot_date, {}),
                          "seen": _hist["seen"], "last": _hist["last"]})
-    _flushed, _dirty = time.time(), False
+    _flushed, _dirty = time.monotonic(), False
     return True
 
 
@@ -1718,7 +1724,7 @@ def apply_deltas(cur, last, day, devs):
 
 _rate = {}              # ip -> [up B/s, down B/s], what the panel calls "now"
 _pend = {}              # bytes seen since the window the rates were last cut on
-_rate_at = time.time()
+_rate_at = time.monotonic()
 _hours = {}             # "YYYY-MM-DD HH" -> {ip: [up, down]}, memory only
 
 
@@ -1730,6 +1736,10 @@ def rates(moved, devs, now):
     are therefore held in `_pend` until the window is wide enough to divide by.
     Otherwise two refreshes in a row would report a wild number, or drop the
     bytes that fell between them on the floor.
+
+    `now` is the monotonic clock, because this divides by it. On the wall clock
+    a step backwards makes `dt` negative, and the page's "now" column then sits
+    on its last figure for the length of the step.
     """
     global _rate_at
     for ip, (u, d) in moved.items():
@@ -1839,10 +1849,14 @@ def poll(force=False):
     """
     global _polled, _dirty, _cold, _hot_date
     with _lock:
-        now = time.time()
-        if not force and now - _polled < POLL_MIN:
+        # Two clocks on purpose. `seen` is a moment a person reads off the
+        # page, so it is the wall clock. The window is a duration, and a wall
+        # clock can go backwards: one NTP step of an hour, and `now - _polled`
+        # is negative for an hour, which is an hour of a gate that never opens.
+        now, mono = time.time(), time.monotonic()
+        if not force and mono - _polled < POLL_MIN:
             return
-        _polled = now
+        _polled = mono
         try:
             objs = nft_table()
         except (OSError, subprocess.CalledProcessError, ValueError, KeyError):
@@ -1866,7 +1880,7 @@ def poll(force=False):
         for ip in moved:
             h["seen"][ip] = int(now)
         note_hour(moved)
-        rates(moved, devs, now)
+        rates(moved, devs, mono)
         # Counters of removed devices are not kept in the baseline.
         h["last"] = {k: v for k, v in h["last"].items() if k in cur}
         # Nothing moved means nothing to record: a delta of zero leaves the day,
@@ -1927,9 +1941,9 @@ def check_update(force=False):
     traffic counters down with it.
     """
     if not force and (not CFG.get("update_check", True)
-                      or time.time() - _upd["at"] < UPDATE_EVERY):
+                      or time.monotonic() - _upd["at"] < UPDATE_EVERY):
         return None
-    _upd["at"] = time.time()
+    _upd["at"] = time.monotonic()
     try:
         req = urllib.request.Request(RELEASES_URL, headers={
             "Accept": "application/vnd.github+json",
@@ -3975,7 +3989,9 @@ def sysinfo():
     on the screen.
     """
     with _syslock:
-        now = time.time()
+        # The monotonic clock: this is a window, and it divides by dt to get
+        # a byte rate. A wall clock that steps back makes dt negative.
+        now = time.monotonic()
         dt = now - _sys["at"]
         if dt < 2 and _sys["out"]:
             return _sys["out"]
@@ -4587,7 +4603,7 @@ def state(month=None):
     """
     expire()
     with _statelock:
-        now = time.time()
+        now = time.monotonic()
         if _state["val"] is None or _state["month"] != month \
                 or now - _state["at"] >= STATE_CACHE:
             _state.update(val=build_state(month), month=month, at=now)
@@ -6217,10 +6233,10 @@ class H(BaseHTTPRequestHandler):
                 reboot_host()
                 return
             if path == "/check":
-                if time.time() - _upd["manual"] < MANUAL_EVERY:
+                if time.monotonic() - _upd["manual"] < MANUAL_EVERY:
                     self._send(429, T["sCheckHint"], "text/plain")
                     return
-                _upd["manual"] = time.time()
+                _upd["manual"] = time.monotonic()
                 if not check_update(force=True):
                     self._send(502, T["updateFail"], "text/plain")
                 elif _upd["new"]:
@@ -8134,7 +8150,7 @@ PersistentKeepalive = 25
     # not be lost, so the same reading has to come back after a restart.
     with tempfile.TemporaryDirectory() as td:
         global TRAFFIC, TODAY, nft_table, load, _hist, _flushed, _dirty
-        global _cold, _hot_date
+        global _cold, _hot_date, _polled
         keep_io = (TRAFFIC, TODAY, nft_table, load)
         TRAFFIC = os.path.join(td, "traffic.json")
         TODAY = os.path.join(td, "today.json")
@@ -8159,7 +8175,7 @@ PersistentKeepalive = 25
         poll(force=True)
         assert os.stat(TODAY).st_mtime_ns == stamp, "an idle poll wrote the file"
 
-        _flushed = time.time()               # and now the window is shut
+        _flushed = time.monotonic()          # and now the window is shut
         nft_table = lambda: table(700, 900)
         poll(force=True)                     # moved, but inside the window
         assert os.stat(TODAY).st_mtime_ns == stamp, "the write was not buffered"
@@ -8222,6 +8238,32 @@ PersistentKeepalive = 25
                 "half a cold file must not take the day in progress with it"
         assert TRAFFIC in said.getvalue(), \
             "a file that could not be read has to say so, once, on stderr"
+
+        # A wall clock that steps backwards must shut no window. Every gate
+        # here is a duration, and on time.time() one NTP correction of an hour
+        # put `_flushed` an hour into the future: flush() returned False for an
+        # hour, the history sat in memory the whole time, and a power cut in
+        # that window took all of it. The same step froze the poll gate and the
+        # "now" column with it.
+        reboot()
+        poll(force=True)
+        before = os.stat(TODAY).st_mtime_ns
+        keep_time = time.time
+        try:
+            time.time = lambda: keep_time() - 3600
+            _dirty = True
+            _flushed = time.monotonic() - FLUSH_EVERY - 1
+            _polled = time.monotonic() - POLL_MIN - 1
+            _rate_at = time.monotonic() - POLL_MIN - 1
+            nft_table = lambda: table(9000, 9000)
+            time.sleep(0.01)                 # so a write shows in the mtime
+            poll()
+        finally:
+            time.time = keep_time
+        assert os.stat(TODAY).st_mtime_ns != before, \
+            "a clock stepped back must not shut the flush window"
+        assert history()["days"][today]["10.0.0.5"][0] > 0, \
+            "nor the poll window: nothing was sampled at all"
 
         # Valid json of the wrong shape used to get straight past _load_json
         # and raise a line later, which is the same boot loop by another name.
