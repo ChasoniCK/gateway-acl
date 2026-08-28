@@ -6306,7 +6306,7 @@ class H(BaseHTTPRequestHandler):
         """
         try:
             mins = check_minutes(
-                json.loads(raw or b"{}").get("for"), BYPASS_MAX // 60,
+                self._json_body(raw).get("for"), BYPASS_MAX // 60,
                 T["badBypass"].replace("{n}", str(BYPASS_MAX // 3600)))
         except ValueError as e:
             self._send(400, str(e), "text/plain")
@@ -6323,7 +6323,7 @@ class H(BaseHTTPRequestHandler):
         to look rather than sent to a socket that is not listening yet.
         """
         try:
-            body = json.loads(raw or b"{}")
+            body = self._json_body(raw)
             pw = str(body.get("pw") or "")
             if pw and len(pw) < 8:
                 raise ValueError(T["pwShort"])   # before anything is written
@@ -6530,6 +6530,19 @@ def selftest():
             assert e.status == status, (headers, e.status)
     h = request("/api", {"Content-Length": "3"}, b"abc")
     assert h._read_body(3) == b"abc"
+
+    # Valid json that is not an object. /api and /vpn went through _json_body
+    # and answered 400; /settings and /bypass parsed it themselves and raised
+    # AttributeError on .get, which nothing catches: no answer at all, a
+    # traceback in the journal and a dropped connection.
+    for path in ("/settings", "/bypass", "/api", "/vpn"):
+        for raw in (b"[]", b'"x"', b"5", b"null", b"not json"):
+            h = request(path, dict(cookie, **{
+                "Content-Length": str(len(raw)),
+                "X-CSRF-Token": csrf_for(token)}), raw)
+            h.do_POST()
+            assert h.replies and h.replies[0][0] == 400, \
+                f"{path} {raw!r}: answered {h.replies or 'nothing at all'}"
 
     for method, path in (("do_GET", "/apiX"), ("do_GET", "/vpnX"),
                          ("do_GET", "/diagnosticsX"),
