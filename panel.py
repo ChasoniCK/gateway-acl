@@ -1549,6 +1549,39 @@ def _load_json(path, empty):
         return empty
 
 
+def _counts(value):
+    """{name: whole number}, with everything that is not one dropped.
+
+    `seen` and `last` both have this shape: an address or a counter name
+    against a number that only ever goes up.
+    """
+    if not isinstance(value, dict):
+        return {}
+    return {k: v for k, v in value.items()
+            if isinstance(k, str) and isinstance(v, int)
+            and not isinstance(v, bool) and v >= 0}
+
+
+def _buckets(value):
+    """Day and month buckets, with anything that is not one dropped.
+
+    Read once, at startup, so the walk costs nothing that matters. What it
+    throws away was unreadable to begin with; the point is that one damaged
+    bucket must not raise later, deep inside a poll, on every start for ever.
+    """
+    if not isinstance(value, dict):
+        return {}
+    out = {}
+    for key, bucket in value.items():
+        if isinstance(key, str) and isinstance(bucket, dict):
+            out[key] = {ip: row for ip, row in bucket.items()
+                        if isinstance(ip, str) and isinstance(row, list)
+                        and len(row) == 2 and all(
+                            isinstance(n, int) and not isinstance(n, bool)
+                            and n >= 0 for n in row)}
+    return out
+
+
 def _read_history():
     """Both files, joined back into the one dict the rest of this program reads.
 
@@ -1557,16 +1590,29 @@ def _read_history():
     rewrites it. Upgrading from a single-file version lands here with no
     today.json at all, because traffic.json still has today, `seen` and `last`
     in it, and the first flush moves them across.
+
+    Every container is checked, not merely parsed. `_load_json` catches a file
+    that is not json at all, but valid json of the wrong shape got straight
+    through: `null` in traffic.json raised TypeError on the `"days" not in h`
+    below, `null` in today.json raised AttributeError on `.get`, and a list in
+    either one put something that is not a mapping where the whole program
+    expects one. All three were a crash on every start, for ever, with
+    Restart=always underneath.
     """
-    h = _load_json(TRAFFIC, {"days": {}})
+    h = _load_json(TRAFFIC, {})
+    if not isinstance(h, dict):
+        h = {}
     if "days" not in h:  # old format: month keys straight in the root
         h = {"days": h}
-    h.setdefault("seen", {})
-    h.setdefault("last", {})
+    h = {"days": _buckets(h.get("days")),
+         "seen": _counts(h.get("seen")), "last": _counts(h.get("last"))}
     hot = _load_json(TODAY, {})
-    if hot.get("date"):
-        h["days"][hot["date"]] = hot.get("day", {})
-        h["seen"], h["last"] = hot.get("seen", {}), hot.get("last", {})
+    if not isinstance(hot, dict):
+        hot = {}
+    date = hot.get("date")
+    if isinstance(date, str) and date:
+        h["days"][date] = _buckets({date: hot.get("day")}).get(date, {})
+        h["seen"], h["last"] = _counts(hot.get("seen")), _counts(hot.get("last"))
     return h
 
 
@@ -8100,6 +8146,34 @@ PersistentKeepalive = 25
                 "half a cold file must not take the day in progress with it"
         assert TRAFFIC in said.getvalue(), \
             "a file that could not be read has to say so, once, on stderr"
+
+        # Valid json of the wrong shape used to get straight past _load_json
+        # and raise a line later, which is the same boot loop by another name.
+        for cold, warm in (("null", "{}"), ("[1, 2]", "{}"), ('"text"', "{}"),
+                           ("5", "{}"), ('{"days": null}', "{}"),
+                           ('{"days": {}}', "null"),
+                           ('{"days": {}}', "[1, 2]"),
+                           ('{"days": {"2026-01-01": 5}}', "{}"),
+                           ('{"days": {"2026-01-01": {"1.1.1.1": "x"}}}', "{}"),
+                           ('{"days": {}, "last": {"up_1_1_1_1": "x"}}', "{}"),
+                           ('{"days": {}}', '{"date": "2026-01-01", "day": 7}'),
+                           ('{"days": {}}', '{"date": 5}')):
+            open(TRAFFIC, "w").write(cold)
+            open(TODAY, "w").write(warm)
+            reboot()
+            h = history()
+            assert isinstance(h["days"], dict) and isinstance(h["seen"], dict) \
+                and isinstance(h["last"], dict), f"{cold} / {warm}: not a history"
+            for bucket in h["days"].values():
+                assert isinstance(bucket, dict), f"{cold}: a bucket is not a dict"
+                for row in bucket.values():
+                    assert isinstance(row, list) and len(row) == 2, \
+                        f"{cold}: a row that cannot be added to"
+            # The whole point: everything downstream still runs on it.
+            poll(force=True)
+            roll_up(h["days"], time.strftime("%Y-%m"))
+            month_sums(h["days"])
+            snapshot()
 
         reboot()
         TRAFFIC, TODAY, nft_table, load = keep_io
