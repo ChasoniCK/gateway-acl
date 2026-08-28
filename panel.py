@@ -2033,8 +2033,13 @@ def install_update(tag):
     """
     if not _updating.acquire(blocking=False):
         return
-    tmp = tempfile.mkdtemp(prefix="gwacl-update-")
+    # Inside the try, not before it. A full or unwritable /tmp made this raise
+    # with the lock already taken and no finally to give it back, and every
+    # later press of the button then returned at the line above, silently, for
+    # the life of the process.
+    tmp = None
     try:
+        tmp = tempfile.mkdtemp(prefix="gwacl-update-")
         with open(UPDATE_LOG, "a") as log:
             log.write(f"\n=== {time.strftime('%Y-%m-%d %H:%M:%S')} "
                       f"{VERSION} -> {tag}\n")
@@ -2061,9 +2066,12 @@ def install_update(tag):
                 tmp = None
             except Exception as e:
                 log.write(f"не установлено / not installed: {e}\n")
-    except OSError:
-        pass                                  # a log that cannot be written is
-    finally:                                  # not a reason to keep the lock
+    except OSError as e:
+        # A log that cannot be written, or a /tmp with no room in it, is not a
+        # reason to keep the lock. Said on stderr, because the file that would
+        # have carried it is the one that could not be opened.
+        print(f"gateway-acl: update {tag}: {e}", file=sys.stderr, flush=True)
+    finally:
         if tmp:
             shutil.rmtree(tmp, ignore_errors=True)
         _updating.release()
@@ -8498,6 +8506,23 @@ PersistentKeepalive = 25
             kept = [m.name for m in _safe_members(tf)]
         assert kept == ["rel/panel.py"], f"only the archive's own files: {kept}"
     assert _ver(VERSION), f"VERSION {VERSION!r} does not compare against a tag"
+
+    # A /tmp with no room in it used to raise between taking the update lock
+    # and the try that gives it back, so every later press of the button
+    # returned at the first line, silently, for the life of the process.
+    keep_mkdtemp = tempfile.mkdtemp
+    try:
+        tempfile.mkdtemp = lambda *a, **k: (_ for _ in ()).throw(
+            OSError(28, "No space left on device"))
+        with contextlib.redirect_stderr(io.StringIO()) as said:
+            install_update("v9.9.9")
+        assert "No space left" in said.getvalue(), \
+            "an update that could not start has to say so"
+    finally:
+        tempfile.mkdtemp = keep_mkdtemp
+    assert _updating.acquire(blocking=False), \
+        "a failed update must give the lock back"
+    _updating.release()
 
     # The scheduled reboot. `up` is what keeps a machine that has just rebooted
     # from rebooting again while the window it woke up in is still open.
