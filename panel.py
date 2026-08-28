@@ -537,6 +537,8 @@ STRINGS = {
         "badPort": "порт — от 1 до 65535",
         "badIface": "интерфейса {iface} в системе нет",
         "selfOutside": "{ip} не входит в сеть {lan}",
+        "badLan": "{lan}: нужна сеть целиком, например 192.168.1.0/24",
+        "badSelfIp": "{ip}: нужен адрес шлюза, например 192.168.1.1",
         "portBusy": "порт {port} уже занят — панель на нём не поднимется",
         "colNow": "сейчас",
         "byDay": "по дням",
@@ -849,6 +851,8 @@ STRINGS = {
         "badPort": "the port is 1 to 65535",
         "badIface": "there is no {iface} interface on this system",
         "selfOutside": "{ip} is outside the {lan} network",
+        "badLan": "{lan}: a whole network is expected, 192.168.1.0/24 say",
+        "badSelfIp": "{ip}: the gateway's own address is expected, 192.168.1.1 say",
         "portBusy": "port {port} is taken — the panel would not start on it",
         "colNow": "now",
         "byDay": "by day",
@@ -966,8 +970,19 @@ def check_settings(body, base):
 
     # ip_network is strict: 192.168.1.5/24 is rejected, which is what we want.
     # A network with host bits set would quietly drop devices out of validate().
-    lan = ipaddress.ip_network(str(body.get("lan", c["lan"])).strip())
-    self_ip = ipaddress.ip_address(str(body.get("self_ip", c["self_ip"])).strip())
+    # Its complaint is not shown, though: `ipaddress` explains itself in English
+    # regardless of the panel's language, and every other field on this form
+    # answers in the language the person set.
+    want_lan = str(body.get("lan", c["lan"])).strip()
+    try:
+        lan = ipaddress.ip_network(want_lan)
+    except ValueError:
+        raise ValueError(T["badLan"].replace("{lan}", want_lan)) from None
+    want_self = str(body.get("self_ip", c["self_ip"])).strip()
+    try:
+        self_ip = ipaddress.ip_address(want_self)
+    except ValueError:
+        raise ValueError(T["badSelfIp"].replace("{ip}", want_self)) from None
     if self_ip not in lan:
         raise ValueError(T["selfOutside"].replace("{ip}", str(self_ip))
                                          .replace("{lan}", str(lan)))
@@ -6539,6 +6554,8 @@ def selftest():
     # before the name is used anywhere else in the function.
     global poll, expire, track_macs, vpn_poll, vpn_auto_refresh
     global check_update, reboot_due, _tick_fault
+    # Swapped for a moment where a message has to be checked in both languages.
+    global T
 
     class BombReader:
         def read(self, *unused):
@@ -8655,6 +8672,26 @@ PersistentKeepalive = 25
             except ValueError:
                 continue
             raise AssertionError(f"the settings form accepted {bad}")
+
+    # Every field on this form answers in the panel's own language. `ipaddress`
+    # explains itself in English whatever the language is, and its wording was
+    # what a Russian panel showed for a mistyped network.
+    for lang in STRINGS:
+        keep_lang, keep_t = CFG["lang"], T
+        try:
+            CFG["lang"], T = lang, STRINGS[lang]
+            for bad, said in (({"lan": "not-a-network"}, "badLan"),
+                              ({"lan": "10.7.0.5/24"}, "badLan"),
+                              ({"self_ip": "not-an-address"}, "badSelfIp")):
+                try:
+                    check_settings(dict(form, **bad), base)
+                    raise AssertionError(f"{lang}: accepted {bad}")
+                except ValueError as e:
+                    assert STRINGS[lang][said].split("{")[0] in str(e) \
+                        or str(e).endswith(STRINGS[lang][said].split("}")[-1]), \
+                        f"{lang}: {bad} answered {e!r}, not {said}"
+        finally:
+            CFG["lang"], T = keep_lang, keep_t
 
     # The script drives the page by id. A rename on one side only leaves a card
     # silently empty in the browser, which no other check here would notice.
