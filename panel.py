@@ -2095,6 +2095,14 @@ QUICK_TOOLS = {"wireguard": "wg-quick", "amneziawg": "awg-quick"}
 AWG_KEYS = {"jc", "jmin", "jmax", "s1", "s2", "s3", "s4",
             "h1", "h2", "h3", "h4"}
 FORBIDDEN_QUICK = {"preup", "postup", "predown", "postdown", "saveconfig"}
+# The keys wg-quick and `wg` accumulate instead of overwriting. wg-quick does
+# ADDRESSES+=( ${value//,/ } ) and the same for DNS; `wg` says of AllowedIPs
+# that it may be given more than once. Providers write them either way, and one
+# address per line is the form Mullvad, AmneziaVPN and wg-easy export, so a
+# config that `wg-quick up` brings up without a murmur must not be refused here.
+# Everything else stays single: two PrivateKeys is not a config, it is a
+# question nobody can answer.
+MULTI_QUICK = {"address", "dns", "allowedips"}
 SAFE_VPN_ERRORS = {
     "", "legacy/no-cache", "missing-secret", "tool-missing", "stopped",
     "start-failed", "validation-failed", "rollback-failed", "conflict",
@@ -3370,11 +3378,18 @@ def _quick_sections(text):
             raise ValueError("invalid tunnel config structure")
         key, value = (part.strip() for part in line.split("=", 1))
         key = key.lower()
-        if not key or not value or key in current["values"]:
+        if not key or not value:
             raise ValueError("invalid tunnel config field")
         if key in FORBIDDEN_QUICK:
             raise ValueError("tunnel config hooks are not allowed")
-        current["values"][key] = value
+        if key not in current["values"]:
+            current["values"][key] = value
+        elif key in MULTI_QUICK:
+            # Joined the way the same values would have been written on one
+            # line, because that is the form everything below splits on.
+            current["values"][key] += "," + value
+        else:
+            raise ValueError("invalid tunnel config field")
     return sections
 
 
@@ -6811,8 +6826,32 @@ PersistentKeepalive = 25
     assert not check_quick_config(
         "wireguard", wg.replace(", ::/0", ""), no_tool)["ipv6"]
 
+    # One value per line, which is how wg-quick's own parser accumulates
+    # Address and DNS and how `wg` accumulates AllowedIPs. This is the form
+    # Mullvad, AmneziaVPN and wg-easy export, and the panel used to refuse it
+    # as "invalid tunnel config field" while `wg-quick up` brought it up
+    # without a murmur.
+    lines = wg.replace("Address = 10.66.66.5/32, fd42:42:42::5/128",
+                       "Address = 10.66.66.5/32\nAddress = fd42:42:42::5/128") \
+              .replace("DNS = 1.1.1.1, 8.8.8.8", "DNS = 1.1.1.1\nDNS = 8.8.8.8") \
+              .replace("AllowedIPs = 0.0.0.0/0, ::/0",
+                       "AllowedIPs = 0.0.0.0/0\nAllowedIPs = ::/0")
+    assert check_quick_config("wireguard", lines, quick_ok, "t000000000003") \
+        == {"ipv6": True, "verified": True}, \
+        "a config wg-quick accepts must not be refused here"
+    assert quick_address(lines) == "10.66.66.5/32", \
+        "and the probe still finds the address it has to send from"
+
     bad_quick = {
         "nul": wg + "\x00",
+        # Everything else stays one to a section: two private keys is not a
+        # config, it is a question with no answer.
+        "two private keys": wg.replace(f"PrivateKey = {key}\n",
+                                       f"PrivateKey = {key}\nPrivateKey = {key}\n"),
+        "two endpoints": wg.replace("Endpoint = vpn.example:51820\n",
+                                    "Endpoint = a.example:51820\n"
+                                    "Endpoint = b.example:51820\n"),
+        "two tables": wg.replace("Table = auto", "Table = auto\nTable = auto"),
         "too large": wg + "#" * VPN_MAX,
         "invalid utf8": b"[Interface]\nPrivateKey = \xff",
         "second interface": wg + f"\n[Interface]\nPrivateKey = {key}\n",
