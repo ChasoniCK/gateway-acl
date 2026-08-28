@@ -1646,11 +1646,18 @@ def snapshot():
     the first time, and iterating it from an HTTP thread at that moment is how a
     page refresh crashes on "dictionary changed size during iteration". One
     level deep is all state() reads.
+
+    The hourly ring comes along with it. It is mutated by the same poll, under
+    the same lock, and it was the one part build_state read live: `sorted`
+    over it while note_hour dropped the oldest bucket, and `.values()` over a
+    bucket while the same call added an address to it. Both raise, and both
+    come out as a page refresh that answers 500 for no visible reason.
     """
     with _lock:
         h = history()
         return {"days": {k: dict(v) for k, v in h["days"].items()},
-                "seen": dict(h["seen"])}
+                "seen": dict(h["seen"]),
+                "hours": {k: dict(v) for k, v in _hours.items()}}
 
 
 def flush(force=False):
@@ -4509,7 +4516,7 @@ def build_state(month=None):
     # len == 10 filters out old-format keys ("2026-07"): they still count
     # towards the month total, but never into the per-day chart.
     day_keys = sorted(k for k in h["days"] if k.startswith(month) and len(k) == 10)
-    hour_keys = sorted(_hours)
+    hour_keys = sorted(h["hours"])
     names = lan_names()
     clash = clashes(devs, names)
     blk = [[ip] + names.get(ip, ["", ""]) + [ago]
@@ -4537,15 +4544,13 @@ def build_state(month=None):
                          # What ARP says now, or what the entry was bound to.
                          mac=names.get(d["ip"], ["", ""])[1] or d.get("mac", ""),
                          series=[h["days"][k].get(d["ip"], [0, 0]) for k in day_keys],
-                         # .get: the poller may drop the oldest hour between
-                         # the snapshot of the keys and the read.
-                         hseries=[_hours.get(k, {}).get(d["ip"], [0, 0])
+                         hseries=[h["hours"][k].get(d["ip"], [0, 0])
                                   for k in hour_keys])
                     for d in devs],
         "days": [[k, sum(v[0] for v in h["days"][k].values()),
                   sum(v[1] for v in h["days"][k].values())] for k in day_keys],
-        "hours": [[k[-2:], sum(v[0] for v in _hours.get(k, {}).values()),
-                   sum(v[1] for v in _hours.get(k, {}).values())] for k in hour_keys],
+        "hours": [[k[-2:], sum(v[0] for v in h["hours"][k].values()),
+                   sum(v[1] for v in h["hours"][k].values())] for k in hour_keys],
         # Address, whatever the network calls it, how long ago it knocked, and
         # who made the thing.
         "blocked": [r + [ven.get(r[2], "")] for r in blk],
@@ -7935,6 +7940,22 @@ PersistentKeepalive = 25
         note_hour({}, f"2026-08-02 {i:02d}")
     assert len(_hours) == 24, "the hourly ring must not grow past a day"
     assert "2026-08-01 10" not in _hours
+
+    # The ring is the poller's, and a page must read a copy of it. Reading it
+    # live meant `sorted` over a dict note_hour was dropping the oldest bucket
+    # from, and `.values()` over a bucket it was adding an address to: both
+    # raise "dictionary changed size during iteration", and both come out as a
+    # refresh that answers 500 with nothing to say why.
+    _hours.clear()
+    note_hour({"10.0.0.5": [5, 5]}, "2026-08-01 10")
+    snap = snapshot()
+    assert snap["hours"] == {"2026-08-01 10": {"10.0.0.5": [5, 5]}}
+    note_hour({"10.0.0.6": [1, 1]}, "2026-08-01 10")
+    note_hour({}, "2026-08-01 11")
+    assert snap["hours"] == {"2026-08-01 10": {"10.0.0.5": [5, 5]}}, \
+        "a snapshot must not follow the ring it was taken from"
+    assert "_hours" not in build_state.__code__.co_names, \
+        "build_state must read the hourly ring from the snapshot, not live"
     _hours.clear()
 
     assert prev_month("2026-08") == "2026-07"
