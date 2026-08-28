@@ -159,7 +159,10 @@ project's PPA, Arch in the AUR. The installer offers both, but only with a perso
 at the keyboard — a third-party package source and a build of somebody else's
 PKGBUILD are not decisions to make on their behalf during a `--yes` upgrade. An
 AUR build runs as whoever typed `sudo` (`makepkg` refuses to run as root) and
-needs `paru` or `yay`.
+needs `paru` or `yay`. If pacman's database is locked at that moment — another
+update is running, or a killed `pacman` left the lock behind — the installer
+waits a minute and then says which of the two it is, instead of sitting on
+`:: Pacman is currently in use` for good.
 
 What gets installed is `amneziawg-tools` and `amneziawg-go`; the kernel module
 `amneziawg-dkms` is attempted only where headers for the running kernel are

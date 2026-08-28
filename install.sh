@@ -109,6 +109,9 @@ if [ "$UILANG" = en ]; then
   M_AWGBATCH="not installed — a third-party source is not added unattended; re-run without --yes"
   M_AWGNOHELPER="not installed — no AUR helper (paru or yay) and no user to build as"
   M_AWGGO="installed with the userspace implementation: it works without a kernel module and is slower than one"
+  M_PACWAIT="pacman's database is locked — waiting up to a minute for whoever has it"
+  M_PACBUSY="still locked and a pacman is running: let that one finish and run this again"
+  M_PACSTALE="still locked and no pacman is running — a killed one left it behind: sudo rm /var/lib/pacman/db.lck"
   M_AWGFAIL="not installed — AmneziaWG profiles will not come up. Build: https://github.com/amnezia-vpn/amneziawg-tools ; system:"
   M_ONLYLIST="After this, ONLY the devices on the list will route through this host."
   M_SEEN="Currently visible on the network:"
@@ -174,6 +177,9 @@ else
   M_AWGBATCH="не установлен — сторонний источник в неинтерактивном режиме не добавляется; запустите без --yes"
   M_AWGNOHELPER="не установлен — нет ни paru, ни yay, и некому собирать: makepkg от root не работает"
   M_AWGGO="поставлен с реализацией в пространстве пользователя: работает без модуля ядра и медленнее него"
+  M_PACWAIT="база pacman заперта — жду до минуты того, кто её занял"
+  M_PACBUSY="всё ещё заперта, и pacman запущен: дождитесь его и запустите установку снова"
+  M_PACSTALE="всё ещё заперта, а pacman не запущен — замок остался от убитого: sudo rm /var/lib/pacman/db.lck"
   M_AWGFAIL="не установлен — профили AmneziaWG не поднимутся. Собрать: https://github.com/amnezia-vpn/amneziawg-tools ; система:"
   M_ONLYLIST="После установки через этот хост пойдут ТОЛЬКО те, кто в списке."
   M_SEEN="Сейчас в сети видно:"
@@ -433,8 +439,31 @@ os_id() { # os_id -> "ubuntu debian" and so on, for the one case that differs
     printf '%s %s' "${ID:-}" "${ID_LIKE:-}" )
 }
 
+PAC_LOCK=/var/lib/pacman/db.lck
+
+pac_wait() { # 0 when pacman's database is free, 1 after saying why it is not
+  local n=0
+  [ -e "$PAC_LOCK" ] || return 0
+  # pacman and every helper simply block on this file, and blocking with the
+  # output swallowed — which is what every other install in this step does —
+  # is a step that hangs for good with nothing on screen to say why.
+  say "$M_PACWAIT"
+  while [ -e "$PAC_LOCK" ] && [ "$n" -lt 60 ]; do sleep 1; n=$((n + 1)); done
+  [ -e "$PAC_LOCK" ] || return 0
+  # A lock with no pacman behind it is what a killed pacman leaves; a lock with
+  # one is somebody else's update. The two need opposite things done.
+  if command -v pgrep >/dev/null && pgrep -x pacman >/dev/null 2>&1; then
+    say "$M_PACBUSY"
+  else
+    say "$M_PACSTALE"
+  fi
+  return 1
+}
+
 pkg_install() { # pkg_install pkg... -> quietly, and never fatal
-  if   command -v pacman  >/dev/null; then pacman -S --needed --noconfirm "$@" >/dev/null 2>&1
+  if   command -v pacman  >/dev/null; then
+    pac_wait || return 1
+    pacman -S --needed --noconfirm "$@" >/dev/null 2>&1
   elif command -v apt-get >/dev/null; then
     DEBIAN_FRONTEND=noninteractive apt-get install -y "$@" >/dev/null 2>&1
   else return 1; fi
@@ -485,6 +514,7 @@ awg_arch() {
     paru) set -- -S --needed --noconfirm --skipreview ;;
     *)    set -- -S --needed --noconfirm ;;
   esac
+  pac_wait || return 1
   sudo -u "$builder" "$helper" "$@" amneziawg-tools amneziawg-go || true
   hash -r 2>/dev/null || true
   # The module too, but only where it could build at all, and never as a
