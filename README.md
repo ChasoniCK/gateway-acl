@@ -136,7 +136,8 @@ sudo ./install.sh --lang en
 The installer detects your LAN interface, address and subnet, offers to enable
 `ip_forward`, asks for a panel password, and on a first install lists the
 devices currently visible in the ARP table so you can allow them before the rule
-takes effect. It refuses to enable anything until `panel.py --selftest` passes
+takes effect. `--yes` reuses the answers from last time, the update button
+included, so a host where you declined `ip_forward` keeps it off. It refuses to enable anything until `panel.py --selftest` passes
 and the kernel accepts the generated ruleset.
 
 A step of its own installs the programs the panel runs tunnels with:
@@ -203,9 +204,12 @@ destinations going out `direct`.
 
 WireGuard and AmneziaWG profiles must carry a full IPv4 route. `Table = off`, a
 custom table and all `PreUp`/`PostUp`/`PreDown`/`PostDown` hooks are refused,
-and so is `SaveConfig`. A missing `::/0` is shown as an IPv6 warning. The panel
-uses fixed `wg-quick`/`awg-quick` commands and never runs text from a profile as
-a shell command.
+and so is `SaveConfig`. A missing `::/0` is shown as an IPv6 warning. `Address`,
+`DNS` and `AllowedIPs` may be written one value per line or comma-separated,
+the way `wg-quick` itself accepts them, so a config exported by Mullvad,
+AmneziaVPN or wg-easy goes in as it came. The panel uses fixed
+`wg-quick`/`awg-quick` commands and never runs text from a profile as a shell
+command.
 
 A subscription can be **expanded**, with the *nodes* button, to pick which of
 its servers to connect to. A node turned off here never reaches the
@@ -375,6 +379,14 @@ One nftables table, `inet gwacl`, on the `prerouting` hook at priority `raw`
 Packets from an unlisted address are dropped unless they are addressed to the
 host itself, so **SSH always stays reachable**, even from a device you just
 blocked.
+
+The device list is the one file the gateway cannot start without, so it is
+written atomically and read defensively. If it ever stops parsing, the panel
+keeps serving the last list it read, leaves the rules on the gateway alone
+rather than rebuilding them from nothing, and says so in a red banner with a
+button that collects the diagnostics bundle. An empty list would be a valid
+answer and would drop every device on the network without a word, which is why
+it is never used as a fallback.
 
 For details, including how the traffic accounting survives counter resets and
 how to test a ruleset without touching your host, see

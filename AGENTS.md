@@ -62,6 +62,15 @@ to parse changes nothing. The chain sits on `prerouting` at priority `raw` (−3
 deliberately earlier than redirect chains a tunnel may install. Traffic to the host
 itself is always accepted, so SSH survives blocking your own device.
 
+It is written through `write_atomic()` like everything else here, and read through a
+`load()` that survives damage: an unparseable file hands back the last list that
+parsed, reports itself once on stderr and sets `_devs["bad"]`, which reaches the page
+as `state()["broken"]` and draws a red banner with the diagnostics button in it.
+`devices_ok()` is that flag, and `apply()` refuses to rebuild the table when the list
+it was handed is empty **and** the file is unreadable. An empty list is a valid answer
+and would drop the whole network silently; leaving the rules alone lets everyone
+through the way `bypass` does, which is the direction this program fails in.
+
 Traffic history is accumulated, not authoritative. Two named nftables counters per device
 (`cname('up'|'down', ip)`) are read by the poller and folded in by `accrue()`, which
 treats a decrease as a counter reset and takes the new value whole. Counters are zeroed
@@ -82,8 +91,12 @@ In memory they are one dict. Only `_read_history()` and `flush()` know there are
 in exactly one file. `traffic.json` holds a stale copy of it only between an upgrade from
 the single-file format and the next midnight, and `_read_history()` resolves that by
 letting `today.json` win. Both are written through `write_atomic()` (`.tmp` → `fsync` →
-`os.replace`) and read through `_load_json()`, which reports damage to stderr and carries
-on rather than crash-looping under `Restart=always`.
+`os.replace` → `fsync` of the directory) and read through `_load_json()`, which reports
+damage to stderr and carries on rather than crash-looping under `Restart=always`.
+`_load_json()` only catches a file that is not json; a file that **is** json but of the
+wrong shape is caught by `_buckets()` and `_counts()` in `_read_history()`, which drop
+whatever is not a mapping of names to whole numbers. `null` in either file used to be a
+crash on every start, for ever.
 
 `poll()` detects a day change by comparing `_hot_date` against today, and that rollover is
 the only place `roll_up()` runs, because a month cannot age past `keep_months` inside a
@@ -95,6 +108,16 @@ Two invariants worth not breaking: the baseline on disk is always exactly as old
 totals beside it (a crash therefore costs nothing, since the next poll measures from the
 older baseline and lands on the same figure), and a poll during the day must not touch
 `traffic.json` (the selftest asserts the mtime).
+
+`snapshot()` is how a reader outside `_lock` gets the history, and it carries the hourly
+ring `_hours` as well as the days. Reading `_hours` live is "dictionary changed size
+during iteration" on the next page refresh; `selftest()` asserts `_hours` is not among
+`build_state.__code__.co_names`.
+
+`tick()` is the poller's whole body and catches everything. An exception used to end the
+thread while the HTTP server carried on, so the panel looked healthy with every timer,
+`track_macs()`, the subscription schedule and the nightly reboot silently stopped. A
+failed step costs its tick; the fault is printed once per distinct message.
 
 Unknown devices are not tracked by the program at all. The chain's last rule does
 `update @blocked { ip saddr }` into a dynamic kernel set with `BLOCK_TTL`, and
@@ -318,6 +341,28 @@ older version.
   keep=None)` resolves `KEEP_MONTHS` in the body for exactly this reason.
 - Anything added to the hot poll path is paid ~288 times a day, forever. Check whether it
   belongs at the rollover instead.
+- **A duration is measured with `time.monotonic()`, a moment with `time.time()`.** Every
+  window that lives only in memory (`_flushed`, `_polled`, `_rate_at`, the `state()` and
+  `sysinfo()` caches, the update gates, the failed-login block) is monotonic, because a
+  wall clock steps backwards: one NTP correction of an hour put `_flushed` an hour into
+  the future and `flush()` returned False for that hour, with the history in memory the
+  whole time. Anything a person reads or that outlives the process stays wall clock:
+  `seen`, `until`, `bypass`, session expiry, `probe_at`, `refresh_at`. `poll()` takes
+  both, on purpose.
+- A string in `STRINGS` that nothing shows is a string that rots into a difference
+  between the two languages. `selftest()` looks for one along all four roads to a
+  string: `{{t.key}}`, `T.key`, `["key"]` in either language, and a bare `'key'` inside
+  one of the page script's own tables. `sRebootAtWhat` sat written in both languages and
+  wired to nothing, which is how the check came to exist.
+- `_clean_tunnel_orphans()` reads the catalog **raw** as well as through `load_tunnels()`.
+  The parsed list drops a row it could not read, and going by that alone deleted the
+  secret of a profile the catalog still names: a subscription link with its token, or a
+  private key, gone on the next start with nothing said. Rolling the panel back one
+  version was enough to do it.
+- `MULTI_QUICK` (`address`, `dns`, `allowedips`) is the set of keys `wg-quick` and `wg`
+  accumulate rather than overwrite, so a config with one address per line is joined with
+  commas instead of refused. Every other key stays one to a section. `FORBIDDEN_QUICK`
+  is untouched by this and must stay that way.
 - `docs/design.md` explains the nftables model and how to test a ruleset without touching
   a live host; `docs/singbox.md` records real-world interactions with `auto_redirect`.
   Both are written for humans and should stay in sync with behaviour changes.
