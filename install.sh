@@ -444,7 +444,9 @@ if yesno "$M_TOOLSASK"; then
   # boot because no subscription has been added yet is a red service and a
   # question; the panel starts sing-box itself the moment one is enabled, and
   # its own startup reconciliation brings it back after a reboot.
-  [ -f /etc/sing-box/config.json ] && systemctl enable sing-box >/dev/null 2>&1 || true
+  if [ -f /etc/sing-box/config.json ]; then
+    systemctl enable sing-box >/dev/null 2>&1 || true
+  fi
 
   command -v wg-quick >/dev/null || pkg_install wireguard-tools || true
   if command -v wg-quick >/dev/null; then ok "wireguard-tools" "$M_WGOK"
