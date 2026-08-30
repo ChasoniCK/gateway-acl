@@ -74,7 +74,9 @@ device ──► this Linux host ──► uplink or tunnel (sing-box / WireGuar
   The panel lists them with the hostname from the DHCP leases, the hardware
   address from the ARP cache, and who made the thing: the system's IEEE list if
   it ships one, a short built-in table if not. It says how long ago each one
-  last knocked, and allows one in a click. The field for a new address offers
+  last knocked, and allows one for fifteen minutes, an hour or for good. A
+  temporary admission then switches itself off while keeping the name and
+  history. The field for a new address offers
   everything the system knows about the network, so nothing has to be typed
   from memory.
 - **Rename devices** inline, or take the name the device gives the network. It
@@ -82,7 +84,12 @@ device ──► this Linux host ──► uplink or tunnel (sing-box / WireGuar
   touches nftables, so counters survive. Sort the list by address, name,
   traffic, current speed or last seen, pick from a menu and flip the direction
   with one button, filter by address, name or hostname, and download the
-  selected month as CSV.
+  selected month as CSV. The filter reports how many rows it found; clicking an
+  IP or MAC copies it, and an expanded row stays expanded after a reload.
+- **A compact summary in the header.** It counts allowed devices, unknown
+  knockers and address conflicts, and each counter jumps to its section. After
+  one device is switched, or its VPN bypass changes, the last action can be
+  undone for eight seconds.
 - **Update notice, and the button under it.** Once a day the panel asks GitHub
   for the latest release tag and shows a banner if yours is older. *Install now*
   fetches that release and runs the installer with the answers you already gave,
@@ -215,8 +222,9 @@ A subscription can be **expanded**, with the *nodes* button, to pick which of
 its servers to connect to. A node turned off here never reaches the
 configuration, so the `urltest` group cannot choose it. That is the same thing
 the exclusion regular expression does, but one node at a time and without
-guessing a pattern. Each node carries the mark from the last check, *answers* or
-*silent*, so you choose by looking at the result rather than at the name. The
+guessing a pattern. The list filters by name and sorts in provider order, by
+latency, or with answering nodes first. Each node carries the mark from the last
+check, *answers* or *silent*, so you choose by looking at the result rather than at the name. The
 selection lives in the subscription's owner-only file beside its link and
 survives a refresh. It is keyed on the node's name rather than its position in
 the list, and a refresh only prunes what the provider has stopped listing. There
@@ -246,6 +254,8 @@ editable, including one originally supplied by the provider, and a manual
 choice is not overwritten by later responses. An automatic failure keeps the
 old cache and live backend, records the error and retries an hour later. A
 successful one clears whatever the profile failed at last time.
+When the provider includes the standard `Subscription-Userinfo` header, the
+profile also shows used and remaining traffic and the subscription expiry date.
 
 What decides whether anything is switched is the nodes the response turns into,
 not the bytes of the response. Providers list a node that counts the traffic

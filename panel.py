@@ -453,6 +453,9 @@ STRINGS = {
         "vpnNodeUp": "отвечает",
         "vpnNodeDown": "молчит",
         "vpnNodeMs": "{n} мс",
+        "vpnNodeOrder": "как у сервиса",
+        "vpnNodeLatency": "по задержке",
+        "vpnNodeReachable": "сначала отвечающие",
         "vpnNodesWhat": "Снятые узлы не попадают в конфиг, поэтому группа не "
                         "сможет их выбрать. Отметки «отвечает» и «молчит» "
                         "остались от последней проверки; узлы, до которых она "
@@ -465,6 +468,8 @@ STRINGS = {
         "vpnAutoEvery": "обновление каждые {n} ч",
         "vpnProviderEvery": "сервис рекомендует {n} ч",
         "vpnUpdated": "обновлено {t}",
+        "vpnQuota": "трафик: {used} из {total} · осталось {left}",
+        "vpnExpires": "подписка до {date}",
         "vpnRefreshFailed": "последнее автообновление не удалось",
         "vpnIpv6": "В конфиге нет полного маршрута IPv6",
         "vpnHint": "Новый туннель сохраняется выключенным. Подписки можно "
@@ -507,6 +512,14 @@ STRINGS = {
         "diagDownload": "скачать диагностику",
         "diagCopied": "Диагностика скопирована. Секреты удалены.",
         "diagFailed": "Не удалось собрать диагностику.",
+        "statusAllowed": "Разрешено {a}/{b}",
+        "statusUnknown": "Неизвестных: {n}",
+        "statusClashes": "Конфликтов: {n}",
+        "allowAlways": "Всегда",
+        "undoSaved": "Изменение сохранено",
+        "undo": "Отменить",
+        "copy": "копировать",
+        "found": "Показано {a} из {b}",
         "sPoll": "опрос счётчиков, с",
         "sKeep": "хранить по дням, мес.",
         "sKeepWhat": "Сколько месяцев держать разбивку по дням. Что старше, "
@@ -765,6 +778,9 @@ STRINGS = {
         "vpnNodeUp": "answers",
         "vpnNodeDown": "silent",
         "vpnNodeMs": "{n} ms",
+        "vpnNodeOrder": "provider order",
+        "vpnNodeLatency": "by latency",
+        "vpnNodeReachable": "reachable first",
         "vpnNodesWhat": "A node turned off here never reaches the config, so "
                         "the group cannot pick it. \"answers\" and \"silent\" "
                         "come from the last check; nodes it did not reach have "
@@ -776,6 +792,8 @@ STRINGS = {
         "vpnAutoEvery": "refresh every {n} h",
         "vpnProviderEvery": "provider recommends {n} h",
         "vpnUpdated": "updated {t}",
+        "vpnQuota": "traffic: {used} of {total} · {left} left",
+        "vpnExpires": "subscription until {date}",
         "vpnRefreshFailed": "the last automatic refresh failed",
         "vpnIpv6": "The configuration has no full IPv6 route",
         "vpnHint": "A new tunnel is saved turned off. Subscriptions can be "
@@ -818,6 +836,14 @@ STRINGS = {
         "diagDownload": "download diagnostics",
         "diagCopied": "Diagnostics copied. Secrets were removed.",
         "diagFailed": "Diagnostics could not be collected.",
+        "statusAllowed": "Allowed {a}/{b}",
+        "statusUnknown": "Unknown: {n}",
+        "statusClashes": "Conflicts: {n}",
+        "allowAlways": "Always",
+        "undoSaved": "Change saved",
+        "undo": "Undo",
+        "copy": "copy",
+        "found": "Showing {a} of {b}",
         "sPoll": "counter poll, s",
         "sKeep": "keep day by day, months",
         "sKeepWhat": "How many months keep their day-by-day breakdown. Older "
@@ -2248,6 +2274,16 @@ def _tunnel_row(row):
         refresh_error = str(row.get("refresh_error") or "")
         clean["refresh_error"] = refresh_error \
             if refresh_error in SAFE_VPN_ERRORS else "invalid-state"
+        for key in ("quota_used", "quota_total"):
+            try:
+                clean[key] = min(max(0, int(row.get(key) or 0)), 2**53 - 1)
+            except (TypeError, ValueError):
+                clean[key] = 0
+        try:
+            clean["expires_at"] = min(max(0, int(row.get("expires_at") or 0)),
+                                      253402300799)
+        except (TypeError, ValueError):
+            clean["expires_at"] = 0
     for key in ("verified", "ipv6"):
         if key in row:
             clean[key] = bool(row[key])
@@ -2380,14 +2416,37 @@ def parse_refresh_hours(headers):
         return 0
 
 
+def parse_subscription_userinfo(headers):
+    """Browser-safe traffic counters and expiry from Subscription-Userinfo."""
+    empty = {"quota_used": 0, "quota_total": 0, "expires_at": 0}
+    try:
+        values = {str(k).lower(): v for k, v in headers.items()}
+        raw = str(values.get("subscription-userinfo") or "")
+    except (AttributeError, TypeError):
+        return empty
+    fields = {}
+    for item in raw.split(";"):
+        key, sep, value = item.partition("=")
+        value = value.strip()
+        if sep and value.isdigit():
+            fields[key.strip().lower()] = min(int(value), 2**53 - 1)
+    total = fields.get("total", 0)
+    used = min(fields.get("upload", 0) + fields.get("download", 0), 2**53 - 1)
+    expires = fields.get("expire", 0)
+    return {"quota_used": used if total else 0,
+            "quota_total": total,
+            # Keep JavaScript's date formatter away from unbounded input.
+            "expires_at": expires if expires <= 253402300799 else 0}
+
+
 def fetch_subscription(url, fetcher=None):
-    """Body plus the only response header the panel is allowed to retain."""
+    """Body plus the small, browser-safe subset of response metadata."""
     result = fetcher(url) if fetcher else singbox_sub.fetch(url, with_headers=True)
     if isinstance(result, tuple) and len(result) == 2:
         body, headers = result
     else:                              # old/test fetchers return the body alone
         body, headers = result, {}
-    return body, parse_refresh_hours(headers)
+    return body, parse_refresh_hours(headers), parse_subscription_userinfo(headers)
 
 
 def refresh_schedule(row, provider_hours, now=None):
@@ -2688,7 +2747,7 @@ def vpn_add(body, runner=None, fetcher=None):
             try:
                 url, exclude = check_subscription(body.get("url"),
                                                   body.get("exclude"))
-                content, provider_hours = fetch_subscription(url, fetcher)
+                content, provider_hours, provider_info = fetch_subscription(url, fetcher)
                 if (not isinstance(content, str)
                         or len(content.encode("utf-8")) > singbox_sub.SUB_BODY_MAX):
                     raise ValueError
@@ -2702,6 +2761,7 @@ def vpn_add(body, runner=None, fetcher=None):
             # picking among them is a separate, deliberate act.
             row["nodes"] = len(outs)
             row.update(refresh_schedule(row, provider_hours))
+            row.update(provider_info)
             write_private(tunnel_path(tid, ".json"),
                           {"url": url, "exclude": exclude, "body": content,
                            "skip": []})
@@ -3096,7 +3156,7 @@ def vpn_refresh(tid, runner=None, applier=None, fetcher=None, now=None):
         except Exception:
             raise VpnError("validation-failed") from None
     try:
-        content, provider_hours = fetch_subscription(url, fetcher)
+        content, provider_hours, provider_info = fetch_subscription(url, fetcher)
         if (not isinstance(content, str)
                 or len(content.encode("utf-8")) > singbox_sub.SUB_BODY_MAX):
             raise ValueError
@@ -3142,6 +3202,7 @@ def vpn_refresh(tid, runner=None, applier=None, fetcher=None, now=None):
         except Exception:
             was = None
         target.update(refresh_schedule(target, provider_hours, now))
+        target.update(provider_info)
         # The profile was downloaded and read: whatever it failed at last time
         # is no longer what is known about it. Pressing "refresh" on a stuck
         # row is the whole reason somebody presses it.
@@ -4933,9 +4994,14 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
 <title>{{t.title}}</title>
 <style>{{CSS}}
  #hdr{display:flex;align-items:center;gap:var(--s2);position:sticky;top:0;
-      z-index:10;background:var(--bg);padding:var(--s3) 0;margin-bottom:var(--s3)}
+      z-index:10;background:var(--bg);padding:var(--s3) 0;margin-bottom:var(--s3);
+      flex-wrap:wrap}
  #hdr.stuck{box-shadow:0 .5px 0 var(--line)}
  #hdr .sp{flex:1}
+ #statusbar{display:flex;gap:var(--s1)}
+ .chip{background:var(--fill);border:0;border-radius:var(--r-pill);
+       padding:var(--s1) var(--s2);font-size:var(--f-sec);cursor:pointer}
+ .chip.bad{background:var(--redbg)}
  .ban{display:flex;align-items:center;gap:var(--s3);border-radius:var(--r-panel);
       padding:var(--s2) var(--s3);margin-bottom:var(--s2);font-size:var(--f-row)}
  .ban .sp{flex:1}
@@ -4999,6 +5065,7 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
     font-size:var(--f-sec);line-height:1.4;white-space:normal}
  .q:hover>span,.q:focus>span{display:block}
  #flt{max-width:9rem}
+ .copy{background:none;border:0;padding:0;color:inherit;cursor:copy}
  #addrow>summary{list-style:none;display:inline-block;margin-top:var(--s3)}
  #addrow>summary::-webkit-details-marker{display:none}
  #addrow form{display:flex;gap:var(--s2);flex-wrap:wrap;margin-top:var(--s2)}
@@ -5073,6 +5140,8 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  /* Узлы одной подписки: вложенный список под её строкой, отступлен слева —
     тот же приём, что и у .list.inset, показывает, чьи они. */
  .nodes{margin:0 0 var(--s3) var(--s5);display:flex;flex-direction:column}
+ .nodecontrols{display:flex;gap:var(--s2);margin:var(--s2) 0;flex-wrap:wrap}
+ .nodecontrols input{flex:1;min-width:8rem}
  .noderow{display:flex;align-items:center;gap:var(--s2);min-height:36px;
           padding:var(--s1) 0;border-bottom:.5px solid var(--line);cursor:pointer}
  .noderow:last-of-type{border-bottom:0}
@@ -5094,14 +5163,25 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
      это двадцать пикселей, которые целиком достаются имени; остальное даёт
      пара скоростей, которой разрешено встать в две строки. */
   .dmain{gap:var(--s2)}
+  #statusbar{order:3;width:100%;overflow:auto}
  }
+ .quickallow{display:flex;gap:var(--s1);flex-wrap:wrap;justify-content:flex-end}
+ #ub .row{flex-wrap:wrap}
+ .undo{position:fixed;z-index:15;left:50%;bottom:var(--s5);
+       transform:translateX(-50%);display:flex;align-items:center;gap:var(--s4);
+       width:max-content;max-width:calc(100vw - 2 * var(--s4));padding:var(--s2) var(--s3);
+       background:var(--panel);border-radius:var(--r-panel);box-shadow:var(--sh)}
+ .undo[hidden]{display:none}
 </style>
 <header id=hdr>
- <h1>{{t.h1}}</h1><span class=sp></span>
+ <h1>{{t.h1}}</h1><span class=sp></span><div id=statusbar></div>
  <button class="btn plain" onclick=openSheet()>{{t.settingsTitle}}</button>
  <button class="btn plain" onclick=logout()>{{t.logout}}</button>
 </header>
 <div id=banners></div>
+<div id=undoBar class=undo role=status aria-live=polite hidden>
+ <span id=undoText>{{t.undoSaved}}</span>
+ <button class=btn onclick=undoLast()>{{t.undo}}</button></div>
 <div class=sheet id=sheet hidden onclick="if(event.target===this)closeSheet()">
  <div id=sheetbox tabindex=-1 role=dialog aria-modal=true
    aria-label="{{t.settingsTitle}}">
@@ -5225,9 +5305,10 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  </div>
 </div>
 
-<div class=panel>
+<div class=panel id=devices>
  <div class=chead><h2>{{t.devicesTitle}}</h2><span class=sp></span>
-  <input id=flt class=field placeholder="{{t.filter}}" aria-label="{{t.filter}}"
+  <span id=found class=sec></span>
+  <input id=flt class=field type=search placeholder="{{t.filter}}" aria-label="{{t.filter}}"
     oninput=draw()>
   <span class=sortgrp><select id=srt class=field title="{{t.sortBy}}" onchange=setSort(this.value)></select>
   <button class=btn id=srtd onclick=flipSort()></button></span>
@@ -5313,6 +5394,16 @@ const mutate = (url, method='POST', body) => fetch(url, {
             'X-CSRF-Token': csrf},
   body: body === undefined ? '' : JSON.stringify(body)
 });
+const copyText = async text => {
+  if (navigator.clipboard && window.isSecureContext)
+    return navigator.clipboard.writeText(text);
+  const area = document.createElement('textarea');
+  area.value = text; area.style.position = 'fixed'; area.style.opacity = 0;
+  document.body.append(area); area.select();
+  const copied = document.execCommand('copy'); area.remove();
+  if (!copied) throw new Error();
+};
+const copyValue = button => copyText(button.dataset.copy).catch(() => {});
 const bypass = (v, el) => {
   if (el) el.value = '';
   if (v === '') return;
@@ -5342,6 +5433,27 @@ const upfmt = s => {
 let S = null, month = null, sel = null, mode = 'day', sortk = 'ip', sortd = 1,
     oth = 0, mtot = 0, openIp = null;
 let VPN = null, vpnBusy = false;
+let undoBody = null, undoTimer = null;
+
+const hideUndo = () => {
+  clearTimeout(undoTimer); undoBody = null; undoBar.hidden = true;
+};
+const offerUndo = body => {
+  clearTimeout(undoTimer); undoBody = body; undoBar.hidden = false;
+  undoTimer = setTimeout(hideUndo, 8000);
+};
+const undoLast = () => {
+  const body = undoBody; hideUndo();
+  if (body) post(body);
+};
+const changeDevice = (ip, key, value, before, until=0) =>
+  post({ip, [key]:value}).then(ok => {
+    if (!ok) return;
+    const undo = {ip, [key]:before};
+    if (key === 'on' && until > S.now)
+      undo.for = Math.max(1, Math.ceil((until-S.now)/60));
+    offerUndo(undo);
+  });
 
 // [short label, up, down, full label, other]. The chart draws whatever this
 // returns, so the month, the last 24 hours and one device's slice are the same
@@ -5471,14 +5583,16 @@ const devDetail = x => `<div class=ddet>`
   // которое он включён, а не действие, как называла его кнопка.
   + (S.vpnable ? `<label class=vpn title="${esc(T.vpnWhat)}">${T.vpnOff}`
       + `<input class=sw type=checkbox${x.vpn ? '' : ' checked'} `
-      + `onchange="post({ip:'${esc(x.ip)}',vpn:!this.checked})"></label>` : '')
+      + `onchange="changeDevice('${esc(x.ip)}','vpn',!this.checked,${x.vpn})"></label>` : '')
   + `<button class=btn onclick="pickDev('${esc(x.ip)}')">${T.showInChart}</button>`
   + `<span class=sp></span>`
   + `<button class="btn bad" onclick="del('${esc(x.ip)}',${x.ip === S.you})">`
   + `${T.del}</button></div>`
-  + `<div class="sec mono">${esc(x.mac)}</div></div>`;
+  + (x.mac ? `<button class="copy sec mono" data-copy="${esc(x.mac)}" `
+      + `title="${esc(T.copy)}" onclick="copyValue(this)">${esc(x.mac)}</button>` : '')
+  + `</div>`;
 
-const toggleRow = ip => { openIp = openIp === ip ? null : ip; draw(); };
+const toggleRow = ip => { openIp = openIp === ip ? null : ip; keep(); draw(); };
 
 const strip = () => {
   const ms = S.months.slice(-12), max = Math.max(...ms.map(m => m[1]), 1);
@@ -5566,10 +5680,12 @@ const vpnButton = (text, action, bad=false) => {
 // живёт отдельно от VPN, потому что приходит отдельным запросом и только по
 // просьбе — узлы читаются из кэша подписки, и платить за это на каждом открытии
 // настроек для каждого профиля незачем.
-let openNodes = null, NODES = null, nodesOff = new Set();
+let openNodes = null, NODES = null, nodesOff = new Set(),
+    nodeQuery = '', nodeSort = 'provider';
 const toggleNodes = id => {
   if (openNodes === id) { openNodes = NODES = null; renderVpn(); return; }
-  openNodes = id; NODES = null; renderVpn(); loadNodes(id);
+  openNodes = id; NODES = null; nodeQuery = ''; nodeSort = 'provider';
+  renderVpn(); loadNodes(id);
 };
 const loadNodes = async id => {
   try {
@@ -5591,23 +5707,50 @@ const nodeList = p => {
   box.append(vpnNode('p', 'hint', T.vpnNodesWhat));
   if (p.probe_at) box.append(vpnNode('p', 'sec',
     T.vpnProbeTime.replace('{t}', ago(Math.max(0, Date.now()/1000-p.probe_at)))));
-  NODES.forEach(n => {
-    const line = vpnNode('label', 'noderow');
-    const box2 = document.createElement('input');
-    box2.type = 'checkbox'; box2.className = 'sw'; box2.checked = !nodesOff.has(n.id);
-    box2.disabled = vpnBusy;
-    box2.onchange = () => {
-      if (box2.checked) nodesOff.delete(n.id); else nodesOff.add(n.id);
-      nodesSave.disabled = vpnBusy || nodesOff.size >= NODES.length;
-    };
-    line.append(box2, vpnNode('span', 'sp', n.name));
-    // Что показала последняя проверка. Ничего — значит этот узел ещё не
-    // спрашивали: у проверки есть потолок, и дальше него она не ходит.
-    if (n.up === true) line.append(vpnNode('span', 'good sec', n.ms
-      ? T.vpnNodeMs.replace('{n}', n.ms) : T.vpnNodeUp));
-    else if (n.up === false) line.append(vpnNode('span', 'bad sec', T.vpnNodeDown));
-    box.append(line);
+  const controls = vpnNode('div', 'nodecontrols');
+  const filter = document.createElement('input');
+  filter.id = 'nodeFilter'; filter.className = 'field'; filter.type = 'search';
+  filter.placeholder = T.filter; filter.setAttribute('aria-label', T.filter);
+  filter.value = nodeQuery;
+  const order = document.createElement('select');
+  order.className = 'field'; order.setAttribute('aria-label', T.sortBy);
+  [["provider", T.vpnNodeOrder], ["latency", T.vpnNodeLatency],
+   ["reachable", T.vpnNodeReachable]].forEach(([value, label]) => {
+    const option = document.createElement('option');
+    option.value = value; option.textContent = label; option.selected = nodeSort === value;
+    order.append(option);
   });
+  controls.append(filter, order); box.append(controls);
+  const list = vpnNode('div', 'nodeitems'); box.append(list);
+  const drawNodes = () => {
+    list.replaceChildren();
+    const query = nodeQuery.trim().toLowerCase();
+    const rows = NODES.map((node, index) => ({node, index}))
+      .filter(x => !query || x.node.name.toLowerCase().includes(query));
+    if (nodeSort === 'latency') rows.sort((a, b) =>
+      ((a.node.ms || Infinity) - (b.node.ms || Infinity)) || a.index - b.index);
+    if (nodeSort === 'reachable') rows.sort((a, b) =>
+      ((a.node.up === true ? 0 : a.node.up === false ? 2 : 1)
+       - (b.node.up === true ? 0 : b.node.up === false ? 2 : 1)) || a.index - b.index);
+    rows.forEach(({node:n}) => {
+      const line = vpnNode('label', 'noderow');
+      const box2 = document.createElement('input');
+      box2.type = 'checkbox'; box2.className = 'sw'; box2.checked = !nodesOff.has(n.id);
+      box2.disabled = vpnBusy;
+      box2.onchange = () => {
+        if (box2.checked) nodesOff.delete(n.id); else nodesOff.add(n.id);
+        nodesSave.disabled = vpnBusy || nodesOff.size >= NODES.length;
+      };
+      line.append(box2, vpnNode('span', 'sp', n.name));
+      if (n.up === true) line.append(vpnNode('span', 'good sec', n.ms
+        ? T.vpnNodeMs.replace('{n}', n.ms) : T.vpnNodeUp));
+      else if (n.up === false) line.append(vpnNode('span', 'bad sec', T.vpnNodeDown));
+      list.append(line);
+    });
+  };
+  filter.oninput = () => { nodeQuery = filter.value; drawNodes(); };
+  order.onchange = () => { nodeSort = order.value; drawNodes(); };
+  drawNodes();
   const foot = vpnNode('div', 'vpnacts');
   const save = vpnButton(T.vpnNodesSave, () =>
     vpnCall('nodes', {id: p.id, off: [...nodesOff]}).then(ok => {
@@ -5674,6 +5817,15 @@ const renderVpn = () => {
     if (p.kind === 'subscription' && p.updated_at)
       meta.append(vpnNode('div', 'sec', T.vpnUpdated.replace('{t}',
         ago(Math.max(0, Date.now()/1000-p.updated_at)))));
+    if (p.kind === 'subscription' && p.quota_total)
+      meta.append(vpnNode('div', 'sec', T.vpnQuota
+        .replace('{used}', fmt(p.quota_used))
+        .replace('{total}', fmt(p.quota_total))
+        .replace('{left}', fmt(Math.max(0, p.quota_total-p.quota_used)))));
+    if (p.kind === 'subscription' && p.expires_at)
+      meta.append(vpnNode('div', p.expires_at < Date.now()/1000 ? 'bad sec' : 'sec',
+        T.vpnExpires.replace('{date}', new Date(p.expires_at*1000)
+          .toLocaleDateString(T.locale, {day:'numeric', month:'short', year:'numeric'}))));
     if (p.kind === 'subscription' && p.refresh_error)
       meta.append(vpnNode('div', 'bad sec', T.vpnRefreshFailed));
     if (p.ipv6 === false) meta.append(vpnNode('div', 'sec', T.vpnIpv6));
@@ -5789,15 +5941,7 @@ const diagnostics = async copy => {
     if (!r.ok) throw new Error();
     const report = await r.text();
     if (copy) {
-      if (navigator.clipboard && window.isSecureContext)
-        await navigator.clipboard.writeText(report);
-      else {
-        const area = document.createElement('textarea');
-        area.value = report; area.style.position = 'fixed'; area.style.opacity = 0;
-        document.body.append(area); area.select();
-        const copied = document.execCommand('copy'); area.remove();
-        if (!copied) throw new Error();
-      }
+      await copyText(report);
       diagStatus.textContent = T.diagCopied;
     } else {
       const a = document.createElement('a');
@@ -5841,7 +5985,7 @@ document.addEventListener('keydown', e => {
 // default sort. In a private window localStorage throws, and then it is simply
 // not remembered. The picked device is not here: it lives in the address bar.
 const keep = () => { try {
-  localStorage.gwacl = JSON.stringify({mode, sortk, sortd});
+  localStorage.gwacl = JSON.stringify({mode, sortk, sortd, openIp});
 } catch (e) {} };
 // Ключ и направление разведены: раньше повторный клик по колонке переворачивал
 // порядок, а у селекта повторный выбор того же пункта события не даёт.
@@ -5849,12 +5993,15 @@ const DIRDEF = {ip: 1, name: 1, traf: -1, now: -1, seen: -1};
 const setSort = k => { sortk = k; sortd = DIRDEF[k]; keep(); draw(); };
 const flipSort = () => { sortd = -sortd; keep(); draw(); };
 const setMode = m => { mode = m; keep(); draw(); };
+const jump = id => document.getElementById(id).scrollIntoView(
+  {behavior:'smooth', block:'start'});
 // The picked device goes in the fragment and nowhere else: that makes it a
 // link one can send, and gives the back button something to undo. Picking only
 // moves the address on; onhashchange is what redraws, once.
 const pickDev = ip => { location.hash = (!ip || sel === ip) ? '' : ip; };
 onhashchange = () => { sel = location.hash.slice(1) || null; draw(); };
-const addKnown = b => post({ip: b.dataset.ip, name: b.dataset.nm});
+const addKnown = (b, mins=0) =>
+  post({ip: b.dataset.ip, name: b.dataset.nm, for: mins});
 
 // The table as the panel shows it, for a spreadsheet. Built here rather than
 // on the gateway: everything it needs is already in the browser.
@@ -5908,6 +6055,7 @@ const renderBanners = () => {
 const draw = () => {
   if (!S) return;
   if (sel && !S.devices.some(x => x.ip === sel)) sel = null;
+  if (openIp && !S.devices.some(x => x.ip === openIp)) { openIp = null; keep(); }
   const one = sel && S.devices.find(x => x.ip === sel);
   // The menu that opens it: while it is already open there is nothing left
   // to pick, so the row shows the remaining time instead; the warning and the
@@ -5919,6 +6067,13 @@ const draw = () => {
       + BYP.map(([v, k]) => `<option value="${v}">${T[k]}</option>`).join('')
       + `</select>`;
   const others = S.devices.filter(x => x.ip !== S.you);
+  statusbar.innerHTML = `<button class=chip onclick="jump('devices')">`
+    + T.statusAllowed.replace('{a}', S.devices.filter(x => x.on).length)
+      .replace('{b}', S.devices.length) + `</button>`
+    + (S.blocked.length ? `<button class=chip onclick="jump('unk')">`
+      + T.statusUnknown.replace('{n}', S.blocked.length) + `</button>` : '')
+    + (S.clash.length ? `<button class="chip bad" onclick="jump('clash')">`
+      + T.statusClashes.replace('{n}', S.clash.length) + `</button>` : '');
   allsw.hidden = !others.length;
   allsw.textContent = others.some(x => x.on) ? T.allOff : T.allOn;
   srt.innerHTML = Object.entries({ip: 'colAddr', name: 'colName', traf: 'colTraffic',
@@ -5975,6 +6130,7 @@ const draw = () => {
       const p = CMP[sortk](a), q = CMP[sortk](b);
       return (p < q ? -1 : p > q ? 1 : 0) * sortd;
     });
+  found.textContent = T.found.replace('{a}', list.length).replace('{b}', S.devices.length);
   tb.innerHTML = list.map(x => {
     const t = x.up + x.down, me = x.ip === S.you, r = x.rate[0] + x.rate[1];
     const live = r > 0 || (x.seen && S.now - x.seen < fresh);
@@ -5993,7 +6149,9 @@ const draw = () => {
      + (!x.name && x.host ? `<button class=ghost data-ip="${esc(x.ip)}" `
         + `data-nm="${esc(x.host)}" onclick="event.stopPropagation();addKnown(this)" `
         + `title="${esc(n(T.useHost, x.host))}">+</button>` : '')
-     + `<div class=sec><span class=mono>${esc(x.ip)}</span>`
+     + `<div class=sec><button class="copy mono" data-copy="${esc(x.ip)}" `
+     + `title="${esc(T.copy)}" onclick="event.stopPropagation();copyValue(this)">`
+     + `${esc(x.ip)}</button>`
      + `${me ? ' · ' + T.youAre : ''} · ${x.seen ? ago(S.now - x.seen) : '—'}</div>`
      + `</div><span class=sp></span>`
      + `<div class=dnum><b class=num>${fmt(t)}</b>`
@@ -6006,7 +6164,7 @@ const draw = () => {
      + `<input class=sw type=checkbox${x.on ? ' checked' : ''} `
      + `aria-label="${esc(x.name || x.ip)}" `
      + `onclick="event.stopPropagation()" `
-     + `onchange="post({ip:'${esc(x.ip)}',on:this.checked})">`
+     + `onchange="changeDevice('${esc(x.ip)}','on',this.checked,${x.on},${x.until})">`
      + `</div>${op ? devDetail(x) : ''}</div>`;
   }).join('') || `<p class=hint>${fq ? T.noMatch : T.empty}</p>`;
 
@@ -6029,8 +6187,13 @@ const draw = () => {
     + `<div class=sec>${esc(host)}${host && mac ? ' · ' : ''}${esc(mac)}`
     + `${ven ? ' · ' + esc(ven) : ''}</div></div><span class=sp></span>`
     + `<span class=sec>${knocked === null ? '' : ago(knocked)}</span>`
+    + `<span class=quickallow>`
     + `<button class=btn data-ip="${esc(ip)}" data-nm="${esc(host)}" `
-    + `onclick="addKnown(this)">${T.add}</button></div>`).join('');
+    + `onclick="addKnown(this,15)">${T.tm15}</button>`
+    + `<button class=btn data-ip="${esc(ip)}" data-nm="${esc(host)}" `
+    + `onclick="addKnown(this,60)">${T.tm1h}</button>`
+    + `<button class=btn data-ip="${esc(ip)}" data-nm="${esc(host)}" `
+    + `onclick="addKnown(this)">${T.allowAlways}</button></span></div>`).join('');
 
   lanips.innerHTML = S.lan.map(([ip, host]) =>
     `<option value="${esc(ip)}">${esc(host)}</option>`).join('');
@@ -6050,14 +6213,21 @@ const load = m => fetch('/api?month=' + (month = m || month || ''))
   .then(r => r.status === 401 ? location.reload()
     : r.json().then(s => { csrf = s.csrf || csrf; S = s; draw(); }))
   .then(() => stale(0), () => stale(1));
-const post = body => mutate('/api', 'POST', body)
-  .then(r => r.ok ? load() : r.text().then(alert));
+const post = body => {
+  hideUndo();
+  return mutate('/api', 'POST', body)
+    .then(r => r.ok ? load().then(() => true)
+      : r.text().then(x => { alert(x); return false; }));
+};
 const setName = (ip, name) => post({ip, name});
-const del = (ip, me) => confirm((me ? T.confirmDelMe : T.confirmDel).replace('{ip}', ip))
-  && mutate('/api?ip=' + encodeURIComponent(ip), 'DELETE')
-     .then(r => r.ok ? load() : r.text().then(alert));
+const del = (ip, me) => {
+  if (!confirm((me ? T.confirmDelMe : T.confirmDel).replace('{ip}', ip))) return;
+  hideUndo();
+  mutate('/api?ip=' + encodeURIComponent(ip), 'DELETE')
+    .then(r => r.ok ? load() : r.text().then(alert));
+};
 f.onsubmit = e => { e.preventDefault();
-  post({ip: f.ip.value, name: f.nm.value}).then(() => f.reset()); };
+  post({ip: f.ip.value, name: f.nm.value}).then(ok => ok && f.reset()); };
 // The answer is the new address when the port changed, and empty otherwise:
 // everything else is already live, the reload is only to redraw the labels.
 const saveCfg = () => mutate('/settings', 'POST', {
@@ -6118,6 +6288,9 @@ onscroll = () => hdr.classList.toggle('stuck', scrollY > 4);
 // "/" is where one starts typing at a table, in every other program.
 document.onkeydown = e => {
   if (!sheet.hidden) return;   // filter sits behind the sheet's scrim
+  if (e.key === 'Escape' && document.activeElement === flt && flt.value) {
+    flt.value = ''; draw(); return;
+  }
   if (e.key === '/' && !/^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName)) {
     e.preventDefault();
     flt.focus();
@@ -6131,6 +6304,7 @@ try {
   const p = JSON.parse(localStorage.gwacl || '{}');
   if (CMP[p.sortk]) { sortk = p.sortk; sortd = p.sortd === -1 ? -1 : 1; }
   if (p.mode === 'day' || p.mode === 'hour') mode = p.mode;
+  if (typeof p.openIp === 'string') openIp = p.openIp.slice(0, 64) || null;
 } catch (e) {}
 sel = location.hash.slice(1) || null;   // draw() drops it if it is gone
 
@@ -7498,6 +7672,16 @@ PersistentKeepalive = 25
     assert parse_refresh_hours({"profile-update-interval": "0"}) == 0
     assert parse_refresh_hours({"profile-update-interval": "bad"}) == 0
     assert parse_refresh_hours({"profile-update-interval": str(SUB_REFRESH_MAX + 1)}) == 0
+    assert parse_subscription_userinfo({}) == {
+        "quota_used": 0, "quota_total": 0, "expires_at": 0}
+    assert parse_subscription_userinfo({"Subscription-Userinfo":
+        "upload=1024; download=2048; total=8192; expire=1893456000"}) == {
+        "quota_used": 3072, "quota_total": 8192,
+        "expires_at": 1893456000}
+    assert parse_subscription_userinfo({"subscription-userinfo":
+        "upload=-1; download=bad; total=0; expire=never"}) == {
+        "quota_used": 0, "quota_total": 0, "expires_at": 0}, \
+        "malformed provider counters must not reach the catalog"
     assert check_refresh_hours(0) == 0 and check_refresh_hours("12") == 12
     assert check_refresh_hours(" 6 ") == 6, \
         "a header may carry the space after its colon"
@@ -7559,10 +7743,16 @@ PersistentKeepalive = 25
             sub = vpn_add({"kind": "subscription", "name": "probe me",
                            "url": "https://provider.example/token"},
                           fetcher=lambda url: (body,
-                              {"Profile-Update-Interval": "6"}))
+                              {"Profile-Update-Interval": "6",
+                               "Subscription-Userinfo":
+                               "upload=1024; download=2048; total=8192; "
+                               "expire=1893456000"}))
             assert sub["probe"] == "" and sub["reach"] == 0, \
                 "a new profile has not been checked yet"
             assert sub["refresh_hours"] == sub["provider_hours"] == 6
+            assert (sub["quota_used"], sub["quota_total"], sub["expires_at"]) == \
+                (3072, 8192, 1893456000), \
+                "provider quota metadata must reach the settings page"
             assert not sub["refresh_manual"] and sub["updated_at"]
             wire = vpn_add({"kind": "wireguard", "name": "probe wg",
                             "config": wg}, runner=quick_ok)
@@ -7683,10 +7873,16 @@ PersistentKeepalive = 25
             same_secret = open(tunnel_path(sub["id"], ".json"), "rb").read()
             same_probe = _find_tunnel(load_tunnels(), sub["id"])["probe"]
             vpn_refresh(sub["id"], fetcher=lambda url: (
-                body, {"profile-update-interval": "3"}), now=200)
+                body, {"profile-update-interval": "3",
+                       "subscription-userinfo":
+                       "upload=4096; download=1024; total=16384; "
+                       "expire=1924992000"}), now=200)
             scheduled = _find_tunnel(load_tunnels(), sub["id"])
             assert scheduled["refresh_hours"] == 12
             assert scheduled["provider_hours"] == 3 and scheduled["refresh_manual"]
+            assert (scheduled["quota_used"], scheduled["quota_total"],
+                    scheduled["expires_at"]) == (5120, 16384, 1924992000), \
+                "a refresh must replace the provider quota reading"
             assert open(tunnel_path(sub["id"], ".json"), "rb").read() == same_secret
             assert scheduled["probe"] == same_probe, \
                 "an unchanged body must keep its readings and avoid a rebuild"
@@ -8741,7 +8937,8 @@ PersistentKeepalive = 25
     page = render(PAGE_T)
     for needle in ('id="vpnList"', 'id="vpnKind"', 'id="vpnSecret"',
                    'id="vpnCheckAll"', 'id=diagStatus',
-                   'aria-live="polite"', 'autocomplete="off"'):
+                   'id=statusbar', 'id=undoBar', "filter.id = 'nodeFilter'",
+                   'type=search', 'aria-live="polite"', 'autocomplete="off"'):
         assert needle in page, f"the tunnel form has no {needle}"
     assert "PrivateKey" not in page and "PresharedKey" not in page, \
         "a tunnel secret leaked into the rendered page"

@@ -175,6 +175,10 @@ The browser sends **minutes**, never a moment. It is the side that knows what
 is the side that knows what time it is. A clock skew on either would otherwise
 turn into a device let out for a day.
 
+The unknown-device row uses the same path. Fifteen minutes and one hour create
+an ordinary enabled entry with `until`; expiry switches it off rather than
+inventing a second kind of temporary device.
+
 ### Following a device that DHCP moved
 
 Everything hangs off the address: the rule, the two counters, the day buckets.
@@ -246,6 +250,9 @@ elements are bare addresses that would otherwise read as a list of intruders.
 This is strictly better than scanning ARP for this purpose. It lists exactly the
 devices that tried to route through the host and were refused, rather than
 everything that happens to be on the wire.
+
+The header counts this list and address clashes from the same `/api` answer; it
+does not run another network or nftables query. Its links only scroll the page.
 
 ## Rates, and the hour
 
@@ -569,6 +576,8 @@ A check writes what it found per node into the same file, merged into a freshly
 re-read copy rather than the one it was holding, because a refresh may have
 committed a whole new body while it waited on sockets. Picked nodes are probed
 first, so that when the cap cuts the list short it cuts the ones nobody chose.
+Filtering and sorting that list are browser-only views over this answer; they do
+not rewrite provider order or the saved selection.
 
 ## Checking a profile without switching onto it
 
@@ -604,8 +613,9 @@ pretended they could safely run together would only add another queue.
 ## Automatic subscription refresh
 
 `singbox_sub.fetch(..., with_headers=True)` returns the body and response
-headers without changing its CLI contract. The panel retains only the integer
-`Profile-Update-Interval`, whose unit is hours. `provider_hours` records that
+headers without changing its CLI contract. The panel retains the integer
+`Profile-Update-Interval`, whose unit is hours, plus non-secret counters and
+expiry from `Subscription-Userinfo`. `provider_hours` records that
 recommendation; `refresh_hours` is the effective period; `refresh_manual`
 keeps a person's later choice from being silently replaced by another header.
 Zero means no schedule and the accepted ceiling is one year.
