@@ -215,6 +215,11 @@ service, and being logged out by one's own upgrade is where it stings most. A
 write happens only on sign-in and sign-out, and a failed write is not an error.
 A read-only `/etc` simply puts the session back to living in memory only.
 
+The cookie is a browser-session cookie by default. The login form's **Sign in
+automatically** checkbox adds a seven-day `Max-Age`; it does not store the
+password or identify the device any other way. Both kinds of server-side token
+expire after the same seven days.
+
 ## Unknown devices
 
 ```

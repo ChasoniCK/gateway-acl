@@ -311,11 +311,12 @@ The panel is reachable from the whole LAN and protected by **one password**.
 
 - Stored as scrypt with a random salt, never in plaintext. The installer reads
   it and pipes it straight into `panel.py --set-password`.
-- The session cookie is `HttpOnly`, `SameSite=Strict`, seven days. Sessions are
-  kept in `sessions.json` (mode 0600) as digests, so they survive a restart of
-  the service and an upgrade no longer signs everyone out. The file on its own
-  opens nothing: what is in it cannot be presented as a cookie. Logging out
-  really does revoke.
+- The session cookie is `HttpOnly` and `SameSite=Strict`. By default it lasts
+  until the browser session ends; **Sign in automatically** keeps it for up to
+  seven days on that device. Sessions are kept in `sessions.json` (mode 0600)
+  as digests, so they survive a restart of the service and an upgrade no longer
+  signs everyone out. The file on its own opens nothing: what is in it cannot
+  be presented as a cookie. Logging out really does revoke.
 - Five wrong guesses from one address, and that address waits a minute.
 
 **It is plain HTTP.** The password crosses the network unencrypted. On a small

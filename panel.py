@@ -368,6 +368,7 @@ STRINGS = {
         "panelTitle": "Панель шлюза",
         "password": "пароль",
         "signIn": "войти",
+        "autoLogin": "Входить автоматически",
         "wrongPw": "Неверный пароль.",
         "loggedOut": "Вы вышли.",
         "tooMany": "Слишком много попыток. Подождите минуту.",
@@ -677,6 +678,7 @@ STRINGS = {
         "panelTitle": "Gateway panel",
         "password": "password",
         "signIn": "sign in",
+        "autoLogin": "Sign in automatically",
         "wrongPw": "Wrong password.",
         "loggedOut": "Signed out.",
         "tooMany": "Too many attempts. Wait a minute.",
@@ -1243,6 +1245,11 @@ def new_session():
     _sessions[_tok(t)] = time.time() + SESSION_TTL
     _save_sessions()
     return t
+
+
+def session_cookie(token, remember=False):
+    cookie = f"sess={token}; Path=/; HttpOnly; SameSite=Strict"
+    return cookie + (f"; Max-Age={SESSION_TTL}" if remember else "")
 
 
 def drop_session(token):
@@ -4857,6 +4864,9 @@ LOGIN_T = """<!doctype html><meta charset=utf-8>
     всю ширину — это и есть «войти», а не приписка сбоку от поля. */
  form{display:flex;flex-direction:column;gap:var(--s2);margin-top:var(--s3)}
  form input{width:100%}
+ .remember{display:flex;align-items:center;gap:var(--s2);min-height:44px;
+           cursor:pointer}
+ .remember input{width:auto}
  .err{color:var(--red);font-size:var(--f-sec);margin-top:var(--s2)}
 </style>
 <div class=panel>
@@ -4864,6 +4874,8 @@ LOGIN_T = """<!doctype html><meta charset=utf-8>
  <form method=post action=/login>
   <input class=field name=password type=password autocomplete=current-password
     placeholder="{{t.password}}" autofocus>
+  <label class=remember><input name=remember type=checkbox value=1>
+   {{t.autoLogin}}</label>
   <button class="btn tinted">{{t.signIn}}</button>
  </form>
  {{MSG}}
@@ -6436,7 +6448,8 @@ class H(BaseHTTPRequestHandler):
         if not conf()["pw"]:
             self._send(200, login_page(f'<p class=err>{T["noPw"]}</p>'))
             return
-        password = parse_qs(raw.decode("utf-8", "replace")).get("password", [""])[0]
+        form = parse_qs(raw.decode("utf-8", "replace"))
+        password = form.get("password", [""])[0]
         if not check_password(password):
             note_fail(ip)
             self._send(200, login_page(f'<p class=err>{T["wrongPw"]}</p>'))
@@ -6444,8 +6457,8 @@ class H(BaseHTTPRequestHandler):
         _fails.pop(ip, None)
         self.send_response(303)
         self.send_header("Location", "/")
-        self.send_header("Set-Cookie", f"sess={new_session()}; Path=/; HttpOnly; "
-                                       f"SameSite=Strict; Max-Age={SESSION_TTL}")
+        self.send_header("Set-Cookie", session_cookie(
+            new_session(), form.get("remember") == ["1"]))
         self.send_header("Content-Length", "0")
         self.end_headers()
 
@@ -8192,6 +8205,14 @@ PersistentKeepalive = 25
         assert session_ok(t) and not session_ok("forged")
         assert _load_sessions() == _sessions, "a session must survive a restart"
         assert t not in open(SESSIONS).read(), "the cookie itself must not be on disk"
+        assert "Max-Age" not in session_cookie(t), \
+            "automatic sign-in must be off by default"
+        saved = session_cookie(t, True)
+        assert f"Max-Age={SESSION_TTL}" in saved and \
+            "HttpOnly" in saved and "SameSite=Strict" in saved, \
+            "automatic sign-in must keep the protected cookie for seven days"
+        assert '<input name=remember type=checkbox value=1>' in login_page(), \
+            "the automatic sign-in checkbox must start unchecked"
         drop_session(t)
         assert not session_ok(t) and _load_sessions() == {}, "logging out must revoke"
         u = new_session()
