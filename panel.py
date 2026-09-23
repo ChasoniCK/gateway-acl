@@ -364,7 +364,6 @@ STRINGS = {
         "hAgo": "{n} ч назад",
         "dAgo": "{n} дн назад",
         "loginTitle": "Шлюз — вход",
-        "panelTitle": "Панель шлюза",
         "password": "пароль",
         "signIn": "войти",
         "autoLogin": "Входить автоматически",
@@ -687,7 +686,6 @@ STRINGS = {
         "hAgo": "{n} h ago",
         "dAgo": "{n} d ago",
         "loginTitle": "Gateway — sign in",
-        "panelTitle": "Gateway panel",
         "password": "password",
         "signIn": "sign in",
         "autoLogin": "Sign in automatically",
@@ -4780,6 +4778,9 @@ CSS = TOKENS + """
  .sec{font-size:var(--f-sec);color:var(--dim)}
  .hint{color:var(--dim);font-size:var(--f-sec);margin:var(--s2) 0 0;
        overflow-wrap:anywhere}
+ /* 26px: девять рядов точек по три пикселя, на экране с обычной плотностью
+    точка ещё круглая, а не квадратик. */
+ .logo{display:block;height:26px;width:auto}
 
  /* Панель: белое на сером отделяется само, поэтому рамки нет. В тёмной теме
     серое на сером не отделяется — там она волосяная. */
@@ -4981,7 +4982,7 @@ LOGIN_T = """<!doctype html><meta charset=utf-8>
  .err{color:var(--red);font-size:var(--f-sec);margin-top:var(--s2)}
 </style>
 <div class=panel>
- <h1>{{t.panelTitle}}</h1>
+ <h1>{{LOGO}}</h1>
  <form method=post action=/login>
   <input class=field name=password type=password autocomplete=current-password
     placeholder="{{t.password}}" autofocus>
@@ -5052,9 +5053,6 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
       margin:0 calc(-1 * var(--s1)) var(--s3);flex-wrap:wrap}
  #hdr.stuck{box-shadow:0 .5px 0 var(--line)}
  #hdr .sp{flex:1}
- /* 26px: девять рядов точек по три пикселя, на экране с обычной плотностью
-    точка ещё круглая, а не квадратик. */
- .logo{display:block;height:26px;width:auto}
  #statusbar{display:flex;gap:var(--s1)}
  .chip{background:var(--fill);border:0;border-radius:var(--r-pill);
        padding:var(--s1) var(--s2);font-size:var(--f-sec);cursor:pointer}
