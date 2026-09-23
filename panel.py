@@ -281,7 +281,6 @@ def update_conf(change):
 STRINGS = {
     "ru": {
         "title": "Шлюз",
-        "h1": "Устройства через шлюз",
         "logout": "выйти",
         "close": "Закрыть",
         "total": "всего",
@@ -605,7 +604,6 @@ STRINGS = {
     },
     "en": {
         "title": "Gateway",
-        "h1": "Devices through the gateway",
         "logout": "log out",
         "close": "Close",
         "total": "total",
@@ -4919,6 +4917,42 @@ def png_icon(size=180, bg=(44, 44, 46), fg=(10, 132, 255)):
 
 ICON_PNG = png_icon()
 
+# Надпись в шапке набрана точками, как на табло роутера. Шрифт с диска взять
+# нельзя: у шлюза нет интернета, а файл шрифта в репозитории — это лицензия и
+# сотни килобайт ради одиннадцати букв. Сетка 5×9: две строки над строчными
+# (t, l), пять строк самих строчных, две под ними (g, y).
+DOTS = {
+    "a": ["", "", " ### ", "    #", " ####", "#   #", " ####"],
+    "c": ["", "", " ####", "#    ", "#    ", "#    ", " ####"],
+    "e": ["", "", " ### ", "#   #", "#####", "#    ", " ####"],
+    "g": ["", "", " ####", "#   #", "#   #", "#   #", " ####", "    #", " ### "],
+    # С хвостом, как у t: с засечками наверху и внизу она читается как «1».
+    "l": [" #   ", " #   ", " #   ", " #   ", " #   ", " #   ", "  ## "],
+    "t": ["", "  #  ", "#####", "  #  ", "  #  ", "  #  ", "   ##"],
+    "w": ["", "", "#   #", "#   #", "# # #", "# # #", " # # "],
+    "y": ["", "", "#   #", "#   #", "#   #", "#   #", " ####", "    #", " ### "],
+    "-": ["", "", "", "", " ### "],
+}
+
+
+def dot_logo(word="gateway-acl"):
+    """The word as one SVG path of dots.
+
+    Each dot is a zero-length segment with a round cap, so the whole mark is
+    one element and about a kilobyte. It is drawn in currentColor and follows
+    the theme on its own.
+    """
+    d = "".join(f"M{i * 6 + x + .5} {y + .5}h0"
+                for i, ch in enumerate(word)
+                for y, line in enumerate(DOTS[ch])
+                for x, c in enumerate(line) if c == "#")
+    return (f'<svg class=logo viewBox="0 0 {len(word) * 6 - 1} 9" role=img '
+            f'aria-label="{word}"><path d="{d}" stroke=currentColor '
+            'stroke-width=.8 stroke-linecap=round /></svg>')
+
+
+LOGO = dot_logo()
+
 # The head both pages share. theme-color paints the browser's own chrome around
 # the panel: the address bar on Android, the status bar of a page kept on a
 # home screen. It cannot read a CSS variable, so the two backgrounds are
@@ -4980,6 +5014,7 @@ def render(tpl, t=None):
                .replace("{{CFG}}", CONFIG)
                .replace("{{ICON}}", ICON)
                .replace("{{ICONPNG}}", ICON_PNG)
+               .replace("{{LOGO}}", LOGO)
                .replace("{{RELEASES}}", RELEASES_PAGE)
                .replace("{{UPDLOG}}", UPDATE_LOG)
                # The settings form is filled in from the running config.
@@ -5014,6 +5049,9 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
       flex-wrap:wrap}
  #hdr.stuck{box-shadow:0 .5px 0 var(--line)}
  #hdr .sp{flex:1}
+ /* 26px: девять рядов точек по три пикселя, на экране с обычной плотностью
+    точка ещё круглая, а не квадратик. */
+ .logo{display:block;height:26px;width:auto}
  #statusbar{display:flex;gap:var(--s1)}
  .chip{background:var(--fill);border:0;border-radius:var(--r-pill);
        padding:var(--s1) var(--s2);font-size:var(--f-sec);cursor:pointer}
@@ -5032,6 +5070,10 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  .ch .sp{flex:1}
  .chead{display:flex;align-items:center;flex-wrap:wrap;gap:var(--s3);margin-bottom:var(--s3)}
  .chead .sp{flex:1}
+ /* Переключатель и CSV переносятся только вместе. Если с названием месяца
+    им тесно, они уходят второй строкой и прижимаются вправо. Раньше CSV
+    оставался на второй строке один. */
+ .cctl{display:flex;align-items:center;gap:var(--s2);margin-left:auto}
  .sortgrp{display:flex;align-items:center;gap:2px}
  .hero{display:flex;align-items:baseline;gap:var(--s2)}
  .hero b{font-size:var(--f-hero);font-weight:600;letter-spacing:-.02em}
@@ -5181,6 +5223,8 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
      это двадцать пикселей, которые целиком достаются имени; остальное даёт
      пара скоростей, которой разрешено встать в две строки. */
   .dmain{gap:var(--s2)}
+  /* Месяц, переключатель и CSV как раз помещаются в строку на 375px. */
+  .chead{gap:var(--s2)}
   #statusbar{order:3;width:100%;overflow:auto}
  }
  .quickallow{display:flex;gap:var(--s1);flex-wrap:wrap;justify-content:flex-end}
@@ -5192,7 +5236,7 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  .undo[hidden]{display:none}
 </style>
 <header id=hdr>
- <h1>{{t.h1}}</h1><span class=sp></span><div id=statusbar></div>
+ <h1>{{LOGO}}</h1><span class=sp></span><div id=statusbar></div>
  <button class="btn plain" onclick=openSheet()>{{t.settingsTitle}}</button>
 </header>
 <div id=banners></div>
@@ -5309,10 +5353,10 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
 <div class=row2>
  <div class=panel>
   <div class=chead><h2 id=mtitle></h2><span class=sp></span>
-   <div class=seg id=seg>
+   <div class=cctl><div class=seg id=seg>
     <button onclick="setMode('day')">{{t.byDay}}</button>
     <button onclick="setMode('hour')">{{t.byHour}}</button></div>
-   <button class=btn onclick=csv() title="{{t.csvWhat}}">CSV</button>
+   <button class=btn onclick=csv() title="{{t.csvWhat}}">CSV</button></div>
   </div>
   <div class=hero><b class="num" id=kt></b><em id=kdelta></em></div>
   <div class=sec id=ksum></div>
