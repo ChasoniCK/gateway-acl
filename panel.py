@@ -5194,7 +5194,6 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
 <header id=hdr>
  <h1>{{t.h1}}</h1><span class=sp></span><div id=statusbar></div>
  <button class="btn plain" onclick=openSheet()>{{t.settingsTitle}}</button>
- <button class="btn plain" onclick=logout()>{{t.logout}}</button>
 </header>
 <div id=banners></div>
 <div id=undoBar class=undo role=status aria-live=polite hidden>
@@ -5296,6 +5295,10 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
   <div class="list inset panel">
    <div class=row><span class=sp>{{t.sPw}}</span><input id=s_pw class=field
      type=password autocomplete=new-password placeholder="{{t.sPwKeep}}"></div>
+   <!-- Выход здесь, а не в шапке: на телефоне он не помещался в строку с
+        заголовком и уходил на вторую строку липкой шапки. Нужен он редко. -->
+   <div class=row><span class=sp></span>
+    <button class="btn bad" onclick=logout()>{{t.logout}}</button></div>
   </div>
 
   <div class=srow2><span class="sec mono sp">gateway-acl {{VERSION}}</span>
