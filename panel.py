@@ -600,6 +600,7 @@ STRINGS = {
         "updateWhat": "что изменилось",
         "dotLive": "трафик идёт",
         "dotQuiet": "тихо",
+        "rowMore": "Подробнее",
         "rolled": "разбивка по дням за этот месяц свёрнута, остался только итог",
     },
     "en": {
@@ -924,6 +925,7 @@ STRINGS = {
         "updateWhat": "what changed",
         "dotLive": "traffic is flowing",
         "dotQuiet": "quiet",
+        "rowMore": "Details",
         "rolled": "the day-by-day detail for this month is folded away, only "
                   "the total is left",
     },
@@ -4742,14 +4744,14 @@ def state(month=None):
 LIGHT = """--bg:#F2F2F7;--panel:#FFFFFF;--line:rgba(60,60,67,.29);
   --fill:rgba(120,120,128,.12);--fg:#000000;--dim:rgba(60,60,67,.6);
   --dim2:rgba(60,60,67,.3);--blue:#007AFF;--green:#34C759;--red:#FF3B30;
-  --orange:#FF9500;--mut:rgba(120,120,128,.35);--track:rgba(120,120,128,.16);
+  --orange:#FF9500;--ok:#248A3D;--mut:rgba(120,120,128,.35);--track:rgba(120,120,128,.16);
   --redbg:rgba(255,59,48,.12);--bluebg:rgba(0,122,255,.12);
   --sh:0 8px 30px rgba(0,0,0,.14)"""
 
 DARK = """--bg:#1C1C1E;--panel:#2C2C2E;--line:rgba(84,84,88,.6);
   --fill:rgba(120,120,128,.24);--fg:#FFFFFF;--dim:rgba(235,235,245,.6);
   --dim2:rgba(235,235,245,.3);--blue:#0A84FF;--green:#30D158;--red:#FF453A;
-  --orange:#FF9F0A;--mut:rgba(120,120,128,.45);--track:rgba(120,120,128,.24);
+  --orange:#FF9F0A;--ok:#30D158;--mut:rgba(120,120,128,.45);--track:rgba(120,120,128,.24);
   --redbg:rgba(255,69,58,.18);--bluebg:rgba(10,132,255,.18);
   --sh:0 8px 30px rgba(0,0,0,.5)"""
 
@@ -4829,11 +4831,17 @@ CSS = TOKENS + """
  .seg button.on{background:var(--panel);color:var(--fg);
       box-shadow:var(--sh-seg)}
 
- .sheet{position:fixed;inset:0;z-index:20;background:var(--scrim);
-        display:flex;align-items:center;justify-content:center;padding:var(--s4)}
- /* [hidden] and .sheet share specificity, so without this the display:flex
-    above wins over the UA rule and the hidden attribute stops hiding anything. */
- .sheet[hidden]{display:none}
+ /* A modal <dialog>: the browser keeps Tab inside it, makes the page behind
+    inert, closes it on Esc and hands focus back to whatever opened it. The
+    dialog itself is the scrim, stretched over the whole screen, and ::backdrop
+    stays empty: an older Safari gives ::backdrop no custom properties, so a
+    scrim painted there would be no scrim at all. display:flex only while
+    [open], or it would override the UA rule that hides a closed dialog. */
+ .sheet{position:fixed;inset:0;width:auto;height:auto;max-width:none;
+        max-height:none;margin:0;border:0;padding:var(--s4);
+        background:var(--scrim);color:var(--fg)}
+ .sheet[open]{display:flex;align-items:center;justify-content:center}
+ .sheet::backdrop{background:none}
  /* dvh, not vh: on iOS vh is the height the page would have with the browser
     chrome hidden, so 86vh is taller than what is actually on screen and the
     last row of the form sits under the toolbar. vh stays as the fallback for
@@ -4846,8 +4854,8 @@ CSS = TOKENS + """
  .sheet>div:focus{outline:none}
 
  /* 11: above the sticky header (10) so a hover card near the top of a
-    scrolled chart is not drawn under it, below the settings sheet (20) so
-    it never floats over a modal. */
+    scrolled chart is not drawn under it. The settings sheet is a modal
+    dialog in the top layer, so it never floats over that either. */
  .pop{position:absolute;z-index:11;padding:var(--s2) var(--s3);
       background:var(--panel);border-radius:var(--r-ctl);box-shadow:var(--sh);
       font-size:var(--f-sec);pointer-events:none;white-space:nowrap}
@@ -4859,6 +4867,14 @@ CSS = TOKENS + """
     an element selector, and the first class that does would win over it. */
  @media (pointer:coarse){
   input,select,textarea{font-size:16px}
+  /* 44px, the smallest thing a finger hits reliably. A text button grows,
+     because it has no box to show. A switch, a chip and a segment keep
+     their look and get a bigger invisible pad instead. .ghost and .copy are
+     left alone: a pad on either would cover the name field beside it. */
+  .btn{min-height:44px;min-width:44px}
+  .sw::after,.chip::after,.seg button::after{content:"";position:absolute;
+    inset:-11px -3px}
+  .chip,.seg button{position:relative}
  }
  @media (max-width:620px){body{padding:var(--s3) var(--s3) var(--s5)}
   .panel{padding:var(--s3)}}
@@ -5030,7 +5046,7 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  /* One bar per month, click to go there. The height is the month's total, so
     a glance says whether this one is out of the ordinary. */
  .months{display:flex;gap:var(--s1);align-items:flex-end}
- .mo{flex:1;min-width:0;background:none;border:0;padding:var(--s1) 0 14px;
+ .mo{flex:1;min-width:0;background:none;border:0;padding:var(--s1) 0 18px;
      cursor:pointer;position:relative;
      display:flex;flex-direction:column;justify-content:flex-end;align-items:center;
      gap:var(--s1)}
@@ -5044,7 +5060,7 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  /* Из потока: иначе лишняя строка делает кнопку выше, а flex-end прижимает по
     низу кнопку целиком — и бар января оказывается выше баров соседей. */
  .mo u{position:absolute;bottom:0;left:0;right:0;text-align:center;
-       font-size:10px;color:var(--dim2);text-decoration:none}
+       font-size:var(--f-sec);color:var(--dim);text-decoration:none}
  .mo.cur span{color:var(--fg);font-weight:600}
  .meter{height:3px;border-radius:var(--r-pill);background:var(--track);
         margin:0 0 var(--s2) var(--s6)}
@@ -5057,8 +5073,8 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
     font-size:var(--f-sec);cursor:help}
  .q:hover,.q:focus{color:var(--fg);outline:none}
  /* 11: above the sticky header (10), because the machine card scrolls under
-    #hdr and the tooltip must stay readable there. Below the settings sheet
-    (20), same reasoning as .pop. */
+    #hdr and the tooltip must stay readable there. The settings sheet is in
+    the top layer, same reasoning as .pop. */
  .q>span{display:none;position:absolute;z-index:11;left:0;top:calc(100% + var(--s1));
     width:min(15rem,62vw);padding:var(--s2) var(--s3);background:var(--panel);
     border-radius:var(--r-ctl);box-shadow:var(--sh);color:var(--fg);
@@ -5071,8 +5087,10 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  #addrow form{display:flex;gap:var(--s2);flex-wrap:wrap;margin-top:var(--s2)}
  #addrow form input{flex:1;min-width:8rem}
  .bad{color:var(--red)}
- /* Пара к .bad: проверка прошла — это не «включено», а именно «отвечает». */
- .good{color:var(--green)}
+ /* Пара к .bad: проверка прошла — это не «включено», а именно «отвечает».
+    --ok, а не --green: системный зелёный на белом даёт 2.2:1 и как текст
+    не читается. В тёмной теме это один и тот же цвет. */
+ .good{color:var(--ok)}
  .drow{border-bottom:.5px solid var(--line)}
  .drow:last-child{border-bottom:0}
  .dmain{display:flex;align-items:center;gap:var(--s3);min-height:48px;
@@ -5182,9 +5200,9 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
 <div id=undoBar class=undo role=status aria-live=polite hidden>
  <span id=undoText>{{t.undoSaved}}</span>
  <button class=btn onclick=undoLast()>{{t.undo}}</button></div>
-<div class=sheet id=sheet hidden onclick="if(event.target===this)closeSheet()">
- <div id=sheetbox tabindex=-1 role=dialog aria-modal=true
-   aria-label="{{t.settingsTitle}}">
+<dialog class=sheet id=sheet aria-label="{{t.settingsTitle}}"
+  onclick="if(event.target===this)closeSheet()" onclose=clearSheet()>
+ <div id=sheetbox tabindex=-1>
   <div class=shead><h1>{{t.settingsTitle}}</h1><span class=sp></span>
    <button class=btn onclick=closeSheet()>{{t.close}}</button></div>
 
@@ -5283,7 +5301,7 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
   <div class=srow2><span class="sec mono sp">gateway-acl {{VERSION}}</span>
    <button class="btn tinted" onclick=saveCfg()>{{t.sSave}}</button></div>
  </div>
-</div>
+</dialog>
 
 <div class=row2>
  <div class=panel>
@@ -5968,18 +5986,15 @@ const vpnDeleteProfile = p => {
   vpnRequest('DELETE', '/vpn?id=' + encodeURIComponent(p.id));
 };
 
-// details закрывался сам; шит — нет, поэтому Esc и клик мимо пишутся руками.
-// Фокус на сам шит, а не на первый select: на телефоне фокус в <select> —
-// это сразу открытое колесо выбора языка поверх настроек, которые человек
-// только что открыл. Диалогу фокус всё равно нужен — с него начинают и Tab,
-// и озвучивание, — поэтому его берёт контейнер с tabindex=-1.
-const openSheet = () => { sheet.hidden = false; sheetbox.focus(); loadVpn(); };
-const closeSheet = () => {
-  sheet.hidden = true; vpnUrl.value = ''; vpnSecret.value = '';
-};
-document.addEventListener('keydown', e => {
-  if (e.key === 'Escape' && !sheet.hidden) closeSheet();
-});
+// Esc, ловушку Tab и возврат фокуса даёт сам <dialog>; руками остаётся
+// только клик мимо. Фокус на сам шит, а не на первый select: на телефоне фокус
+// в <select> — это сразу открытое колесо выбора языка поверх настроек, которые
+// человек только что открыл. showModal() сам отдал бы фокус кнопке «Закрыть»,
+// поэтому его сразу забирает контейнер с tabindex=-1.
+const openSheet = () => { sheet.showModal(); sheetbox.focus(); loadVpn(); };
+const closeSheet = () => sheet.close();
+// На close, а не в closeSheet: Esc закрывает диалог мимо неё.
+const clearSheet = () => { vpnUrl.value = ''; vpnSecret.value = ''; };
 
 // The view someone left behind, so a reload does not throw them back to the
 // default sort. In a private window localStorage throws, and then it is simply
@@ -6050,6 +6065,21 @@ const renderBanners = () => {
                  + `onclick=doUpdate()>${T.updateNow}</button>`)
         : '')
     + offban;
+};
+
+// innerHTML роняет фокус на body, а таблица пересобирается на каждом опросе:
+// кто дошёл Tab'ом до «Удалить», через пять секунд оказывался в начале
+// страницы. Запоминаем строку (data-row) и номер элемента в ней и после
+// пересборки ставим фокус туда же. Строка могла пропасть или поменяться, тогда
+// фокус просто не возвращается.
+const FOCUSABLE = 'button,input,select';
+const redraw = (box, markup) => {
+  const a = document.activeElement, row = box.contains(a) && a.closest('[data-row]');
+  const at = row && [row.dataset.row, [...row.querySelectorAll(FOCUSABLE)].indexOf(a)];
+  box.innerHTML = markup;
+  const r = at && [...box.children].find(el => el.dataset.row === at[0]);
+  const el = r && r.querySelectorAll(FOCUSABLE)[at[1]];
+  if (el) el.focus({preventScroll: true});
 };
 
 const draw = () => {
@@ -6131,11 +6161,11 @@ const draw = () => {
       return (p < q ? -1 : p > q ? 1 : 0) * sortd;
     });
   found.textContent = T.found.replace('{a}', list.length).replace('{b}', S.devices.length);
-  tb.innerHTML = list.map(x => {
+  redraw(tb, list.map(x => {
     const t = x.up + x.down, me = x.ip === S.you, r = x.rate[0] + x.rate[1];
     const live = r > 0 || (x.seen && S.now - x.seen < fresh);
     const op = openIp === x.ip;
-    return `<div class="drow${x.on ? '' : ' off'}${op ? ' open' : ''}">`
+    return `<div class="drow${x.on ? '' : ' off'}${op ? ' open' : ''}" data-row="${esc(x.ip)}">`
      + `<div class=dmain onclick="toggleRow('${esc(x.ip)}')">`
      + `<i class="dot${live ? ' live' : ''}" `
      + `title="${esc(live ? T.dotLive : T.dotQuiet)}"></i>`
@@ -6160,13 +6190,17 @@ const draw = () => {
      // достаются имени устройства вместо того, чтобы его обрезать.
      + `<div class=sec>${r > 0 ? `<span class=num>↓ ${fmt(x.rate[1])}${T.perSec}</span>`
         + ` <span class=num>↑ ${fmt(x.rate[0])}${T.perSec}</span>` : '—'}</div></div>`
-     + `<span class=chev>›</span>`
+     // Кнопка ради клавиатуры: строка — div, до неё Tab не доходит, а в
+     // раскрытой части таймер и удаление. Свой onclick ей не нужен, клик
+     // всплывает в .dmain.
+     + `<button class="btn chev" aria-expanded=${op} `
+     + `aria-label="${esc((x.name || x.ip) + ': ' + T.rowMore)}">›</button>`
      + `<input class=sw type=checkbox${x.on ? ' checked' : ''} `
      + `aria-label="${esc(x.name || x.ip)}" `
      + `onclick="event.stopPropagation()" `
      + `onchange="changeDevice('${esc(x.ip)}','on',this.checked,${x.on},${x.until})">`
      + `</div>${op ? devDetail(x) : ''}</div>`;
-  }).join('') || `<p class=hint>${fq ? T.noMatch : T.empty}</p>`;
+  }).join('') || `<p class=hint>${fq ? T.noMatch : T.empty}</p>`);
 
   renderBanners();
   if (S.update) announce(S.update);
@@ -6182,8 +6216,8 @@ const draw = () => {
   unk.hidden = !S.blocked.length;
   // The name and the hardware address go through data-, not into the onclick:
   // both come out of a lease file this program does not own.
-  ub.innerHTML = S.blocked.map(([ip, host, mac, knocked, ven]) =>
-    `<div class=row><div class=dname><b class=mono>${esc(ip)}</b>`
+  redraw(ub, S.blocked.map(([ip, host, mac, knocked, ven]) =>
+    `<div class=row data-row="${esc(ip)}"><div class=dname><b class=mono>${esc(ip)}</b>`
     + `<div class=sec>${esc(host)}${host && mac ? ' · ' : ''}${esc(mac)}`
     + `${ven ? ' · ' + esc(ven) : ''}</div></div><span class=sp></span>`
     + `<span class=sec>${knocked === null ? '' : ago(knocked)}</span>`
@@ -6193,7 +6227,7 @@ const draw = () => {
     + `<button class=btn data-ip="${esc(ip)}" data-nm="${esc(host)}" `
     + `onclick="addKnown(this,60)">${T.tm1h}</button>`
     + `<button class=btn data-ip="${esc(ip)}" data-nm="${esc(host)}" `
-    + `onclick="addKnown(this)">${T.allowAlways}</button></span></div>`).join('');
+    + `onclick="addKnown(this)">${T.allowAlways}</button></span></div>`).join(''));
 
   lanips.innerHTML = S.lan.map(([ip, host]) =>
     `<option value="${esc(ip)}">${esc(host)}</option>`).join('');
@@ -6287,7 +6321,7 @@ onscroll = () => hdr.classList.toggle('stuck', scrollY > 4);
 
 // "/" is where one starts typing at a table, in every other program.
 document.onkeydown = e => {
-  if (!sheet.hidden) return;   // filter sits behind the sheet's scrim
+  if (sheet.open) return;   // filter sits behind the sheet's scrim
   if (e.key === 'Escape' && document.activeElement === flt && flt.value) {
     flt.value = ''; draw(); return;
   }
