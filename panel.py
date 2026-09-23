@@ -5044,9 +5044,12 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
 {{HEAD}}
 <title>{{t.title}}</title>
 <style>{{CSS}}
+ /* Шапка шире контента на --s1 с каждой стороны. В тёмной теме у панели
+    волосяная рамка снаружи её коробки, и под шапкой ровно по ширине
+    контента эта рамка торчала по бокам двумя линиями. */
  #hdr{display:flex;align-items:center;gap:var(--s2);position:sticky;top:0;
-      z-index:10;background:var(--bg);padding:var(--s3) 0;margin-bottom:var(--s3);
-      flex-wrap:wrap}
+      z-index:10;background:var(--bg);padding:var(--s3) var(--s1);
+      margin:0 calc(-1 * var(--s1)) var(--s3);flex-wrap:wrap}
  #hdr.stuck{box-shadow:0 .5px 0 var(--line)}
  #hdr .sp{flex:1}
  /* 26px: девять рядов точек по три пикселя, на экране с обычной плотностью
