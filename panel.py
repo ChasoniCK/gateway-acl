@@ -5066,9 +5066,6 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  /* The chart earns the width, the machine's numbers do not. */
  .row2{display:grid;gap:var(--s4);grid-template-columns:minmax(0,2fr) minmax(0,22rem);
       align-items:start}
- .ch{display:flex;align-items:baseline;gap:.6rem;margin-bottom:.9rem}
- .ch h2{margin:0}
- .ch .sp{flex:1}
  .chead{display:flex;align-items:center;flex-wrap:wrap;gap:var(--s3);margin-bottom:var(--s3)}
  .chead .sp{flex:1}
  /* Переключатель и CSV переносятся только вместе. Если с названием месяца
