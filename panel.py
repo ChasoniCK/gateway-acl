@@ -3259,7 +3259,7 @@ def vpn_schedule(tid, hours, now=None):
         return target
 
 
-def vpn_auto_refresh(now=None, runner=None, applier=None, fetcher=None):
+def vpn_auto_refresh(now=None, fetcher=None):
     """Refresh at most one due subscription on a poller's tick."""
     now = int(time.time() if now is None else now)
     with _vpn_lock:
@@ -3270,7 +3270,7 @@ def vpn_auto_refresh(now=None, runner=None, applier=None, fetcher=None):
     # ponytail: one download per tick bounds poll latency; the next due profile
     # follows on the next tick if a fleet ever grows large enough to queue.
     try:
-        vpn_refresh(due, runner, applier, fetcher, now)
+        vpn_refresh(due, fetcher=fetcher, now=now)
     except Exception as e:
         with contextlib.suppress(Exception), _vpn_lock:
             rows = load_tunnels()
