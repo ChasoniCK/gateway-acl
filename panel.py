@@ -3709,14 +3709,13 @@ def _probe_subscription(row, runner=None, prober=None):
     return ("ok" if reach else "unreachable"), reach, len(picked), up, latency, fastest
 
 
-def _probe_link(kind, stripped, address, runner=None, sender=None, wait=None):
+def _probe_link(kind, stripped, address, runner=None, sender=None):
     """Bring one scratch WireGuard link up, force a handshake, tear it down.
 
     The link carries a single route to an address RFC 5737 reserves for
     documentation, so nothing real is ever sent through it. The handshake does
     not care where the packet was going, only that one was sent.
     """
-    wait = PROBE_WAIT if wait is None else wait
     tool = PROBE_CONF[kind]
     # Same rule as _strip_quick: a caller that brought its own runner is not
     # asking about this host's PATH.
@@ -3779,7 +3778,7 @@ def _probe_link(kind, stripped, address, runner=None, sender=None, wait=None):
                     for line in str(result.stdout or "").splitlines()
                     for part in line.split()[1:2])
 
-            return "ok" if _wait_for(knocked, wait) else "unreachable"
+            return "ok" if _wait_for(knocked, PROBE_WAIT) else "unreachable"
         finally:
             vpn_exec(["ip", "link", "del", "dev", PROBE_IF], runner=runner)
 
@@ -3804,7 +3803,7 @@ def _probe_send(source=None):
             s.sendto(b"\0", (PROBE_DST, 53))
 
 
-def _probe_quick(row, runner=None, sender=None, wait=None):
+def _probe_quick(row, runner=None, sender=None):
     text = _read_quick_config(row)
     try:
         stripped = _strip_quick(row["kind"], text, runner, row["id"])
@@ -3815,7 +3814,7 @@ def _probe_quick(row, runner=None, sender=None, wait=None):
         raise VpnError("tool-missing")
     if not address:
         raise VpnError("validation-failed")
-    return _probe_link(row["kind"], stripped, address, runner, sender, wait)
+    return _probe_link(row["kind"], stripped, address, runner, sender)
 
 
 def vpn_node_list(tid):
