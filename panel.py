@@ -3284,19 +3284,15 @@ def vpn_auto_refresh(now=None, runner=None, applier=None, fetcher=None):
     return True
 
 
-def vpn_action(action, body, runner=None, applier=None, fetcher=None):
-    actions = {"add": lambda: vpn_add(body, runner, fetcher),
-               "enable": lambda: vpn_enable(body.get("id"), runner, applier),
-               "disable": lambda: vpn_disable(body.get("id"), runner, applier),
-               "refresh": lambda: vpn_refresh(body.get("id"), runner, applier,
-                                                fetcher),
+def vpn_action(action, body):
+    actions = {"add": lambda: vpn_add(body),
+               "enable": lambda: vpn_enable(body.get("id")),
+               "disable": lambda: vpn_disable(body.get("id")),
+               "refresh": lambda: vpn_refresh(body.get("id")),
                "schedule": lambda: vpn_schedule(body.get("id"),
                                                   body.get("hours")),
-               # The only one that neither starts nor stops anything, so it is
-               # the only one that takes no applier.
-               "check": lambda: vpn_check(body.get("id"), runner),
-               "nodes": lambda: vpn_nodes(body.get("id"), body.get("off"),
-                                          runner, applier)}
+               "check": lambda: vpn_check(body.get("id")),
+               "nodes": lambda: vpn_nodes(body.get("id"), body.get("off"))}
     try:
         call = actions[action]
     except (KeyError, TypeError):
