@@ -2320,9 +2320,8 @@ def new_tunnel_id(rows):
             return tid
 
 
-def public_tunnels(rows=None, runner=None):
-    """Browser-safe metadata only; `runner` is used by runtime status later."""
-    del runner
+def public_tunnels(rows=None):
+    """Browser-safe metadata only."""
     return [_tunnel_row(row) for row in (load_tunnels() if rows is None else rows)]
 
 
