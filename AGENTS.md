@@ -43,7 +43,7 @@ exactly what the update button needs and what it did **not** do before v1.4.0.
 - **Python standard library only.** No pip, no npm, no CDN. The panel is expected to
   work on a gateway with no internet. Charts are inline SVG written by hand, and the
   HTML, CSS and JS all live inside `panel.py`. Adding a dependency breaks the premise.
-- **`VERSION` ([panel.py:64](panel.py:64)) must equal the release tag.** Every install
+- **`VERSION` ([panel.py:65](panel.py:65)) must equal the release tag.** Every install
   compares its own constant against the newest GitHub tag, so a forgotten bump makes
   every install show an update banner forever. CI rejects a mismatched tag push.
 - **Root is required** for anything that calls `nft`. `--selftest`, `--dump` and
@@ -51,7 +51,7 @@ exactly what the update button needs and what it did **not** do before v1.4.0.
 
 ## Architecture
 
-Single file, ~6900 lines, sectioned by `# --- name ---` comments. The system is a state
+Single file, ~9100 lines, sectioned by `# --- name ---` comments. The system is a state
 machine over the JSON files in `/etc/gateway-acl` (`GWACL_DIR`):
 
 `devices.json` is the source of truth (`ip`, `name`, `on`, and optionally `until` and
