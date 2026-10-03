@@ -185,8 +185,9 @@ A device can be let through the gateway without being let into the VPN, with the
 one exception above it for the mark it uses for its own packets. Without that
 exception the tunnel's output would be routed back into the tunnel. The same
 mark makes its `prerouting` chain return instead of queueing. So a packet
-carrying it is routed by `main` and leaves by the uplink, and the router NATs it
-like traffic from any other machine on the LAN.
+carrying it is routed by `main` and leaves by the uplink. gateway-acl
+masquerades it on the way out, so the router answers the gateway and the
+download comes back through the counters, rather than straight to the device.
 
 The panel's own node check needs the same mark, for the opposite reason.
 `auto_redirect` also takes every connect the host itself makes and accepts it

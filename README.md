@@ -457,6 +457,11 @@ how to test a ruleset without touching your host, see
   `curl -6 https://api6.ipify.org` should both return your own address, or IPv6
   should not answer at all. A network with no IPv6 outside the tunnel loses IPv6
   for that device rather than routing it around, and v4 carries it.
+- What leaves by the router, a device past the VPN or every device when no
+  tunnel is up, leaves under the gateway's own address. Otherwise the router
+  answers the device directly, on the same wire, and its download is never
+  seen, let alone counted. The router's own per-device statistics and rules see
+  the gateway for that traffic.
 - Traffic history is kept per address and outlives the device. Bytes of deleted
   ones stay in the month's totals, and the panel shows them as a separate
   "other" share, because there is nobody left to attribute them to.

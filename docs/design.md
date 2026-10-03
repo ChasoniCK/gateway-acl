@@ -55,6 +55,23 @@ consequences worth knowing:
   `tcp dport 8080` for non-allowlisted sources instead. That works too, but it
   means whoever holds a DHCP lease that changed cannot reach the panel to fix it.
 
+**No ICMP redirects to the LAN.** `postrouting` drops `icmp type redirect`
+leaving by the LAN interface. Anything routed out by the router (a device sent
+past the tunnel, or everything when there is no tunnel) leaves by the interface
+it came in on, and a kernel with `send_redirects=1`, the default on Debian,
+Ubuntu and Raspberry Pi OS, then tells the device to use the router directly.
+A device that takes the hint is past the list and the counters for that
+destination, and stays let through after it is switched off.
+
+**What leaves by the router leaves as the gateway.** A `nat` chain of its own,
+`via_router`, masquerades traffic that goes out of the LAN interface to a
+non-LAN address and did not start on the host. Without it the router answers
+the source address, which is the device, on the same wire: the gateway counted
+the upload and never saw the download. A tunnel re-sends everything from the
+host itself, so while one carries the traffic the rule matches nothing.
+`iifname` is empty in `postrouting`, hence `fib saddr type != local` to leave
+the host's own traffic alone.
+
 **Verdicts are not final across tables.** `accept` in our chain lets the packet
 continue to other tables and later hooks; only `drop` ends it. So accepting here
 does not bypass the tunnel's own chains.
@@ -750,8 +767,9 @@ user as a stray Russian word in an English panel.
   second pair of rules per device. It *is* marked, above that line, because a
   device let past the tunnel over v4 while its v6 still went through it reads,
   to every site that asks, as a device still in the tunnel.
-- **No NAT.** This project never adds masquerade rules. Routing is somebody
-  else's job, usually a tunnel.
+- **No NAT into a tunnel.** The one masquerade rule is for traffic that goes
+  back out by the LAN interface towards the router (see "No ICMP redirects"
+  above for why that happens at all). Routing into a tunnel is the tunnel's job.
 - **No per-port or per-time rules.** An address is allowed or it is not.
 - **Hourly history on disk.** The last day lives in memory and dies with the
   process. The month is what `traffic.json` is for.

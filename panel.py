@@ -1392,6 +1392,20 @@ def ruleset(devs, bypass=None, vpn_closed=None):
     # The mark is the one thing above `meta nfproto != ipv4 accept`, because it
     # is the one thing that has to happen to an IPv6 packet too. Everything
     # below that line is v4 by construction.
+    # No ICMP redirects to the LAN. Whatever leaves by the router (a device
+    # sent past the tunnel, or every device when there is no tunnel) goes back
+    # out of the interface it came in on, and the kernel answers that by
+    # telling the device to talk to the router directly. Debian, Ubuntu and
+    # Raspberry Pi OS all ship send_redirects=1, and the device that listens
+    # is then past the list and the counters, still let through after it is
+    # switched off, for as long as it keeps the route it was handed.
+    # And what leaves by the router leaves as the gateway. The router answers
+    # whoever is in the source field, and with the device's own address there
+    # it answers the device directly, on the same wire: the gateway saw the
+    # upload and never the download, so a device sent past the tunnel showed
+    # zero coming in. A tunnel re-sends from the host itself, so this matches
+    # nothing while one is carrying traffic. `fib saddr type != local` is the
+    # host's own traffic left alone; `iifname` is empty in postrouting.
     return f"""\
 table inet gwacl
 delete table inet gwacl
@@ -1415,7 +1429,12 @@ table inet gwacl {{
   }}
   chain postrouting {{
     type filter hook postrouting priority 0; policy accept;
-    oifname != "{IFACE}" accept{down}
+    oifname != "{IFACE}" accept
+    icmp type redirect drop{down}
+  }}
+  chain via_router {{
+    type nat hook postrouting priority srcnat; policy accept;
+    oifname "{IFACE}" ip daddr != {LAN} fib saddr type != local masquerade
   }}
 }}
 """
@@ -8536,23 +8555,30 @@ PersistentKeepalive = 25
     assert f"counter name ip daddr map {{ {a} : \"{cname('down', a)}\", " in r
     assert f"{b} : \"{cname('up', b)}\" }}" in r, "off devices are counted too"
     assert "counter name" not in ruleset([]), "an empty map breaks nft syntax"
+    assert r.index("icmp type redirect drop") > r.index("hook postrouting"), \
+        "a device told to use the router directly has left the gateway"
+    assert f'oifname "{IFACE}" ip daddr != {LAN} fib saddr type != local masquerade' \
+        in ruleset([]), "the router must answer the gateway, or download goes uncounted"
     assert "update @blocked { ip saddr }" in r
     # The panel subtracts what is left of this to say when an address knocked.
     assert f"timeout {BLOCK_TTL}s" in r
     assert "dport" not in r, "the panel port is open to the whole LAN, the password guards it"
     assert "elements" not in ruleset([]), "an empty set breaks nft syntax"
-    assert ruleset([]).count("drop") == 1
+    # The verdict line, not the word: redirects are dropped in postrouting
+    # whatever the list says.
+    verdict = "\n    drop\n"
+    assert ruleset([]).count(verdict) == 1
     # Renaming must not touch nftables.
     assert ruleset(d) == ruleset([dict(d[0], name="Mac"), d[1]])
 
     # The gateway held open: the verdict goes, nothing else does.
     soon = time.time() + 60
-    assert "drop" not in ruleset(d, bypass=soon), "the list must be suspended"
+    assert verdict not in ruleset(d, bypass=soon), "the list must be suspended"
     assert "update @blocked { ip saddr }" in ruleset(d, bypass=soon), \
         "but who came in past the list still has to be recorded"
     assert f"counter {cname('up', b)} {{ }}" in ruleset(d, bypass=soon), \
         "and the accounting does not pause with it"
-    assert "drop" in ruleset(d, bypass=time.time() - 1), "a window that has closed"
+    assert verdict in ruleset(d, bypass=time.time() - 1), "a window that has closed"
 
     guarded = ruleset(d, vpn_closed=True)
     assert "chain vpn_guard" in guarded and "hook forward" in guarded
