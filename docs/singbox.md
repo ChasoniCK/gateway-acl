@@ -188,6 +188,13 @@ mark makes its `prerouting` chain return instead of queueing. So a packet
 carrying it is routed by `main` and leaves by the uplink, and the router NATs it
 like traffic from any other machine on the LAN.
 
+The panel's own node check needs the same mark, for the opposite reason.
+`auto_redirect` also takes every connect the host itself makes and accepts it
+locally, at once, so an unmarked knock reads 1 ms for every node and finds a
+dead one alive. Anything else on the host that has to see the real network
+needs it too, or sing-box's `exclude_uid`: a binding to an interface is not
+enough, because the redirect does not look at it.
+
 ### There are three marks, and two of them are not the one you want
 
 This cost a release to learn. sing-box uses a small block of adjacent numbers,

@@ -2181,6 +2181,9 @@ PROBE_TIMEOUT = 4
 PROBE_NODES = 24
 PROBE_WORKERS = 12
 PROBE_WAIT = 8
+# Linux's number, for a Python that does not name it. Anywhere else the
+# setsockopt fails and is ignored, which is right: there is no mark to set.
+SO_MARK = getattr(socket, "SO_MARK", 36)
 # The scratch interface a WireGuard probe builds and tears down. Thirteen
 # characters like a tunnel id, but not one: `check_tunnel_id` rejects it, so it
 # can never be confused with a profile's own interface.
@@ -3618,14 +3621,31 @@ def quick_address(text):
 
 
 def probe_tcp(host, port, timeout=None):
-    """TCP connect time in milliseconds, or None. Reachability, not a handshake."""
+    """TCP connect time in milliseconds, or None. Reachability, not a handshake.
+
+    Marked like the WireGuard probe, and for the same reason. A sing-box with
+    auto_redirect takes every unmarked connect this host makes and accepts it
+    itself, at once, so every node read 1 ms and a dead one answered like the
+    rest. create_connection() has no moment between socket and connect to set
+    the mark in, hence the loop it would have run.
+    """
     timeout = PROBE_TIMEOUT if timeout is None else timeout
+    mark = int(CFG.get("vpn_mark") or 0)
     started = time.monotonic()
     try:
-        with socket.create_connection((str(host), int(port)), timeout):
-            return max(1, round((time.monotonic() - started) * 1000))
+        for family, kind, proto, _, addr in socket.getaddrinfo(
+                str(host), int(port), type=socket.SOCK_STREAM):
+            with contextlib.suppress(OSError), \
+                    socket.socket(family, kind, proto) as s:
+                if mark:
+                    with contextlib.suppress(OSError):
+                        s.setsockopt(socket.SOL_SOCKET, SO_MARK, mark)
+                s.settimeout(timeout)
+                s.connect(addr)
+                return max(1, round((time.monotonic() - started) * 1000))
     except (OSError, ValueError, TypeError, OverflowError):
-        return None
+        pass
+    return None
 
 
 def probe_nodes(outs, prober=None):
@@ -7802,6 +7822,42 @@ PersistentKeepalive = 25
         "a long subscription must not turn one button into a long wait"
     assert len(by_tag) == PROBE_NODES, \
         "a node past the cap gets no reading rather than a made-up one"
+    # A knock the live tunnel would answer itself. sing-box's auto_redirect
+    # takes every unmarked connect the host makes, so without the mark every
+    # node read 1 ms and every dead one answered.
+    knocks = []
+
+    class Knock:
+        def __init__(self, *a):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def setsockopt(self, level, opt, value):
+            knocks.append((level, opt, value))
+
+        def settimeout(self, seconds):
+            pass
+
+        def connect(self, addr):
+            pass
+
+    real_socket, old_mark = socket.socket, CFG.get("vpn_mark")
+    socket.socket = Knock
+    try:
+        CFG["vpn_mark"] = 0x2024
+        assert probe_tcp("127.0.0.1", 9)
+        assert knocks == [(socket.SOL_SOCKET, SO_MARK, 0x2024)], knocks
+        knocks.clear()
+        CFG["vpn_mark"] = 0
+        assert probe_tcp("127.0.0.1", 9) and not knocks, \
+            "no tunnel on this host, nothing to step past"
+    finally:
+        socket.socket, CFG["vpn_mark"] = real_socket, old_mark
 
     with tempfile.TemporaryDirectory() as td:
         old_paths = TUNNELS, TUNNEL_DIR, SINGBOX_CONFIG
