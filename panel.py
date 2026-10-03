@@ -5764,7 +5764,7 @@ const toggleNodes = id => {
   openNodes = id; NODES = null; nodeQuery = ''; nodeSort = 'provider';
   renderVpn(); loadNodes(id);
 };
-const loadNodes = async id => {
+const loadNodes = async (id, keepOff) => {
   try {
     const r = await fetch('/vpn?id=' + encodeURIComponent(id));
     if (r.status === 401) { location.reload(); return; }
@@ -5772,7 +5772,9 @@ const loadNodes = async id => {
     if (!r.ok) throw new Error(vpnError(data.error));
     if (openNodes !== id) return;          // успели закрыть, пока читали
     NODES = data.nodes;
-    nodesOff = new Set(NODES.filter(n => !n.on).map(n => n.id));
+    // После проверки снятые, но не сохранённые узлы остаются снятыми:
+    // проверка меняет только показания, а не выбор.
+    if (!keepOff) nodesOff = new Set(NODES.filter(n => !n.on).map(n => n.id));
     renderVpn();
   } catch (e) {
     if (openNodes === id) vpnStatus.textContent = e.message || T.vpnErrStart;
@@ -5935,7 +5937,11 @@ const renderVpn = () => {
       vpnCall('disable', {id:p.id});
     }));
     else acts.append(vpnButton(T.vpnEnable, () => vpnCall('enable', {id:p.id})));
-    acts.append(vpnButton(T.vpnCheck, () => vpnCall('check', {id:p.id})));
+    // Ответ проверки несёт только сводку, а показания по узлам живут в
+    // раскрытом списке, и без перечитывания там оставались прошлые.
+    acts.append(vpnButton(T.vpnCheck, () => vpnCall('check', {id:p.id}).then(ok => {
+      if (ok && openNodes === p.id) loadNodes(p.id, true);
+    })));
     if (p.kind === 'subscription') {
       acts.append(vpnButton(T.vpnRefresh, () => vpnCall('refresh', {id:p.id})));
       acts.append(vpnButton(openNodes === p.id ? T.vpnHideNodes : T.vpnPickNodes,
@@ -6008,6 +6014,7 @@ const checkAllVpn = async () => {
       }
     }
     vpnStatus.textContent = failed || T.vpnSaved;
+    if (openNodes) loadNodes(openNodes, true);
   } finally { vpnBusy = false; renderVpn(); }
 };
 
@@ -8142,6 +8149,12 @@ PersistentKeepalive = 25
     assert quick_address(wg) == "10.66.66.5/32"
     assert quick_address("[Interface]\nPrivateKey = x\n") == ""
     assert "checkAllVpn" in PAGE and "diagnostics(true)" in PAGE
+    # A check answers with the summary only. The per-node readings sit in the
+    # open list, which used to keep the previous probe's numbers under a fresh
+    # "fastest: 64 ms", by both buttons.
+    assert PAGE.count("loadNodes(p.id, true)") == 1 \
+        and "loadNodes(openNodes, true)" in PAGE, \
+        "a check has to re-read the open node list"
     # An unreadable device list is the one fault the page has to announce by
     # itself: everything else on it looks perfectly ordinary while it lasts.
     assert "S.broken" in PAGE and "diagnostics(false)" in PAGE, \
