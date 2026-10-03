@@ -30,6 +30,7 @@ Run as root: nft is required.
 import base64
 import contextlib
 import getpass
+import gzip
 import hashlib
 import hmac
 import html
@@ -6232,7 +6233,7 @@ const csv = () => {
 // Баннеры рисуются отдельно от остальной страницы: связь может пропасть до
 // того, как приедет первое состояние, и сказать об этом надо всё равно.
 const renderBanners = () => {
-  banners.innerHTML =
+  put(banners,
     // Первым: пока список устройств не читается, всё остальное на странице —
     // последняя разобранная копия, и это надо сказать раньше всего прочего.
     // Рядом кнопка сбора диагностики: причина лежит в журнале, а не здесь.
@@ -6252,7 +6253,7 @@ const renderBanners = () => {
                  + `<button class=btn title="${esc(plain(T.updateHint) + ' ' + plain(T.updateLog))}" `
                  + `onclick=doUpdate()>${T.updateNow}</button>`)
         : '')
-    + offban;
+    + offban);
 };
 
 // innerHTML роняет фокус на body, а таблица пересобирается на каждом опросе:
@@ -6261,6 +6262,14 @@ const renderBanners = () => {
 // пересборки ставим фокус туда же. Строка могла пропасть или поменяться, тогда
 // фокус просто не возвращается.
 const FOCUSABLE = 'button,input,select';
+// Раз в пять секунд, и почти всегда та же разметка: шапка, баннеры, сводка.
+// Пересобирать их ради неё — терять фокус и наведение на кнопках и платить
+// раскладкой страницы на телефоне. Только для блоков, где человек ничего не
+// вводит: у поля и переключателя состояние живёт в DOM, а не в разметке, и
+// после неудачного запроса их как раз надо вернуть к тому, что сказал шлюз.
+const put = (el, markup) => {
+  if (el._html !== markup) el.innerHTML = el._html = markup;
+};
 const redraw = (box, markup) => {
   const a = document.activeElement, row = box.contains(a) && a.closest('[data-row]');
   const at = row && [row.dataset.row, [...row.querySelectorAll(FOCUSABLE)].indexOf(a)];
@@ -6285,13 +6294,13 @@ const draw = () => {
       + BYP.map(([v, k]) => `<option value="${v}">${T[k]}</option>`).join('')
       + `</select>`;
   const others = S.devices.filter(x => x.ip !== S.you);
-  statusbar.innerHTML = `<button class=chip onclick="jump('devices')">`
+  put(statusbar, `<button class=chip onclick="jump('devices')">`
     + T.statusAllowed.replace('{a}', S.devices.filter(x => x.on).length)
       .replace('{b}', S.devices.length) + `</button>`
     + (S.blocked.length ? `<button class=chip onclick="jump('unk')">`
       + T.statusUnknown.replace('{n}', S.blocked.length) + `</button>` : '')
     + (S.clash.length ? `<button class="chip bad" onclick="jump('clash')">`
-      + T.statusClashes.replace('{n}', S.clash.length) + `</button>` : '');
+      + T.statusClashes.replace('{n}', S.clash.length) + `</button>` : ''));
   allsw.hidden = !others.length;
   allsw.textContent = others.some(x => x.on) ? T.allOff : T.allOn;
   srt.innerHTML = Object.entries({ip: 'colAddr', name: 'colName', traf: 'colTraffic',
@@ -6313,9 +6322,9 @@ const draw = () => {
   // заголовок карточки начинает читаться как строка из бухгалтерского отчёта.
   const [my, mm] = S.month.split('-');
   const mname = new Date(+my, +mm - 1).toLocaleDateString(T.locale, {month: 'long'});
-  mtitle.innerHTML = mname[0].toUpperCase() + mname.slice(1) + ' ' + my
+  put(mtitle, mname[0].toUpperCase() + mname.slice(1) + ' ' + my
     + (one ? ` · <button class=btn onclick="pickDev(null)" title="${esc(T.showAll)}">`
-             + `${esc(one.name || one.ip)} ×</button>` : '');
+             + `${esc(one.name || one.ip)} ×</button>` : ''));
 
   kt.textContent = fmt(U + D + oth);
   // Only against the whole month: a single device against everything last
@@ -6323,22 +6332,22 @@ const draw = () => {
   const pc = (!one && S.prev) ? Math.round((U + D + oth - S.prev) / S.prev * 100) : null;
   kdelta.textContent = pc === null ? '' : (pc > 0 ? '+' : '') + pc + '%';
   kdelta.title = pc === null ? '' : T.vsPrev;
-  ksum.innerHTML = `↓ ${fmt(D)} · ↑ ${fmt(U)} · `
+  put(ksum, `↓ ${fmt(D)} · ↑ ${fmt(U)} · `
     + `${fmt(Math.round((U + D + oth) / Math.max(S.days.length, 1)))} ${T.perDay}`
-    + (oth ? ` · ${T.other} ${fmt(oth)}${q(T.otherWhat)}` : '');
+    + (oth ? ` · ${T.other} ${fmt(oth)}${q(T.otherWhat)}` : ''));
 
   for (const [i, b] of [...seg.children].entries())
     b.className = (i === 0) === (mode === 'day') ? 'on' : '';
 
   // Не под курсором: перерисовка снесла бы открытую карточку значений, а
   // держать цифры неподвижными — ровно то, чего хочет тот, кто на них смотрит.
-  if (!chartbox.matches(':hover')) chartbox.innerHTML = chart(rows(), mode === 'day');
-  mstrip.innerHTML = strip();
+  if (!chartbox.matches(':hover')) put(chartbox, chart(rows(), mode === 'day'));
+  put(mstrip, strip());
   // Not while the pointer is in there: rebuilding the card would close an open
   // tooltip, and holding the numbers still is exactly what someone reading
   // them wants anyway.
   if (!sysbox.matches(':hover'))
-    sysbox.innerHTML = S.sys ? machine(S.sys) : `<p class=hint>${T.sysNone}</p>`;
+    put(sysbox, S.sys ? machine(S.sys) : `<p class=hint>${T.sysNone}</p>`);
 
   const fresh = Math.max(120, S.poll * 2);
   const fq = flt.value.trim().toLowerCase();
@@ -6395,11 +6404,11 @@ const draw = () => {
   // A listed address that answers as somebody else, so the rule is now written
   // for whoever took it.
   clash.hidden = !S.clash.length;
-  clashb.innerHTML = S.clash.map(([ip, was, now, ven]) =>
+  put(clashb, S.clash.map(([ip, was, now, ven]) =>
     `<div class=row><div class=dname><b class=mono>${esc(ip)}</b>`
     + `<div class=sec>${esc(T.clashLine.replace('{a}', was).replace('{b}', now))}`
     + `${ven ? ' · ' + esc(ven) : ''}</div></div><span class=sp></span>`
-    + `<span class=bad>${q(T.clashHint)}</span></div>`).join('');
+    + `<span class=bad>${q(T.clashHint)}</span></div>`).join(''));
 
   unk.hidden = !S.blocked.length;
   // The name and the hardware address go through data-, not into the onclick:
@@ -6417,8 +6426,8 @@ const draw = () => {
     + `<button class=btn data-ip="${esc(ip)}" data-nm="${esc(host)}" `
     + `onclick="addKnown(this)">${T.allowAlways}</button></span></div>`).join(''));
 
-  lanips.innerHTML = S.lan.map(([ip, host]) =>
-    `<option value="${esc(ip)}">${esc(host)}</option>`).join('');
+  put(lanips, S.lan.map(([ip, host]) =>
+    `<option value="${esc(ip)}">${esc(host)}</option>`).join(''));
 };
 
 // Without this the page keeps showing the last good numbers for as long as it
@@ -6504,7 +6513,7 @@ const doUpdate = () => confirm(T.updateConfirm.replace('{v}', S && S.update || '
   && mutate('/update').then(r => r.text().then(alert));
 // Only the chart depends on the pixel width. Redrawing the table here would
 // take the cursor out of a name someone is in the middle of typing.
-onresize = () => { if (S) chartbox.innerHTML = chart(rows(), mode === 'day'); };
+onresize = () => { if (S) put(chartbox, chart(rows(), mode === 'day')); };
 onscroll = () => hdr.classList.toggle('stuck', scrollY > 4);
 
 // "/" is where one starts typing at a table, in every other program.
@@ -6561,9 +6570,21 @@ class H(BaseHTTPRequestHandler):
 
     def _send(self, code, body, ctype="text/html; charset=utf-8", cookie=None):
         b = body.encode()
+        # The page is ~110 KB and /api is ~1.5 KB per device, every five
+        # seconds, for as long as a tab is open: on a phone reaching the panel
+        # over a tunnel that is the difference between noticeable and not.
+        # Both shrink to a third. Compressing per answer costs ~2 ms for the
+        # page and well under one for /api, so nothing is kept.
+        # ponytail: `gzip;q=0` is read as yes; no browser sends it.
+        gz = len(b) > 1024 and "gzip" in (self.headers.get("Accept-Encoding") or "")
+        if gz:
+            b = gzip.compress(b, 6)
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(b)))
+        self.send_header("Vary", "Accept-Encoding")
+        if gz:
+            self.send_header("Content-Encoding", "gzip")
         # Nothing here survives its own request: /api is a live reading and the
         # page itself carries the current settings. Without this the address is
         # the same on every refresh, the answer has no validator and no expiry,
@@ -6990,6 +7011,19 @@ def selftest():
         h._send = lambda code, text, *a, **k: h.replies.append(
             (code, text, a, k))
         return h
+
+    # Compressed for a browser that asks, byte for byte the page for one that
+    # does not.
+    for enc, gz in (("gzip, deflate, br", True), ("", False)):
+        h = request("/", {"Accept-Encoding": enc})
+        del h._send                      # the real one this time
+        h.request_version, h.requestline = "HTTP/1.1", "GET / HTTP/1.1"
+        h.wfile = io.BytesIO()
+        h._send(200, PAGE)
+        head, _, sent = h.wfile.getvalue().partition(b"\r\n\r\n")
+        assert (b"Content-Encoding: gzip" in head) == gz, enc
+        assert (gzip.decompress(sent) if gz else sent) == PAGE.encode()
+        assert f"Content-Length: {len(sent)}".encode() in head
 
     h = request("/api", {"Content-Length": "1"})
     h.rfile = BombReader()
