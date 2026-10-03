@@ -120,9 +120,10 @@ so the panel works with no internet at all.
 
 - Linux with systemd and `nftables`
 - Python 3.9+ (standard library only)
-- For managed tunnels: `sing-box` 1.12+, `wg-quick` and `awg-quick`. The
-  installer offers to install them. Plain NAT or another route you already
-  configured still works without any of them.
+- For managed tunnels: `sing-box` 1.12+, `wg-quick` and `awg-quick`, plus
+  `xray` for subscriptions with VLESS nodes. The installer offers to install
+  them. Plain NAT or another route you already configured still works without
+  any of them.
 
 ## Install
 
@@ -151,6 +152,8 @@ A step of its own installs the programs the panel runs tunnels with:
 `sing-box` (1.12 and newer only, since older ones cannot read the config the
 panel writes, so where a distribution ships an outdated one the published build
 for this architecture goes into `/usr/local/bin` along with a systemd unit),
+`xray` (the distribution's package where there is one, otherwise the published
+build, checked against its SHA-256, along with the `gateway-acl-xray` unit),
 `wireguard-tools` and, where it is packaged at all, `amneziawg-tools`. Nothing
 in that step can fail the install: an upstream that happens to be down must not
 cost you your access control. The installer still does not fetch a subscription
@@ -203,9 +206,15 @@ excludes both and can leave you with nothing that connects.
 The panel writes two things and nothing else: outbounds tagged for their
 subscription profile, and the member list of the `proxy` group. Routing rules,
 DNS, inbounds and any outbound you wrote by hand survive a refresh unchanged,
-and the config it replaces is kept beside the new one. A node this sing-box
-cannot use, an `xhttp` transport for instance, is reported and skipped, never
-written. On a host with no config at all a working one is generated: `tun` with
+and the config it replaces is kept beside the new one. Where Xray is installed,
+every VLESS node is Xray's: sing-box reaches it through a SOCKS port on
+`127.0.0.1` under the same tag, and Xray dials the node. sing-box's own VLESS
+client announces itself as version 1.8.1 in every Reality handshake, and a
+server that wants a newer client turns it away (`reality verification failed`
+on every connection); it has no `xhttp` transport either, which Xray does.
+Without Xray VLESS stays sing-box's, and a node this sing-box cannot use, an
+`xhttp` transport for instance, is reported and skipped, never written. On a
+host with no config at all a working one is generated: `tun` with
 `auto_route` and `auto_redirect`, DNS hijacked into the tunnel, private
 destinations going out `direct`.
 
@@ -283,7 +292,10 @@ process is running and sing-box installs its route and mark a moment later.
 Checking straight away used to read a healthy tunnel as a failed one and roll
 the whole switch back. Failure restores the previous config, service and mark;
 if that rollback fails, forwarding stays closed. A crash outside a managed
-switch is noticed on the next panel poll, not instantly.
+switch is noticed on the next panel poll, not instantly. With VLESS nodes the
+tunnel is two units, `sing-box` and `gateway-acl-xray`, and it is up only while
+both are. An upgrade that brings Xray moves a running sing-box onto it once,
+when the panel starts; if that does not come up, the old config goes on running.
 
 Metadata is stored in `/etc/gateway-acl/tunnels.json`. Subscription links,
 cached bodies and quick configs stay in owner-only files under

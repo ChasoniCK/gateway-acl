@@ -270,6 +270,9 @@ The outer `sub-` prefix is the whole basis of that ownership. Rename such an
 outbound and the next refresh will treat it as yours and leave it alone. That is
 the supported way to keep a node the subscription has stopped listing.
 
+The VLESS nodes among them are Xray's, behind ports on `127.0.0.1`, wherever
+Xray is installed; see "VLESS goes through Xray" below.
+
 The installer only copies and self-tests the converter. It does not fetch a
 source, rewrite `/etc/sing-box/config.json` or restart sing-box during an update.
 On the first v1.5 start, old `sub.url` and `sub.exclude` files are moved into one
@@ -331,21 +334,94 @@ reports the home address no matter how well the tunnel works.
 INFO outbound/direct[direct]: outbound connection to 34.117.59.81:443   ← ipinfo.io, not proxied
 ```
 
-### xhttp is not implemented
+### VLESS goes through Xray
+
+```
+ERROR outbound/urltest[proxy]: reality verification failed
+```
+
+That line, on every connection to every node of a subscription that works in
+Happ or v2rayN, is sing-box's Reality client being turned away. Each Reality
+handshake carries the client's version in its session id. sing-box writes 1.8.1
+there and always has (`common/tls/reality_client.go`, `SessionId[0..2] = 1, 8,
+1`, unchanged on the development branch). An Xray server configured with a
+`minClientVer` above that does not recognise the client, and answers the way
+Reality answers a stranger: it relays the handshake to the site it impersonates,
+and sing-box gets that site's real certificate. No other setting changes it. On
+the gateway this was found on, 588 connections out of 588 failed that way over
+three hours, on both nodes, through the home ISP and through two mobile
+operators, with nine uTLS fingerprints. Xray 26.3.27 on the same host, in the
+same minute, with the same parameters, connected through all four nodes of the
+subscription at 79–120 Mbit/s.
+
+xhttp is the other half. It is Xray's transport and sing-box does not have it,
+not in 1.13 and not in the 1.14 betas either: `constant/v2ray.go` lists five
+transports (`http`, `ws`, `quic`, `grpc`, `httpupgrade`), and the two pull
+requests that added XHTTP were closed unmerged.
+
+So on a host with `xray` on its PATH the panel hands every VLESS node to Xray,
+and only VLESS; Shadowsocks stays sing-box's. sing-box keeps everything else it
+did: the tun, `auto_redirect`, routing, DNS and the `proxy` group. In the group
+each VLESS node keeps its tag, but the outbound behind the tag is now a `socks`
+client of one port on `127.0.0.1`, from `20800` up, one per node in config order.
+Xray listens there and dials the node. The tags staying put is what keeps the
+group, the hand-picked node selection and every route rule naming a node valid.
+The same nodes always land on the same ports, so a refresh that changed nothing
+writes nothing new.
+
+Xray's config is `/etc/gateway-acl/xray.json`, mode 0600, and entirely the
+panel's. It runs as `gateway-acl-xray.service`, which the installer writes and
+enables with `ConditionPathExists` on that file. The file exists exactly while
+the running sing-box has VLESS nodes, and the panel deletes it when the tunnel
+goes off, so it is also the off switch. Every candidate is checked with
+`xray run -test` next to `sing-box check` before anything is restarted, and the
+tunnel counts as up only while both units are active. A switch that fails rolls
+both files back together.
+
+Every socket Xray opens carries the mark sing-box's `auto_redirect` steps aside
+for, read off the config it is about to run: the tun's
+`auto_redirect_output_mark`, `0x2024` when the tun does not set one. Without it
+the tun takes Xray's connection to the node straight back into sing-box. Xray
+also resolves a node's domain with its own DNS (`1.1.1.1`, out past the tun with
+the same mark), because the system resolver asks sing-box, and sing-box may send
+the question into the group, which is Xray waiting for the answer. A tun without
+`auto_redirect` gets no mark, and then Xray's traffic is routed like anything
+else the host sends. The panel never writes such a config, but it will not stop
+you from writing one.
+
+To check a node by hand without the panel or the tun in the way:
+
+```bash
+curl --socks5-hostname 127.0.0.1:20800 -sS -o /dev/null -w '%{http_code}\n' https://www.gstatic.com/generate_204
+```
+
+`204` is a working node, and unlike most tests on the gateway this one is
+honest from the gateway itself: `curl`'s connection is to `127.0.0.1`, which the
+tun leaves alone, and the one Xray makes to the node carries the mark.
+
+The installer fetches Xray as root, and the tun takes root's traffic like
+anyone else's. On a gateway whose tunnel is down for exactly the reason above,
+and whose rules send GitHub into it, the download is the one thing that cannot
+work: the first install this was tried on failed at
+`dns: exchange failed for api.github.com: reality verification failed`. The
+installer then says so and carries on without Xray. Fetch the release as a user
+sing-box excludes (`exclude_uid`), or on another machine, check it against the
+`.dgst` beside it, put `xray` into `/usr/local/bin` and run the installer again.
+
+A host upgraded with a tunnel already running would otherwise stay on sing-box's
+own VLESS for good: a refresh only commits when the nodes change, and an upgrade
+does not change them. So on its start the panel moves a running sing-box onto
+Xray once, as an ordinary switch: if the new pair does not come up, the old
+config is put back and goes on running.
+
+Without Xray nothing changes from 1.6. VLESS stays sing-box's, an xhttp node is
+reported by protocol and host and skipped, and nothing this sing-box would
+refuse to load is ever written, because a config that will not parse is a
+gateway that does not come up:
 
 ```
 FATAL decode config: outbounds[1].transport: unknown transport type: xhttp
 ```
-
-xhttp is Xray's transport and sing-box does not have it, not in 1.13 and not in
-the 1.14 betas either. `constant/v2ray.go` lists five transports (`http`, `ws`,
-`quic`, `grpc`, `httpupgrade`) and nothing else, and the two pull requests that
-added XHTTP were both closed without being merged. Upgrading sing-box is
-therefore not the way to get those nodes. Subscriptions that offer it usually
-offer the same servers over Reality or Shadowsocks as well, so the tool reports
-each skipped node by protocol and host and converts the rest. It never writes a
-node this sing-box would refuse to load, because a config that will not parse is
-a gateway that does not come up.
 
 ### What a 1.13 refuses to start on
 

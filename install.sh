@@ -6,6 +6,7 @@ set -Eeuo pipefail
 
 ETC=/etc/gateway-acl
 UNIT=/etc/systemd/system/gateway-acl.service
+XR_UNIT=/etc/systemd/system/gateway-acl-xray.service
 SYSCTL=/etc/sysctl.d/99-gateway-acl.conf
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -102,6 +103,8 @@ if [ "$UILANG" = en ]; then
   M_SBFAIL="could not be installed: subscriptions will not come up"
   M_SBUNIT="unit written"; M_SBUNITKEPT="unit already present"
   M_SBUNITOWN="existing unit pointed at the replaced binary, ExecStart overridden"
+  M_XRFAIL="not installed: VLESS nodes stay with sing-box, as before. If GitHub is only reachable through a tunnel that is down, put xray from github.com/XTLS/Xray-core/releases into /usr/local/bin by hand and run this again"
+  M_XRSUM="checksum did not match, not installed"
   M_WGOK="ok"; M_WGFAIL="not installed: WireGuard profiles will not come up"
   M_AWGNONE="AmneziaWG is in no distribution's own archive: Ubuntu has it in the project's PPA, Arch in the AUR."
   M_AWGPPA="add ppa:amnezia/ppa to this system's apt sources and install from it?"
@@ -172,6 +175,8 @@ else
   M_SBFAIL="поставить не удалось — подписки не поднимутся"
   M_SBUNIT="юнит записан"; M_SBUNITKEPT="юнит уже есть"
   M_SBUNITOWN="юнит указывал на заменённый бинарник, ExecStart переопределён"
+  M_XRFAIL="не установлен — узлы VLESS остаются у sing-box, как раньше. Если GitHub доступен только через неработающий туннель, положите xray из github.com/XTLS/Xray-core/releases в /usr/local/bin вручную и запустите установку снова"
+  M_XRSUM="контрольная сумма не совпала, не ставлю"
   M_WGOK="ok"; M_WGFAIL="не установлен — профили WireGuard не поднимутся"
   M_AWGNONE="AmneziaWG нет в собственных репозиториях дистрибутивов: у Ubuntu он в PPA проекта, у Arch — в AUR."
   M_AWGPPA="добавить ppa:amnezia/ppa в источники apt этой системы и поставить оттуда?"
@@ -257,7 +262,13 @@ if [ "$ACTION" = uninstall ]; then
   ok "$L_UNIT" "$M_UNITGONE"
   nft delete table inet gwacl >/dev/null 2>&1 || true
   ok "nftables" "$M_RULESGONE"
-  if [ "$PURGE" = 1 ]; then rm -rf "$ETC"; ok "$ETC" "$M_PURGED"
+  if [ "$PURGE" = 1 ]; then
+    # Xray runs a config that lives in $ETC, so it goes with it. On a plain
+    # uninstall it stays, like sing-box: the tunnel keeps working without the
+    # panel, and the VLESS nodes in sing-box's config are Xray's ports.
+    systemctl disable --now gateway-acl-xray >/dev/null 2>&1 || true
+    rm -f "$XR_UNIT"; systemctl daemon-reload
+    rm -rf "$ETC"; ok "$ETC" "$M_PURGED"
   else ok "$ETC" "$M_KEPTDIR"; fi
   printf '\n%s\n' "$M_UNTOUCHED"
   exit 0
@@ -442,6 +453,107 @@ EOF
   fi
 }
 
+# The VLESS nodes go to Xray rather than to sing-box. sing-box writes version
+# 1.8.1 into every Reality handshake, and a server that sets a minimum client
+# version answers it with somebody else's certificate; it has no xhttp either.
+# Without Xray nothing that worked before breaks: the panel leaves VLESS to
+# sing-box, exactly as 1.6 did.
+XR_LATEST="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
+XR_DOWNLOAD="https://github.com/XTLS/Xray-core/releases/download"
+XR_BIN=/usr/local/bin/xray
+
+xr_asset() {
+  case "$(uname -m)" in
+    x86_64|amd64)       echo 64 ;;
+    aarch64|arm64)      echo arm64-v8a ;;
+    armv7l|armv7|armhf) echo arm32-v7a ;;
+    i686|i386)          echo 32 ;;
+    riscv64)            echo riscv64 ;;
+    *)                  return 1 ;;
+  esac
+}
+
+xr_version() { xray version 2>/dev/null | awk 'NR == 1 {print $2}'; }
+
+xr_from_github() {
+  local asset tag tmp want
+  asset=$(xr_asset) || { ok "xray" "$M_SBNOARCH $(uname -m)"; return 1; }
+  command -v curl >/dev/null || command -v wget >/dev/null || return 1
+  ok "xray" "$M_SBFETCH"
+  tag=$(fetch "$XR_LATEST" 2>/dev/null \
+        | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+        | head -n 1) || true
+  # Only the tag comes off the network, and only if it looks like a tag: the
+  # same rule as for sing-box and for the panel's own update button.
+  case "$tag" in
+    v[0-9]*) ;;
+    *) return 1 ;;
+  esac
+  case "$tag" in *[!v0-9.]*) return 1 ;; esac
+  tmp=$(mktemp -d) || return 1
+  if ! fetch "$XR_DOWNLOAD/$tag/Xray-linux-$asset.zip" > "$tmp/x.zip" 2>/dev/null \
+     || ! fetch "$XR_DOWNLOAD/$tag/Xray-linux-$asset.zip.dgst" > "$tmp/x.dgst" 2>/dev/null; then
+    rm -rf "$tmp"; return 1
+  fi
+  # The digest comes from where the archive came from, so this catches a
+  # broken download, not a hostile one. What keeps the network from choosing
+  # what gets installed is the tag rule above.
+  want=$(sed -n 's/^SHA2-256= *//p' "$tmp/x.dgst" | head -n 1)
+  if [ -z "$want" ] || [ "$want" != "$(sha256sum "$tmp/x.zip" | cut -d' ' -f1)" ]; then
+    ok "xray" "$M_XRSUM"; rm -rf "$tmp"; return 1
+  fi
+  # python3 and not unzip: python3 is already required, unzip is not.
+  if python3 -c 'import sys, zipfile
+open(sys.argv[2], "wb").write(zipfile.ZipFile(sys.argv[1]).read("xray"))' \
+       "$tmp/x.zip" "$tmp/xray" \
+     && install -m 755 "$tmp/xray" "$XR_BIN"; then
+    rm -rf "$tmp"
+    hash -r 2>/dev/null || true
+    return 0
+  fi
+  rm -rf "$tmp"
+  return 1
+}
+
+xr_unit() {
+  local bin
+  bin=$(command -v xray) || return 1
+  # Enabled, but it starts only while the panel has written a config, which it
+  # does only while the running sing-box has VLESS nodes for it. The panel
+  # restarts it on every change, so this never needs a `start` of its own.
+  cat > "$XR_UNIT" <<EOF
+[Unit]
+Description=Xray for the VLESS nodes of gateway-acl
+Documentation=https://github.com/ChasoniCK/gateway-acl
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=$ETC/xray.json
+
+[Service]
+ExecStart=$bin run -c $ETC/xray.json
+Restart=on-failure
+RestartSec=10s
+LimitNOFILE=infinity
+# The mark on its sockets is what gets them past sing-box's tun, and setting
+# a mark takes CAP_NET_ADMIN. Nothing else is needed.
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  if [ -s "$XR_UNIT" ]; then
+    chmod 644 "$XR_UNIT"
+    systemctl daemon-reload
+    systemctl enable gateway-acl-xray >/dev/null 2>&1 || true
+    ok "gateway-acl-xray" "$M_SBUNIT"
+  fi
+}
+
 os_id() { # os_id -> "ubuntu debian" and so on, for the one case that differs
   ( [ -r /etc/os-release ] || exit 0
     # In a subshell on purpose: this file sets ID, NAME, VERSION and more, and
@@ -613,6 +725,17 @@ if yesno "$M_TOOLSASK"; then
   if [ -f /etc/sing-box/config.json ]; then
     systemctl enable sing-box >/dev/null 2>&1 || true
   fi
+
+  # A distribution's own Xray is kept as it is: the panel runs `xray run -test`
+  # on every config before using it, so one too old says so in the journal.
+  if ! command -v xray >/dev/null; then
+    pkg_install xray || true
+    hash -r 2>/dev/null || true
+    command -v xray >/dev/null || xr_from_github || true
+  fi
+  if command -v xray >/dev/null; then ok "xray" "$(xr_version)  $M_SBOK"
+  else ok "xray" "$M_XRFAIL"; fi
+  xr_unit || true
 
   command -v wg-quick >/dev/null || pkg_install wireguard-tools || true
   if command -v wg-quick >/dev/null; then ok "wireguard-tools" "$M_WGOK"

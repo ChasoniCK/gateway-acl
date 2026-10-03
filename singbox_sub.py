@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
-"""Turn subscription links into sing-box outbounds.
+"""Turn subscription links into sing-box outbounds, and VLESS nodes into Xray.
 
 The installer uses the CLI for legacy setup, and the panel imports the same
 parser for managed profiles. A URL is passed directly only by the legacy CLI;
 the panel keeps it in its private tunnel storage and never puts it in argv.
+
+Where Xray is installed, every VLESS node is handed to it and sing-box reaches
+the node through a SOCKS port on 127.0.0.1 (see `xray_split`). sing-box's own
+VLESS client cannot be told apart from an ancient Xray: it writes version
+1.8.1 into every Reality handshake, and a server that sets a minimum client
+version answers it with somebody else's certificate. It has no xhttp either.
 
 It prints a complete config to stdout and touches nothing on disk, so the caller
 keeps the backup, the `sing-box check` and the rollback. Given `--base`, only two
@@ -36,9 +42,16 @@ SUB_BODY_MAX = 128 << 10
 # sing-box does not implement Xray's xhttp transport and shows no sign of
 # starting to: 1.13 and the 1.14 betas both know exactly five (http, ws, quic,
 # grpc, httpupgrade), and two pull requests adding XHTTP were closed unmerged.
-# Upgrading is not the fix, so the node is skipped, loudly and never silently.
-# One quietly missing from the group is a slower tunnel with no explanation.
+# Upgrading is not the fix. Without Xray the node is skipped, loudly and never
+# silently: one quietly missing from the group is a slower tunnel with no
+# explanation. With Xray it is Xray's (`convert(xray=True)`).
 TRANSPORTS = ("tcp", "")
+# The first local port Xray listens on, one per node in config order. Below the
+# ephemeral range, so an outgoing connection can never be holding it.
+XRAY_PORT = 20800
+# What sing-box's auto_redirect lets past itself when the tun does not say
+# otherwise (`auto_redirect_output_mark`): the mark on its own connections.
+REDIRECT_MARK = 0x2024
 
 
 class Unsupported(Exception):
@@ -137,9 +150,12 @@ def _tls(q, host):
     return tls
 
 
-def _vless(p, q, tag):
+def _vless(p, q, tag, xray=False):
+    """A VLESS node in sing-box's shape. With `xray` it may also carry what
+    only Xray can dial, xhttp and VLESS encryption, and then it must never
+    reach sing-box itself: `xray_split` is what hands it over."""
     kind = q.get("type", "tcp")
-    if kind not in TRANSPORTS:
+    if kind not in TRANSPORTS and not (xray and kind == "xhttp"):
         raise Unsupported(f"transport {kind}")
     if not p.username:
         raise Unsupported("no uuid")
@@ -147,9 +163,18 @@ def _vless(p, q, tag):
          "server_port": p.port or 443, "uuid": unquote(p.username)}
     if q.get("flow"):
         o["flow"] = q["flow"]
+    encryption = q.get("encryption") or "none"
+    if encryption != "none":
+        if not xray:
+            raise Unsupported(f"encryption {encryption}")
+        o["encryption"] = encryption
     tls = _tls(q, p.hostname)
     if tls:
         o["tls"] = tls
+    if kind == "xhttp":
+        o["transport"] = {"type": "xhttp", "path": q.get("path") or "/",
+                          "host": q.get("host", ""),
+                          "mode": q.get("mode") or "auto"}
     return o
 
 
@@ -171,7 +196,7 @@ def _ss(p, tag):
             "server_port": int(port), "method": method, "password": password}
 
 
-def outbound(link, tag):
+def outbound(link, tag, xray=False):
     """One subscription link as one sing-box outbound.
 
     Raises Unsupported for anything this sing-box would refuse to load. The
@@ -180,7 +205,7 @@ def outbound(link, tag):
     p = urlsplit(link)
     q = dict(parse_qsl(p.query))
     if p.scheme == "vless":
-        return _vless(p, q, tag)
+        return _vless(p, q, tag, xray)
     if p.scheme == "ss":
         return _ss(p, tag)
     raise Unsupported(f"protocol {p.scheme}")
@@ -220,7 +245,7 @@ def label_of(tag, prefix=OWNED):
 
 
 def convert(body, warn=lambda s: None, exclude=None, prefix=OWNED, taken=None,
-            skip=None):
+            skip=None, xray=False):
     """Every usable node of a subscription, in the order the provider listed.
 
     `exclude` is a regular expression matched against the provider's name for
@@ -234,6 +259,9 @@ def convert(body, warn=lambda s: None, exclude=None, prefix=OWNED, taken=None,
     pattern: a set of labels (see `label_of`) left out of the result. A node it
     names still gets its tag allocated before it is dropped, so leaving one out
     does not renumber its namesakes and turn every other selection stale.
+
+    `xray` says Xray is there to take the VLESS nodes sing-box cannot dial.
+    The tags come out the same either way, for the same reason.
     """
     try:
         rx = re.compile(exclude, re.I) if exclude else None
@@ -255,7 +283,7 @@ def convert(body, warn=lambda s: None, exclude=None, prefix=OWNED, taken=None,
             if label_of(tag, prefix) in skip:
                 warn(f"{name}: снят вручную / turned off by hand")
                 continue
-            outs.append(outbound(link, tag))
+            outs.append(outbound(link, tag, xray))
         except Unsupported as e:
             warn(f"{urlsplit(link).scheme}://{urlsplit(link).hostname}: {e}")
         except Exception as e:  # a malformed link is one node, not the run
@@ -343,6 +371,101 @@ def fresh(outs, iface, group=GROUP):
         },
         "experimental": {"cache_file": {"enabled": True}},
     }
+
+
+def xray_outbound(o, sockopt):
+    """One VLESS node as an Xray outbound, under the tag it had in sing-box."""
+    tls, tr = o.get("tls") or {}, o.get("transport") or {}
+    user = {"id": o["uuid"], "encryption": o.get("encryption", "none")}
+    if o.get("flow"):
+        user["flow"] = o["flow"]
+    # Resolved by Xray's own DNS, which leaves past the tun like everything
+    # else Xray sends. The system resolver would ask sing-box, and sing-box may
+    # route that question into the group, which is Xray waiting for the answer.
+    stream = {"network": tr.get("type", "tcp"), "security": "none",
+              "sockopt": dict(sockopt, domainStrategy="UseIPv4")}
+    fp = (tls.get("utls") or {}).get("fingerprint")
+    if tls.get("reality"):
+        stream["security"] = "reality"
+        stream["realitySettings"] = {
+            "serverName": tls.get("server_name", ""),
+            # Xray will not open Reality without a fingerprint; chrome is the
+            # one its own share links default to.
+            "fingerprint": fp or "chrome",
+            "publicKey": tls["reality"]["public_key"],
+            "shortId": tls["reality"].get("short_id", "")}
+    elif tls:
+        stream["security"] = "tls"
+        stream["tlsSettings"] = {"serverName": tls.get("server_name", "")}
+        if fp:
+            stream["tlsSettings"]["fingerprint"] = fp
+    if tr.get("type") == "xhttp":
+        stream["xhttpSettings"] = {k: tr[k] for k in ("path", "host", "mode")
+                                   if tr.get(k)}
+    return {"protocol": "vless", "tag": o["tag"], "streamSettings": stream,
+            "settings": {"vnext": [{"address": o["server"],
+                                    "port": o["server_port"],
+                                    "users": [user]}]}}
+
+
+def xray_split(outs, mark, port=XRAY_PORT):
+    """Hand every VLESS node to Xray: (sing-box outbounds, Xray config or None).
+
+    sing-box keeps the node under its own tag, now a SOCKS client of one local
+    port, so the group, the hand-picked selection and every route rule naming
+    it are untouched. Xray listens on that port and dials the node. Ports go in
+    order of the list, so the same nodes always come out on the same ports and
+    a refresh that changed nothing writes nothing new.
+
+    `mark` is what sing-box lets past itself (see `redirect_mark`). Every socket
+    Xray opens carries it; without it auto_redirect takes Xray's connection to
+    the node straight back into sing-box. 0 sets none.
+    """
+    sb, inbounds, outbounds, rules = [], [], [], []
+    sockopt = {"mark": mark} if mark else {}
+    for o in outs:
+        if o.get("type") != "vless":
+            sb.append(o)
+            continue
+        listen = port + len(inbounds)
+        inbounds.append({"tag": f"in{listen}", "protocol": "socks",
+                         "listen": "127.0.0.1", "port": listen,
+                         "settings": {"udp": True, "ip": "127.0.0.1"}})
+        outbounds.append(xray_outbound(o, sockopt))
+        rules.append({"type": "field", "inboundTag": [f"in{listen}"],
+                      "outboundTag": o["tag"]})
+        sb.append({"type": "socks", "tag": o["tag"], "server": "127.0.0.1",
+                   "server_port": listen})
+    if not inbounds:
+        return sb, None
+    return sb, {
+        # No access log: Xray writes one line per connection, with where it
+        # went, by default. That is every device's browsing in the journal and
+        # on flash that never gets a rest; the fresh sing-box config is `warn`.
+        "log": {"loglevel": "warning", "access": "none"},
+        "dns": {"servers": ["1.1.1.1"], "queryStrategy": "UseIPv4", "tag": "dns"},
+        "inbounds": inbounds,
+        "outbounds": outbounds + [{"protocol": "freedom", "tag": DIRECT,
+                                   "streamSettings": {"sockopt": sockopt}}],
+        "routing": {"rules": [{"type": "field", "inboundTag": ["dns"],
+                               "outboundTag": DIRECT}] + rules},
+    }
+
+
+def redirect_mark(config):
+    """The mark the config's auto_redirect lets past itself, or 0 without one.
+
+    Read off the config sing-box is about to run rather than off its nftables
+    table, so it is known before sing-box starts, on the very first enable.
+    """
+    for inbound in (config or {}).get("inbounds", []):
+        if inbound.get("type") == "tun" and inbound.get("auto_redirect"):
+            try:
+                return int(str(inbound.get("auto_redirect_output_mark",
+                                           REDIRECT_MARK)), 0)
+            except ValueError:
+                return 0
+    return 0
 
 
 def build(body, base=None, iface=None, warn=lambda s: None, exclude=None,
@@ -547,6 +670,62 @@ def selftest():
     assert merge(f, convert(plain)) == f, "generate then merge is a fixed point"
     assert [o["tag"] for o in f["outbounds"] if o["tag"].startswith(OWNED)] == \
         f["outbounds"][0]["outbounds"], "the group lists every node it was given"
+
+    # --- VLESS through Xray ---
+    xh = (f"vless://{uid}@c.example:6443?encryption=none&type=xhttp&path=%2Fx"
+          f"&mode=auto&security=reality&sni=s.example&fp=qq&pbk={pbk}#China")
+    assert convert(xh) == [], "no Xray, no xhttp"
+    node = convert(xh, xray=True)[0]
+    assert node["transport"] == {"type": "xhttp", "path": "/x", "host": "",
+                                 "mode": "auto"}, node
+    enc = vision.replace("encryption=none", "encryption=mlkem768x25519plus.x")
+    assert convert(enc) == [], "sing-box has no VLESS encryption"
+    assert convert(enc, xray=True)[0]["encryption"] == "mlkem768x25519plus.x"
+
+    mixed = convert(f"{vision}\n{sip002}\n{xh}\n", xray=True)
+    sb, xr = xray_split(mixed, 0x2024)
+    assert [o["type"] for o in sb] == ["socks", "shadowsocks", "socks"], sb
+    assert [(o["server"], o["server_port"]) for o in sb if o["type"] == "socks"] \
+        == [("127.0.0.1", XRAY_PORT), ("127.0.0.1", XRAY_PORT + 1)]
+    assert [o["tag"] for o in sb] == [o["tag"] for o in mixed], \
+        "the group and every selection keep their tags"
+    assert xray_split(mixed, 0x2024) == (sb, xr), "same nodes, same ports"
+    assert [i["port"] for i in xr["inbounds"]] == [XRAY_PORT, XRAY_PORT + 1]
+    assert all(i["listen"] == "127.0.0.1" for i in xr["inbounds"])
+    assert xr["log"]["access"] == "none", "no line per connection in the journal"
+    first = xr["outbounds"][0]
+    assert first["settings"]["vnext"][0] == {
+        "address": "a.example", "port": 9443,
+        "users": [{"id": uid, "encryption": "none", "flow": "xtls-rprx-vision"}]}
+    assert first["streamSettings"]["realitySettings"] == {
+        "serverName": "s.example", "fingerprint": "randomized",
+        "publicKey": pbk, "shortId": "ab12"}
+    assert xr["outbounds"][1]["streamSettings"]["xhttpSettings"] == {
+        "path": "/x", "mode": "auto"}
+    # Every socket Xray opens leaves past the tun, its DNS included: a node
+    # named by domain must not be resolved by asking sing-box, which may send
+    # the question back into the group, which is Xray.
+    assert all(o["streamSettings"]["sockopt"]["mark"] == 0x2024
+               for o in xr["outbounds"])
+    assert xr["dns"]["tag"] in xr["routing"]["rules"][0]["inboundTag"]
+    assert xr["routing"]["rules"][0]["outboundTag"] == DIRECT
+    assert all(o["streamSettings"]["sockopt"]["domainStrategy"] == "UseIPv4"
+               for o in xr["outbounds"] if o["protocol"] == "vless")
+    rules = {r["inboundTag"][0]: r["outboundTag"] for r in xr["routing"]["rules"][1:]}
+    assert rules == {i["tag"]: o["tag"] for i, o in zip(xr["inbounds"], mixed[::2])}
+    assert "mark" not in \
+        xray_split(mixed, 0)[1]["outbounds"][0]["streamSettings"]["sockopt"]
+    assert xray_split(convert(sip002), 0x2024) == (convert(sip002), None), \
+        "nothing for Xray, no Xray"
+    assert merge(f, sb) == merge(merge(f, sb), sb), "split then merge is a fixed point"
+
+    assert redirect_mark(f) == REDIRECT_MARK
+    custom = json.loads(json.dumps(f))
+    custom["inbounds"][0]["auto_redirect_output_mark"] = "0x3000"
+    assert redirect_mark(custom) == 0x3000
+    custom["inbounds"][0]["auto_redirect"] = False
+    assert redirect_mark(custom) == 0, "no redirect, no mark to step past it"
+    assert redirect_mark({}) == 0
     print("selftest ok")
 
 

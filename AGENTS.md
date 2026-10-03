@@ -51,7 +51,7 @@ exactly what the update button needs and what it did **not** do before v1.4.0.
 
 ## Architecture
 
-Single file, ~9100 lines, sectioned by `# --- name ---` comments. The system is a state
+Single file, ~9450 lines, sectioned by `# --- name ---` comments. The system is a state
 machine over the JSON files in `/etc/gateway-acl` (`GWACL_DIR`):
 
 `devices.json` is the source of truth (`ip`, `name`, `on`, and optionally `until` and
@@ -197,6 +197,26 @@ per-profile exclusion (a regex over the provider's node names) drops nodes
 entirely, and it is not a nicety: the group is a `urltest`, so a node in the
 user's own country is always the fastest and therefore always the one chosen.
 
+**VLESS is Xray's wherever `xray_ready()` says Xray is installed.** sing-box's
+Reality client writes version 1.8.1 into every handshake, and an Xray server
+with a `minClientVer` above it answers with the impersonated site's real
+certificate: `reality verification failed` on every connection, 588 of 588 on
+the gateway this was found on, while Xray on the same host connected through
+every node. sing-box has no xhttp either. So `convert(xray=True)` accepts xhttp
+and VLESS encryption, and `xray_split()` turns every VLESS node into a `socks`
+outbound on `127.0.0.1:20800+` **under the same tag** (the group, the `skip`
+labels and route rules stay valid) plus an Xray inbound/outbound pair. The
+panel writes that config to `$GWACL_DIR/xray.json` (0600), checks it with
+`xray run -test` beside `sing-box check`, and runs it as `gateway-acl-xray`,
+whose `ConditionPathExists` makes the file's absence the off switch. Every Xray
+socket carries the tun's `auto_redirect_output_mark` (`redirect_mark()`, read off
+the config about to run, `0x2024` by default) or the tun takes it straight back,
+and Xray resolves node domains with its own marked DNS, because the system
+resolver would ask sing-box, which may route the question into Xray. Without
+Xray everything is as it was in 1.6, which is why the selftest pins
+`xray_ready` to `False` and `XRAY_CONFIG` to a temporary file at its very start:
+the installer runs it as root on the gateway itself.
+
 `install.sh` no longer asks for a link. It installs **sing-box 1.12 or newer**
 (the version the generated config needs: `action: sniff`, typed `dns.servers`,
 `default_domain_resolver`), `wireguard-tools` and `amneziawg-tools`, and writes a
@@ -205,9 +225,16 @@ version is checked and not assumed. When it is too old the published build for
 the architecture goes to `/usr/local/bin`, with only the tag taken off the
 network and only if it matches a tag. Nothing in that step may abort an install.
 Leaving it out is what made **every** subscription fail: with no sing-box the
-enable path dies in `_check_singbox_candidate` as `tool-missing`, and with an old
+enable path dies in `_check_candidate` as `tool-missing`, and with an old
 one as `validation-failed`, which reads as a bad subscription. `vpn_public()`
 reports `tools` for exactly that reason and the page names what is missing.
+It also installs Xray (the distribution's, else the published build checked
+against its `.dgst` SHA-256, extracted with `zipfile` because `unzip` is not a
+given) and writes and enables `gateway-acl-xray.service`. `--purge` removes that
+unit, a plain `--uninstall` leaves it, like sing-box, because the VLESS nodes in
+sing-box's config are its ports. On start, `_adopt_xray()` moves a sing-box that
+is still dialling VLESS itself onto Xray once, as an ordinary `switch_backend`,
+since an upgrade changes no node and so no refresh would ever do it.
 
 **A running sing-box is checked by its unit and by nothing else.**
 `_backend_up()` used to also demand a default route in a policy table, and that
@@ -217,6 +244,9 @@ the panel closed transit, rolled the switch back and stopped a sing-box that was
 proxying happily, every single time. Never make health depend on one of the two
 routing mechanisms. The unit is a real check because the candidate has already
 passed `sing-box check`, so a config it cannot run makes the process exit.
+While `xray.json` exists the Xray unit is part of the same answer, since with it
+down every node in the group is a closed port on `127.0.0.1`, and a switch that
+fails restores both files together.
 
 **Nothing that was just started is checked immediately.** `systemctl restart`
 returns when the process is running, and sing-box installs its nftables mark a

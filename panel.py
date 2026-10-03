@@ -62,7 +62,7 @@ from urllib.parse import urlparse, parse_qs
 # it against the newest tag on GitHub, so a forgotten bump makes every install
 # claim to be older than it is and show a banner that never goes away. CI
 # refuses a tag push where the two disagree.
-VERSION = "1.6.2"
+VERSION = "1.7.0"
 RELEASES_URL = "https://api.github.com/repos/ChasoniCK/gateway-acl/releases/latest"
 RELEASES_PAGE = "https://github.com/ChasoniCK/gateway-acl/releases/latest"
 # The one address the update button may ever download from. The repository is
@@ -87,6 +87,11 @@ TUNNEL_DIR = f"{ETC}/tunnels"
 LEGACY_SUB_URL = f"{ETC}/sub.url"
 LEGACY_SUB_EXCLUDE = f"{ETC}/sub.exclude"
 SINGBOX_CONFIG = os.environ.get("GWACL_SINGBOX_CONFIG", "/etc/sing-box/config.json")
+# The config of the Xray that dials the VLESS nodes, the panel's alone. It
+# exists exactly while the running sing-box needs Xray, and its unit is started
+# only when it does (ConditionPathExists), so its absence is the off switch.
+XRAY_CONFIG = f"{ETC}/xray.json"
+XRAY_UNIT = "gateway-acl-xray"
 
 DEFAULTS = {"iface": "eno1", "lan": "192.168.1.0/24", "self_ip": "192.168.1.10",
             "port": 8080, "poll_sec": 60, "pw": None, "lang": "ru",
@@ -2154,7 +2159,7 @@ SAFE_VPN_ERRORS = {
     "start-failed", "validation-failed", "rollback-failed", "conflict",
     "invalid-state",
 }
-VPN_COMMANDS = {"sing-box", "systemctl", "wg", "awg", "wg-quick",
+VPN_COMMANDS = {"sing-box", "xray", "systemctl", "wg", "awg", "wg-quick",
                 "awg-quick", "wireguard-go", "amneziawg-go", "ip", "nft",
                 "modinfo"}
 # A probe never becomes a tunnel's committed state, so it has codes of its own:
@@ -2341,6 +2346,7 @@ def vpn_public(runner=None):
                    "error": code if code in SAFE_VPN_ERRORS else "invalid-state"}
     return {"profiles": rows, "backend": backend, "closed": _vpn_closed,
             "tools": {"singbox": bool(shutil.which("sing-box")),
+                      "xray": xray_ready(),
                       "wireguard": quick_usable("wireguard", runner),
                       "amneziawg": quick_usable("amneziawg", runner)}}
 
@@ -2531,6 +2537,14 @@ def sub_prefix(tid):
     return f"sub-{check_tunnel_id(tid)}-"
 
 
+def xray_ready():
+    """Whether the VLESS nodes go to Xray. Without it they stay sing-box's, as
+    they were before Xray came along, and xhttp is skipped. A function and not
+    a constant: the selftest answers it, and the host can gain Xray at any time.
+    """
+    return shutil.which("xray") is not None
+
+
 def sub_convert(tid, secret, skip=None, taken=None):
     """One subscription's outbounds, with everything it is stored with applied.
 
@@ -2543,7 +2557,17 @@ def sub_convert(tid, secret, skip=None, taken=None):
     return singbox_sub.convert(
         secret["body"], exclude=secret.get("exclude"), prefix=sub_prefix(tid),
         taken=taken,
-        skip=secret.get("skip") if skip is None else skip)
+        skip=secret.get("skip") if skip is None else skip, xray=xray_ready())
+
+
+def _for_xray(outs, template):
+    """The outbounds sing-box gets, and the Xray config for the VLESS nodes it
+    no longer dials itself (None without Xray, or without VLESS). `template` is
+    the sing-box config they are going into, which says what mark gets past it.
+    """
+    if not xray_ready():
+        return outs, None
+    return singbox_sub.xray_split(outs, singbox_sub.redirect_mark(template))
 
 
 def sub_labels(tid, secret):
@@ -2600,12 +2624,13 @@ def build_singbox(rows, base=None, secrets_map=None):
         raise VpnError("validation-failed")
     try:
         if base is None:
-            try:
-                with open(SINGBOX_CONFIG) as f:
-                    base = json.load(f)
-            except FileNotFoundError:
-                return singbox_sub.fresh(outs, IFACE), counts
-        return singbox_sub.merge(base, outs), counts
+            with contextlib.suppress(FileNotFoundError), open(SINGBOX_CONFIG) as f:
+                base = json.load(f)
+        outs, xray = _for_xray(
+            outs, base if base is not None else singbox_sub.fresh([], IFACE))
+        if base is None:
+            return singbox_sub.fresh(outs, IFACE), counts, xray
+        return singbox_sub.merge(base, outs), counts, xray
     except (OSError, ValueError, TypeError):
         raise VpnError("validation-failed") from None
 
@@ -2706,10 +2731,9 @@ def backend_state(rows, runner=None):
     if backend is None:
         return {"kind": "none", "active": False}
     if backend["kind"] == "singbox":
-        result = vpn_exec(["systemctl", "is-active", "sing-box"], runner=runner)
-    else:
-        result = vpn_exec(["ip", "link", "show", "dev", backend["id"]],
-                          runner=runner)
+        return {"kind": "singbox", "active": _backend_up(backend, runner)}
+    result = vpn_exec(["ip", "link", "show", "dev", backend["id"]],
+                      runner=runner)
     return {"kind": backend["kind"], "active": result.returncode == 0}
 
 
@@ -2801,27 +2825,37 @@ def _read_quick_config(row):
         raise VpnError("validation-failed") from None
 
 
-def _check_singbox_candidate(config, runner=None):
+def _check_candidate(config, runner=None, xray=None):
+    """Both configs as they will be written, read by the tools that will run
+    them: (sing-box text, Xray text or None when no node needs Xray)."""
     try:
         text = json.dumps(config, ensure_ascii=False, indent=2)
+        xray_text = None if xray is None else \
+            json.dumps(xray, ensure_ascii=False, indent=2)
     except (TypeError, ValueError):
         raise VpnError("validation-failed") from None
+    checks = [("sing-box", text, ["sing-box", "check", "-c"])]
+    if xray_text is not None:
+        checks.append(("xray", xray_text, ["xray", "run", "-test", "-c"]))
     _ensure_tunnel_dir()
     with tempfile.TemporaryDirectory(prefix=".singbox-", dir=TUNNEL_DIR) as td:
         os.chmod(td, 0o700)
-        path = os.path.join(td, "candidate.json")
-        write_private_text(path, text)
-        result = vpn_exec(["sing-box", "check", "-c", path], runner=runner)
-    if result.returncode:
-        # The browser gets a two-word code on purpose, and a two-word code is
-        # useless to whoever has to fix it. An installed sing-box too old for
-        # this config fails here and looks exactly like a bad subscription.
-        # The journal is root-only, so the tool's own complaint goes there.
-        reason = " ".join(str(result.stderr or result.stdout or "").split())[:300]
-        print(f"gateway-acl: sing-box rejected the config: {reason}",
-              file=sys.stderr, flush=True)
-        raise VpnError("validation-failed")
-    return text
+        for tool, body, argv in checks:
+            path = os.path.join(td, tool + ".json")
+            write_private_text(path, body)
+            result = vpn_exec(argv + [path], runner=runner)
+            if result.returncode:
+                # The browser gets a two-word code on purpose, and a two-word
+                # code is useless to whoever has to fix it. An installed tool
+                # too old for this config fails here and looks exactly like a
+                # bad subscription. The journal is root-only, so the tool's own
+                # complaint goes there.
+                reason = " ".join(
+                    str(result.stderr or result.stdout or "").split())[:300]
+                print(f"gateway-acl: {tool} rejected the config: {reason}",
+                      file=sys.stderr, flush=True)
+                raise VpnError("validation-failed")
+    return text, xray_text
 
 
 def _prepare_backend(rows, runner=None, secrets_map=None):
@@ -2829,11 +2863,12 @@ def _prepare_backend(rows, runner=None, secrets_map=None):
     if backend is None:
         return None
     if backend["kind"] == "singbox":
-        config, counts = build_singbox(rows, secrets_map=secrets_map)
+        config, counts, xray = build_singbox(rows, secrets_map=secrets_map)
         for row in rows:
             if row["id"] in counts:
                 row["nodes"], row["error"] = counts[row["id"]], ""
-        return dict(backend, config_text=_check_singbox_candidate(config, runner))
+        text, xray_text = _check_candidate(config, runner, xray)
+        return dict(backend, config_text=text, xray_text=xray_text)
     row = _find_tunnel(rows, backend["id"])
     config = _read_quick_config(row)
     try:
@@ -2899,10 +2934,25 @@ def _restore_file(path, snapshot):
     os.chmod(path, mode)
 
 
+def _put_xray(text):
+    """The Xray config, or its absence, which is how its unit knows to sit out."""
+    if text is None:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(XRAY_CONFIG)
+    else:
+        write_private_text(XRAY_CONFIG, text)
+
+
 def _stop_backend(backend, runner=None, quiet=False):
     if not backend:
         return
     if backend["kind"] == "singbox":
+        # Xray first, only where it runs, and never a failure: what matters is
+        # that its config goes, so a tunnel that is off leaves no node keys
+        # behind for a unit that starts at boot.
+        if os.path.exists(XRAY_CONFIG):
+            vpn_exec(["systemctl", "stop", XRAY_UNIT], runner=runner)
+            _put_xray(None)
         argv = ["systemctl", "stop", "sing-box"]
     else:
         argv = [QUICK_TOOLS[backend["kind"]], "down",
@@ -2925,6 +2975,16 @@ def _start_backend(backend, runner=None):
                 os.makedirs(os.path.dirname(SINGBOX_CONFIG) or ".",
                             mode=0o755, exist_ok=True)
             write_private_text(SINGBOX_CONFIG, backend["config_text"])
+        if "xray_text" in backend:
+            _put_xray(backend["xray_text"])
+        # Whatever is on disk is what runs: a rollback hands back a backend
+        # with no texts at all, and the files it has just put back.
+        if os.path.exists(XRAY_CONFIG):
+            argv = ["systemctl", "restart", XRAY_UNIT]
+            result = vpn_exec(argv, runner=runner)
+            if result.returncode:
+                _log_vpn(argv, result)
+                raise VpnError("start-failed")
         argv = ["systemctl", "restart", "sing-box"]
     else:
         argv = [QUICK_TOOLS[backend["kind"]], "up",
@@ -2960,10 +3020,16 @@ def _backend_up(backend, runner=None):
     happily, every single time. The unit is a real check: the candidate has
     already passed `sing-box check`, so a config it cannot run makes the
     process exit and the unit is not active.
+
+    Xray's unit is part of the same answer whenever its config is there: with
+    it down, every node in the group is a closed port on 127.0.0.1.
     """
     if backend["kind"] == "singbox":
-        return not vpn_exec(["systemctl", "is-active", "sing-box"],
-                            runner=runner).returncode
+        if vpn_exec(["systemctl", "is-active", "sing-box"],
+                    runner=runner).returncode:
+            return False
+        return not os.path.exists(XRAY_CONFIG) or not vpn_exec(
+            ["systemctl", "is-active", XRAY_UNIT], runner=runner).returncode
     tid = check_tunnel_id(backend["id"])
     if vpn_exec(["ip", "link", "show", "dev", tid], runner=runner).returncode:
         return False
@@ -2985,6 +3051,8 @@ def _why_down(backend, runner=None):
         if backend["kind"] == "singbox":
             for argv in (["systemctl", "is-active", "sing-box"],
                          ["systemctl", "status", "sing-box"],
+                         ["systemctl", "is-active", XRAY_UNIT],
+                         ["systemctl", "status", XRAY_UNIT],
                          ["ip", "-j", "route", "show", "table", "all", "default"]):
                 _log_vpn(argv, vpn_exec(argv, runner=runner))
         else:
@@ -3039,6 +3107,7 @@ def switch_backend(old_rows, new_rows, runner=None, applier=None,
              else old_backend.get("ids") == new_backend.get("ids")))
     old_mark = int(conf().get("vpn_mark") or 0)
     old_singbox = _file_snapshot(SINGBOX_CONFIG)
+    old_xray = _file_snapshot(XRAY_CONFIG)
     set_transit_closed(True, applier)
     attempted = False
     try:
@@ -3062,6 +3131,7 @@ def switch_backend(old_rows, new_rows, runner=None, applier=None,
             if attempted:
                 _stop_backend(new_backend, runner, quiet=True)
             _restore_file(SINGBOX_CONFIG, old_singbox)
+            _restore_file(XRAY_CONFIG, old_xray)
             if on_rollback:
                 on_rollback()
             if old_backend:
@@ -3348,6 +3418,29 @@ def _has_tunnel_secret(row):
     return os.path.isfile(tunnel_path(row["id"], suffix))
 
 
+def _adopt_xray(rows, backend, runner=None, applier=None):
+    """Move a running sing-box onto Xray once, after an upgrade brought Xray.
+
+    Nothing else would do it: a refresh commits only when the nodes change,
+    and an upgrade changes no node. Done as a switch, so a candidate that does
+    not come up rolls back to the config that was running, and that one goes
+    on running. Returns the committed rows, or None when nothing moved.
+    """
+    if (backend["kind"] != "singbox" or os.path.exists(XRAY_CONFIG)
+            or not xray_ready()):
+        return None
+    try:
+        if build_singbox(rows)[2] is None:
+            return None
+        return switch_backend(rows, rows, runner, applier)
+    except VpnError as e:
+        if str(e) == "rollback-failed":
+            raise
+    except Exception:
+        pass
+    return None
+
+
 def reconcile_tunnels(runner=None, applier=None):
     """Reconcile disk and managed runtime without making HTTP depend on it."""
     with _vpn_lock:
@@ -3392,6 +3485,8 @@ def reconcile_tunnels(runner=None, applier=None):
                 _start_backend(prepared, runner)
                 _check_backend(prepared, runner, BACKEND_WAIT)
                 backend = prepared
+            else:
+                rows = _adopt_xray(rows, backend, runner, applier) or rows
             _set_vpn_mark(backend_mark(backend, runner, BACKEND_WAIT))
             if not legacy:
                 for row in rows:
@@ -3712,7 +3807,8 @@ def _probe_subscription(row, runner=None, prober=None):
     picked = sub_convert(tid, secret)
     if not picked:
         raise VpnError("validation-failed")
-    _check_singbox_candidate(singbox_sub.fresh(picked, IFACE), runner)
+    dialled, xray = _for_xray(picked, singbox_sub.fresh([], IFACE))
+    _check_candidate(singbox_sub.fresh(dialled, IFACE), runner, xray)
     # Picked ones first, so that when the cap cuts the list short it cuts the
     # nodes nobody chose. Otherwise "отвечают 24 из 60" would be the answer
     # for a subscription where all sixty work.
@@ -4188,14 +4284,18 @@ DIAG_COMMANDS = (
                              "--no-pager", "-n", "40"]),
     ("sing-box service", ["systemctl", "status", "sing-box",
                           "--no-pager", "-n", "40"]),
+    ("xray service", ["systemctl", "status", XRAY_UNIT, "--no-pager", "-n", "40"]),
     ("service properties", ["systemctl", "show", "gateway-acl", "sing-box",
+                            XRAY_UNIT,
                             "-p", "Id,LoadState,ActiveState,SubState,Result,"
                             "ExecMainCode,ExecMainStatus,ActiveEnterTimestamp"]),
     ("service journal", ["journalctl", "-u", "gateway-acl", "-u", "sing-box",
+                         "-u", XRAY_UNIT,
                          "--no-pager", "-n", "200", "-o", "short-iso"]),
     ("kernel journal", ["journalctl", "-k", "--no-pager", "-n", "100",
                         "-o", "short-iso"]),
     ("sing-box version", ["sing-box", "version"]),
+    ("Xray version", ["xray", "version"]),
     ("WireGuard version", ["wg", "--version"]),
     ("AmneziaWG version", ["awg", "--version"]),
     ("nftables version", ["nft", "--version"]),
@@ -4329,7 +4429,7 @@ def diagnostic_report(runner=None, now=None):
         machine = {"error": type(e).__name__}
     files = {}
     for path in (CONFIG, DEVICES, TODAY, TRAFFIC, TUNNELS, SINGBOX_CONFIG,
-                 UPDATE_LOG):
+                 XRAY_CONFIG, UPDATE_LOG):
         try:
             st = os.stat(path)
             files[path] = {"size": st.st_size, "mode": oct(st.st_mode & 0o777),
@@ -6845,6 +6945,14 @@ def selftest():
     global check_update, reboot_due, _tick_fault
     # Swapped for a moment where a message has to be checked in both languages.
     global T
+    # Xray is whatever this host has, and the installer runs this as root on
+    # the gateway itself. Every test gets the answer 1.6.2 had, and a file of
+    # its own, unless it asks for more: neither the host's PATH nor its real
+    # xray.json may decide or receive anything here.
+    global XRAY_CONFIG, xray_ready
+    xray_scratch = tempfile.TemporaryDirectory()
+    XRAY_CONFIG = os.path.join(xray_scratch.name, "xray.json")
+    xray_ready = lambda: False
 
     class BombReader:
         def read(self, *unused):
@@ -7261,14 +7369,15 @@ PersistentKeepalive = 25
                 {"type": "direct", "tag": "direct"},
                 {"type": "vless", "tag": "hand", "server": "hand.example"},
             ]}
-            combined, counts = build_singbox(rows, base_cfg)
+            combined, counts, xray = build_singbox(rows, base_cfg)
             assert counts == {"t000000000001": 1, "t000000000002": 1}
+            assert xray is None, "no Xray on the host, none in the config"
             group = next(o for o in combined["outbounds"] if o["tag"] == "proxy")
             assert any(t.startswith("sub-t000000000001-") for t in group["outbounds"])
             assert any(t.startswith("sub-t000000000002-") for t in group["outbounds"])
             before_b = next(o for o in combined["outbounds"]
                             if o["tag"].startswith("sub-t000000000002-"))
-            only_b, _ = build_singbox(rows[1:], combined)
+            only_b, _, _ = build_singbox(rows[1:], combined)
             assert not any(o.get("tag", "").startswith("sub-t000000000001-")
                            for o in only_b["outbounds"])
             assert next(o for o in only_b["outbounds"]
@@ -7276,7 +7385,7 @@ PersistentKeepalive = 25
             write_private(tunnel_path(rows[0]["id"], ".json"),
                           {"url": "https://a.example/sub", "exclude": "",
                            "body": body_a.replace("a.example", "new.example")})
-            refreshed, _ = build_singbox(rows, combined)
+            refreshed, _, _ = build_singbox(rows, combined)
             assert next(o for o in refreshed["outbounds"]
                         if o["tag"].startswith("sub-t000000000002-")) == before_b
 
@@ -7294,6 +7403,57 @@ PersistentKeepalive = 25
                     pass
         finally:
             TUNNEL_DIR, SINGBOX_CONFIG = old_tunnel_dir, old_singbox
+
+    # --- VLESS through Xray: what gets built ---
+    with tempfile.TemporaryDirectory() as td:
+        old_xray = TUNNEL_DIR, SINGBOX_CONFIG, xray_ready
+        TUNNEL_DIR = os.path.join(td, "tunnels")
+        SINGBOX_CONFIG = os.path.join(td, "sing-box.json")
+        try:
+            _ensure_tunnel_dir()
+            uid = "5eb99d66-0000-0000-0000-000000000000"
+            row = {"id": "t00000000000a", "name": "X", "kind": "subscription",
+                   "enabled": True, "error": "", "nodes": 0}
+            xh = (f"vless://{uid}@c.example:6443?type=xhttp&security=tls"
+                  f"&sni=c.example#China")
+            write_private(tunnel_path(row["id"], ".json"),
+                          {"url": "https://x.example/sub", "exclude": "",
+                           "body": f"vless://{uid}@a.example:443?security=tls#A\n{xh}"})
+            native, counts, xray = build_singbox([row], {"outbounds": []})
+            assert xray is None and counts == {row["id"]: 1}, \
+                "without Xray: what 1.6.2 built, xhttp skipped"
+            assert [o["type"] for o in native["outbounds"]
+                    if o["tag"].startswith("sub-")] == ["vless"]
+            xray_ready = lambda: True
+            built, counts, xray = build_singbox([row], {"outbounds": []})
+            assert counts == {row["id"]: 2}, "Xray carries xhttp too"
+            subs = [o for o in built["outbounds"] if o["tag"].startswith("sub-")]
+            assert [o["type"] for o in subs] == ["socks", "socks"], subs
+            assert [o["tag"] for o in xray["outbounds"][:2]] == \
+                [o["tag"] for o in subs], "Xray serves each node under its own tag"
+            assert "mark" not in xray["outbounds"][0]["streamSettings"]["sockopt"], \
+                "a base with no auto_redirect has no mark to step past"
+            assert build_singbox([row])[2]["outbounds"][0]["streamSettings"][
+                "sockopt"]["mark"] == singbox_sub.REDIRECT_MARK, \
+                "no config yet: the mark of the one the panel would write"
+            checked = []
+
+            def tools_agree(argv, **kwargs):
+                checked.append(argv[:2])
+                return subprocess.CompletedProcess(argv, 0, "", "")
+
+            text, xray_text = _check_candidate(built, tools_agree, xray)
+            assert checked == [["sing-box", "check"], ["xray", "run"]], checked
+            assert json.loads(xray_text) == xray and json.loads(text) == built
+            assert _check_candidate(native, tools_agree)[1] is None
+            try:
+                _check_candidate(built, lambda argv, **k: subprocess.CompletedProcess(
+                    argv, 1 if argv[0] == "xray" else 0, "", "bad"), xray)
+                raise AssertionError("a config Xray refused was accepted")
+            except VpnError as e:
+                assert str(e) == "validation-failed"
+        finally:
+            TUNNEL_DIR, SINGBOX_CONFIG, xray_ready = old_xray
 
     seen_commands = []
 
@@ -7329,6 +7489,7 @@ PersistentKeepalive = 25
     class FakeVpn:
         def __init__(self):
             self.active = None
+            self.xray = False
             self.fail = set()
             self.commands = []
             self.unmanaged = False
@@ -7340,7 +7501,14 @@ PersistentKeepalive = 25
             if label in self.fail:
                 self.fail.remove(label)
                 return subprocess.CompletedProcess(argv, 1, "", "failed-secret")
-            if label == ("sing-box", "check"):
+            if argv[:3] == ["systemctl", "restart", XRAY_UNIT]:
+                self.xray = True
+            elif argv[:3] == ["systemctl", "stop", XRAY_UNIT]:
+                self.xray = False
+            elif argv[:3] == ["systemctl", "is-active", XRAY_UNIT]:
+                return subprocess.CompletedProcess(argv, 0 if self.xray else 3,
+                                                   "", "")
+            elif label == ("sing-box", "check"):
                 return subprocess.CompletedProcess(argv, 0, "", "")
             if argv[:3] == ["systemctl", "stop", "sing-box"]:
                 self.active = None
@@ -7653,6 +7821,82 @@ PersistentKeepalive = 25
                 "error"] == "rollback-failed"
         finally:
             (CONFIG, TUNNELS, TUNNEL_DIR, SINGBOX_CONFIG) = old_paths
+            CFG["vpn_mark"], _vpn_closed = old_mark, old_closed
+
+    # --- VLESS through Xray: its unit beside sing-box ---
+    with tempfile.TemporaryDirectory() as td:
+        old_paths = CONFIG, TUNNELS, TUNNEL_DIR, SINGBOX_CONFIG, xray_ready
+        old_mark, old_closed = CFG.get("vpn_mark"), _vpn_closed
+        CONFIG = os.path.join(td, "config.json")
+        TUNNELS = os.path.join(td, "tunnels.json")
+        TUNNEL_DIR = os.path.join(td, "tunnels")
+        SINGBOX_CONFIG = os.path.join(td, "sing-box.json")
+        xray_ready = lambda: True
+        fake = FakeVpn()
+        try:
+            write_private(CONFIG, dict(DEFAULTS, vpn_mark=0, bypass=0))
+            CFG["vpn_mark"] = 0
+            save_tunnels([])
+            uid = "5eb99d66-0000-0000-0000-000000000000"
+            sub = vpn_add({"kind": "subscription", "name": "X",
+                           "url": "https://provider.example/x"},
+                          fetcher=lambda url: f"vless://{uid}@a.example:443"
+                                              f"?security=tls#A")
+            vpn_enable(sub["id"], runner=fake, applier=gate_apply)
+            assert fake.active == "singbox" and fake.xray and not _vpn_closed
+            assert os.stat(XRAY_CONFIG).st_mode & 0o777 == 0o600, \
+                "the node keys in it are root's"
+            assert json.load(open(XRAY_CONFIG))["inbounds"][0]["port"] == \
+                singbox_sub.XRAY_PORT
+            assert [o["type"] for o in json.load(open(SINGBOX_CONFIG))["outbounds"]
+                    if o["tag"].startswith("sub-")] == ["socks"]
+            backend = {"kind": "singbox", "ids": [sub["id"]]}
+            fake.xray = False
+            assert not _backend_up(backend, fake), \
+                "with Xray down every node is a closed port on 127.0.0.1"
+            assert backend_state(load_tunnels(), fake)["active"] is False
+            fake.xray = True
+            before = open(XRAY_CONFIG, "rb").read(), open(SINGBOX_CONFIG, "rb").read()
+            fake.fail.add(("systemctl", "restart"))     # Xray's port is taken
+            try:
+                vpn_refresh(sub["id"], runner=fake, applier=gate_apply,
+                            fetcher=lambda url: f"vless://{uid}@b.example:443"
+                                                f"?security=tls#B")
+                raise AssertionError("a backend that did not come up was committed")
+            except VpnError:
+                pass
+            assert (open(XRAY_CONFIG, "rb").read(),
+                    open(SINGBOX_CONFIG, "rb").read()) == before, \
+                "the rollback puts both configs back"
+            assert fake.active == "singbox" and fake.xray and not _vpn_closed
+            vpn_disable(sub["id"], runner=fake, applier=gate_apply)
+            assert not os.path.exists(XRAY_CONFIG) and not fake.xray, \
+                "no tunnel, no node keys left on disk for Xray"
+
+            # An upgrade that brings Xray changes no node, so no refresh would
+            # ever move a running tunnel onto it. The panel's start does, once.
+            xray_ready = lambda: False
+            vpn_enable(sub["id"], runner=fake, applier=gate_apply)
+            assert not os.path.exists(XRAY_CONFIG), "the tunnel 1.6.2 left running"
+            xray_ready = lambda: True
+            assert reconcile_tunnels(runner=fake, applier=gate_apply)
+            assert os.path.exists(XRAY_CONFIG) and fake.xray and not _vpn_closed
+            seen = len(fake.commands)
+            assert reconcile_tunnels(runner=fake, applier=gate_apply)
+            assert not any(argv[1] == "restart" for argv, _ in fake.commands[seen:]), \
+                "adopted once, not on every start"
+            assert vpn_public(fake)["tools"]["xray"] is True
+            # A candidate that does not come up leaves the running one alone.
+            vpn_disable(sub["id"], runner=fake, applier=gate_apply)
+            xray_ready = lambda: False
+            vpn_enable(sub["id"], runner=fake, applier=gate_apply)
+            xray_ready = lambda: True
+            fake.fail.add(("systemctl", "restart"))
+            assert reconcile_tunnels(runner=fake, applier=gate_apply)
+            assert not os.path.exists(XRAY_CONFIG) and fake.active == "singbox" \
+                and not _vpn_closed, "a failed adoption is the old tunnel, still up"
+        finally:
+            CONFIG, TUNNELS, TUNNEL_DIR, SINGBOX_CONFIG, xray_ready = old_paths
             CFG["vpn_mark"], _vpn_closed = old_mark, old_closed
 
     with tempfile.TemporaryDirectory() as td:
@@ -8116,6 +8360,8 @@ PersistentKeepalive = 25
                             "## managed tunnels", "## files", "## commands"):
                 assert heading in report, heading
             assert "[REDACTED" in report and len(report) <= DIAG_REPORT_MAX
+            assert XRAY_UNIT in report and XRAY_CONFIG in report, \
+                "Xray is half the tunnel: its unit, journal and file are in"
 
             # A named secret goes, however the line around it is punctuated.
             # A quote between the name and the colon used to hide the name
