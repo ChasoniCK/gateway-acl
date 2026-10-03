@@ -29,8 +29,7 @@ chain prerouting {
   type filter hook prerouting priority raw; policy accept;
   iifname != "eth0" accept
   meta nfproto != ipv4 accept
-  ip saddr 192.168.1.51 counter name up_192_168_1_51    # one per device
-  ...
+  counter name ip saddr map { 192.168.1.51 : "up_192_168_1_51", ... }
   ip saddr @allowed accept
   fib daddr type != unicast accept
   update @blocked { ip saddr }
@@ -67,6 +66,12 @@ underscores. Upload is counted in `prerouting` (packets arriving from the LAN
 interface), download in `postrouting` (packets leaving towards it). Replies from
 a proxy come back through `forward` and out the LAN interface with the client's
 real address as destination, so no NAT rewriting confuses the count.
+
+Each direction is one rule that looks the address up in a map of counters, not
+one rule per device. The counting rules carry no verdict, so with a rule each
+every packet walked all of them; the map is one hash lookup however long the
+list grows. An address the map does not hold simply ends that rule, and the
+chain carries on as if it had not matched.
 
 Counting happens **before** the accept/drop verdict. That is a deliberate
 simplification: a device you switched off keeps accruing the few kilobytes of

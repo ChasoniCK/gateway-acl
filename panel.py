@@ -1347,10 +1347,15 @@ def ruleset(devs, bypass=None, vpn_closed=None):
     elems = f"\n    elements = {{ {ips} }}" if ips else ""
     ctrs = "\n".join(f"  counter {cname(w, d['ip'])} {{ }}"
                      for d in devs for w in ("up", "down"))
-    up = "\n".join(f"    ip saddr {d['ip']} counter name {cname('up', d['ip'])}"
-                   for d in devs)
-    down = "\n".join(f"    ip daddr {d['ip']} counter name {cname('down', d['ip'])}"
-                     for d in devs)
+    # One hash lookup per packet, whatever the number of devices. A rule per
+    # device had no verdict, so every packet in either direction walked all of
+    # them: forty devices was eighty rule evaluations for each packet a busy
+    # download delivered. An address the map does not hold ends the rule and
+    # the chain goes on, exactly like a rule that did not match.
+    def lookup(field, w):
+        pairs = ", ".join(f'{d["ip"]} : "{cname(w, d["ip"])}"' for d in devs)
+        return f"\n    counter name ip {field} map {{ {pairs} }}" if devs else ""
+    up, down = lookup("saddr", "up"), lookup("daddr", "down")
     # "vpn": false means allowed through the gateway, but not through the
     # tunnel. A mark is the only handle this program has on something it does
     # not own. Every tunnel keeps a mark for its own packets, so that what it
@@ -1403,16 +1408,14 @@ table inet gwacl {{
   chain prerouting {{
     type filter hook prerouting priority raw; policy accept;
     iifname != "{IFACE}" accept{novpn}
-    meta nfproto != ipv4 accept
-{up}
+    meta nfproto != ipv4 accept{up}
     ip saddr @allowed accept
     fib daddr type != unicast accept
     update @blocked {{ ip saddr }}{verdict}
   }}
   chain postrouting {{
     type filter hook postrouting priority 0; policy accept;
-    oifname != "{IFACE}" accept
-{down}
+    oifname != "{IFACE}" accept{down}
   }}
 }}
 """
@@ -8530,7 +8533,9 @@ PersistentKeepalive = 25
     r = ruleset(d)
     assert f"elements = {{ {a} }}" in r, "a switched-off device must not reach the allowed set"
     assert f"counter {cname('up', b)} {{ }}" in r, "but it still needs its counters"
-    assert f"ip daddr {a} counter name {cname('down', a)}" in r
+    assert f"counter name ip daddr map {{ {a} : \"{cname('down', a)}\", " in r
+    assert f"{b} : \"{cname('up', b)}\" }}" in r, "off devices are counted too"
+    assert "counter name" not in ruleset([]), "an empty map breaks nft syntax"
     assert "update @blocked { ip saddr }" in r
     # The panel subtracts what is left of this to say when an address knocked.
     assert f"timeout {BLOCK_TTL}s" in r
