@@ -256,6 +256,19 @@ health check rather than a start, and the callers that started something pass th
 constant. `BACKEND_WAIT` is a module global resolved in the body, never a default
 argument, because `selftest()` sets it to 0.
 
+**A provider's refusal arrives as 200 and a node.** Remnawave with a device
+limit answers a client that sends no `x-hwid` with "nodes" at `0.0.0.0:1` named
+"app not supported", whatever the User-Agent. `sing-box check` passes them and
+the unit runs, so in 1.7.1 a refresh put that placeholder in place of four
+working nodes and the panel called the tunnel healthy. Two things answer it,
+both in [singbox_sub.py](singbox_sub.py). `fetch()` sends `_device()`: a digest
+of `/etc/machine-id` and the provider's host, stable so the gateway holds one
+slot of the limit, per-provider so it cannot be followed between them, and
+never the machine id itself. And `outbound()` refuses an unspecified address,
+so a list that is all placeholders converts to nothing and takes the existing
+"no nodes" path: the cache and the backend stay as they were. The first is
+what gets the nodes; the second is for the day the limit is full.
+
 **A subscription's node selection lives with the subscription, not in the
 catalog.** `tunnels/<id>.json` holds `skip` (labels the user turned off), `up`
 and `ms` (what the last probe found per label) beside the link and cached body.

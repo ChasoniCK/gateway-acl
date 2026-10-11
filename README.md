@@ -374,7 +374,11 @@ once. Beside it, *check for an update* makes that same request on demand. This
 is the only unsolicited destination built into the panel. Saved subscriptions
 are fetched when you add, refresh or schedule them, and their nodes are reached
 when you press a profile check; those destinations come only from profiles you
-supplied. On a gateway with no internet the release request simply fails: the
+supplied. A subscription request carries a device id (`x-hwid`), because a
+provider that limits devices answers a client without one with a placeholder
+called "app not supported" instead of nodes. The id is a digest of this host's
+machine id and the provider's host name: the same on every request, so the
+gateway takes one slot of that limit, and different for every provider. On a gateway with no internet the release request simply fails: the
 daily check stays quiet and the button says so.
 
 ## Settings

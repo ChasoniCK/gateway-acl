@@ -7822,6 +7822,18 @@ PersistentKeepalive = 25
             assert open(second_secret, "rb").read() == old_secret
             assert open(SINGBOX_CONFIG, "rb").read() == old_runtime
             assert fake.active == "singbox" and not _vpn_closed
+            # A provider that wants something this client does not send says so
+            # with 200 and a "node" at 0.0.0.0. `sing-box check` passes it, so
+            # the converter is all that stands between that and no tunnel.
+            try:
+                vpn_refresh(sub2["id"], runner=fake, applier=gate_apply,
+                            fetcher=lambda url:
+                            f"vless://{uid}@0.0.0.0:1#App%20not%20supported")
+                raise AssertionError("a provider's refusal replaced working nodes")
+            except VpnError:
+                pass
+            assert open(second_secret, "rb").read() == old_secret
+            assert open(SINGBOX_CONFIG, "rb").read() == old_runtime
 
             vpn_refresh(sub2["id"], runner=fake, applier=gate_apply,
                         fetcher=lambda url: body.replace("a.example", "new.example"))

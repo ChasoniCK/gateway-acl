@@ -26,9 +26,13 @@ survive a subscription refresh.
 
 import argparse
 import base64
+import contextlib
+import hashlib
+import ipaddress
 import json
 import re
 import sys
+import tempfile
 import time
 import urllib.request
 from urllib.parse import parse_qsl, unquote, urlsplit
@@ -38,6 +42,7 @@ DIRECT = "direct"
 OWNED = "sub-"           # what this program is allowed to delete and rewrite
 TIMEOUT = 20
 SUB_BODY_MAX = 128 << 10
+MACHINE_ID = "/etc/machine-id"
 
 # sing-box does not implement Xray's xhttp transport and shows no sign of
 # starting to: 1.13 and the 1.14 betas both know exactly five (http, ws, quic,
@@ -82,6 +87,29 @@ def _b64(s):
     return base64.b64decode(s + "=" * (-len(s) % 4), validate=True)
 
 
+def _device(host):
+    """The headers that name this gateway to a provider that counts devices.
+
+    Remnawave with a device limit answers a client that sends no `x-hwid` with
+    200 and a list of "nodes" at 0.0.0.0 called "app not supported". The id is
+    a digest of the machine id and the provider's host: the same on every
+    fetch and after a reinstall, so one gateway holds one slot of the limit,
+    and useless for following a gateway from one provider to another. The
+    machine id itself never leaves, which is what systemd asks of it. A host
+    without one sends nothing and asks exactly as it did before.
+    """
+    try:
+        with open(MACHINE_ID, "rb") as f:
+            seed = f.read().strip()
+    except OSError:
+        seed = b""
+    if not seed:
+        return {}
+    return {"x-hwid": hashlib.sha256(
+                b"gateway-acl\0" + host.encode() + b"\0" + seed).hexdigest()[:32],
+            "x-device-os": "Linux", "x-device-model": "gateway-acl"}
+
+
 def fetch(url, timeout=TIMEOUT, limit=SUB_BODY_MAX, with_headers=False):
     """The subscription body. The User-Agent matters, because providers hand out
     Clash YAML to some clients and the plain list to others."""
@@ -91,7 +119,8 @@ def fetch(url, timeout=TIMEOUT, limit=SUB_BODY_MAX, with_headers=False):
     if timeout <= 0 or limit < 1:
         raise ValueError("invalid subscription fetch limits")
     deadline = time.monotonic() + timeout
-    req = urllib.request.Request(url, headers={"User-Agent": "sing-box/1.13"})
+    req = urllib.request.Request(url, headers={"User-Agent": "sing-box/1.13",
+                                               **_device(p.hostname)})
     try:
         with _open(req, max(0.001, deadline - time.monotonic())) as r:
             final = urlsplit(r.geturl())
@@ -205,10 +234,18 @@ def outbound(link, tag, xray=False):
     p = urlsplit(link)
     q = dict(parse_qsl(p.query))
     if p.scheme == "vless":
-        return _vless(p, q, tag, xray)
-    if p.scheme == "ss":
-        return _ss(p, tag)
-    raise Unsupported(f"protocol {p.scheme}")
+        o = _vless(p, q, tag, xray)
+    elif p.scheme == "ss":
+        o = _ss(p, tag)
+    else:
+        raise Unsupported(f"protocol {p.scheme}")
+    # 0.0.0.0 is where a provider puts a message instead of a server: "app not
+    # supported", "limit reached". sing-box loads it without complaint, so a
+    # refusal would take the place of the nodes that were working.
+    with contextlib.suppress(ValueError):
+        if ipaddress.ip_address(o["server"]).is_unspecified:
+            raise Unsupported("placeholder, not a server")
+    return o
 
 
 def node_name(link):
@@ -481,7 +518,7 @@ def build(body, base=None, iface=None, warn=lambda s: None, exclude=None,
 
 def selftest():
     """Bare asserts, no network. Same shape as panel.py's."""
-    global _open
+    global _open, MACHINE_ID
     for bad_url in ("data:text/plain,vless://secret", "file:///etc/passwd",
                     "http://provider.example/sub"):
         try:
@@ -508,6 +545,7 @@ def selftest():
 
     real_open = _open
     real_clock = time.monotonic
+    real_machine_id = MACHINE_ID
     try:
         _open = lambda req, timeout: Response(b"123456789")
         try:
@@ -539,9 +577,35 @@ def selftest():
             raise AssertionError("subscription fetch needs one overall deadline")
         except ValueError:
             pass
+        time.monotonic = real_clock
+        # A panel that counts devices answers a client naming none with 200
+        # and a list of "nodes" called "app not supported".
+        seen = []
+        _open = lambda req, timeout: (seen.append(
+            {k.lower(): v for k, v in req.header_items()}),
+            Response(b"ok", req.full_url))[1]
+        with tempfile.NamedTemporaryFile() as f:
+            f.write(b"0123456789abcdef0123456789abcdef\n")
+            f.flush()
+            MACHINE_ID = f.name
+            fetch("https://provider.example/sub", limit=8)
+            fetch("https://provider.example/other", limit=8)
+            fetch("https://second.example/sub", limit=8)
+        fetch("https://provider.example/sub", limit=8)     # the file is gone
+        one, same, other, none = (h.get("x-hwid") for h in seen)
+        assert one and re.fullmatch(r"[a-zA-Z0-9=-]{10,64}", one), \
+            "a device id in the only shape Remnawave reads"
+        assert one == same, "one gateway is one device to one provider"
+        assert one != other, "and cannot be followed from provider to provider"
+        assert "0123456789abcdef" not in one, "the machine id itself stays here"
+        assert seen[0].get("x-device-model") == "gateway-acl", \
+            "named, so its owner can find it in the provider's device list"
+        assert none is None and "x-device-model" not in seen[3], \
+            "a host with no machine id asks exactly as it always did"
     finally:
         _open = real_open
         time.monotonic = real_clock
+        MACHINE_ID = real_machine_id
     for redirected in ("https://other.example/sub",
                        "http://provider.example/sub"):
         try:
@@ -592,6 +656,16 @@ def selftest():
     except Unsupported:
         pass
     assert convert(xh, said.append) == [] and said, "a skipped node is announced"
+
+    # How a provider refuses a client: 200 and a "node" at 0.0.0.0 named after
+    # the refusal. sing-box loads it without a word, and it once took the place
+    # of four working nodes.
+    said = []
+    stub = f"vless://{uid}@0.0.0.0:1?encryption=none&type=tcp&security=none#App%20not%20supported"
+    assert convert(stub, said.append) == [] and said, "a placeholder is not a node"
+    assert convert(f"ss://{base64.b64encode(b'aes-256-gcm:pw').decode()}@[::]:1#x") == []
+    assert [o["tag"] for o in convert(f"{stub}\n{vision}")] == ["sub-🇷🇺 Rossiya"], \
+        "and costs the list nothing but itself"
 
     secret = base64.b64encode(b"2022-blake3-aes-256-gcm:pw==").decode()
     sip002 = f"ss://{secret}@b.example:8388#fi"
