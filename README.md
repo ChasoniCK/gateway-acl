@@ -87,7 +87,8 @@ device ──► this Linux host ──► uplink or tunnel (sing-box / WireGuar
   selected month as CSV. The filter reports how many rows it found; clicking an
   IP or MAC copies it, and an expanded row stays expanded after a reload.
 - **A compact summary in the header.** It counts allowed devices, unknown
-  knockers and address conflicts, and each counter jumps to its section. After
+  knockers and address conflicts, and each counter jumps to its section. On a
+  phone the header is one row and the counters are left out of it. After
   one device is switched, or its VPN bypass changes, the last action can be
   undone for eight seconds.
 - **Update notice, and the button under it.** Once a day the panel asks GitHub

@@ -5211,7 +5211,7 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
       margin:0 calc(-1 * var(--s1)) var(--s3);flex-wrap:wrap}
  #hdr.stuck{box-shadow:0 .5px 0 var(--line)}
  #hdr .sp{flex:1}
- #statusbar{display:flex;gap:var(--s1)}
+ #chips{display:flex;gap:var(--s1)}
  .chip{background:var(--fill);border:0;border-radius:var(--r-pill);
        padding:var(--s1) var(--s2);font-size:var(--f-sec);cursor:pointer}
  .chip.bad{background:var(--redbg)}
@@ -5373,7 +5373,7 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
     on a phone. The wide rule above already guards it the same way. */
  @media (max-width:900px){.row2{grid-template-columns:minmax(0,1fr)}}
  @media (max-width:620px){
-  body{padding:1rem .7rem 3rem}
+  body{padding:var(--s2) .7rem 3rem}
   /* На телефоне строку устройства делят пять неуступчивых элементов, и имя
      платит за всех: «Телефон Насти» превращался в «Телефон Н». Зазор поуже —
      это двадцать пикселей, которые целиком достаются имени; остальное даёт
@@ -5381,7 +5381,12 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
   .dmain{gap:var(--s2)}
   /* Месяц, переключатель и CSV как раз помещаются в строку на 375px. */
   .chead{gap:var(--s2)}
-  #statusbar{order:3;width:100%;overflow:auto}
+  /* Ровно кнопка «Настройки»: 44px под палец, ниже шапке некуда. Счётчики
+     скрыты: в одну строку с логотипом и кнопкой они не помещаются, а со
+     второй строкой шапка занимала десятую часть экрана и не уходила. */
+  #hdr{padding:0 var(--s1);min-height:44px;margin-bottom:var(--s2)}
+  #hdr .logo{height:20px}
+  #chips{display:none}
  }
  .quickallow{display:flex;gap:var(--s1);flex-wrap:wrap;justify-content:flex-end}
  #ub .row{flex-wrap:wrap}
@@ -5392,7 +5397,7 @@ PAGE_T = """<!doctype html><meta charset=utf-8>
  .undo[hidden]{display:none}
 </style>
 <header id=hdr>
- <h1>{{LOGO}}</h1><span class=sp></span><div id=statusbar></div>
+ <h1>{{LOGO}}</h1><span class=sp></span><div id=chips></div>
  <button class="btn plain" onclick=openSheet()>{{t.settingsTitle}}</button>
 </header>
 <div id=banners></div>
@@ -6315,7 +6320,7 @@ const draw = () => {
       + BYP.map(([v, k]) => `<option value="${v}">${T[k]}</option>`).join('')
       + `</select>`;
   const others = S.devices.filter(x => x.ip !== S.you);
-  put(statusbar, `<button class=chip onclick="jump('devices')">`
+  put(chips, `<button class=chip onclick="jump('devices')">`
     + T.statusAllowed.replace('{a}', S.devices.filter(x => x.on).length)
       .replace('{b}', S.devices.length) + `</button>`
     + (S.blocked.length ? `<button class=chip onclick="jump('unk')">`
@@ -9441,7 +9446,7 @@ PersistentKeepalive = 25
     page = render(PAGE_T)
     for needle in ('id="vpnList"', 'id="vpnKind"', 'id="vpnSecret"',
                    'id="vpnCheckAll"', 'id=diagStatus',
-                   'id=statusbar', 'id=undoBar', "filter.id = 'nodeFilter'",
+                   'id=chips', 'id=undoBar', "filter.id = 'nodeFilter'",
                    'type=search', 'aria-live="polite"', 'autocomplete="off"'):
         assert needle in page, f"the tunnel form has no {needle}"
     assert "PrivateKey" not in page and "PresharedKey" not in page, \
@@ -9453,6 +9458,18 @@ PersistentKeepalive = 25
                "s_reboot", "s_reboot_at", "s_rb", "s_check", "bypbox", "allsw", "clash",
                "clashb", "s_theme", "sheet"):
         assert f"id={el}>" in page or f"id={el} " in page, f"the page has no {el}"
+    # The script reaches an element by its bare id, and a name the window
+    # already owns answers first. `statusbar` is a BarProp in every browser, so
+    # the header counters were written into that and never drawn, from the day
+    # they were added.
+    taken = {"statusbar", "status", "menubar", "toolbar", "scrollbars",
+             "locationbar", "personalbar", "name", "top", "parent", "self",
+             "frames", "length", "closed", "opener", "location", "history",
+             "screen", "origin", "event", "external", "navigator", "document",
+             "window", "performance", "crypto", "caches", "close", "open",
+             "stop", "focus", "blur", "print", "find", "scroll"}
+    owned = taken & set(re.findall(r"""\bid=["']?([A-Za-z_][\w-]*)""", page))
+    assert not owned, f"the window already has a property named {sorted(owned)}"
 
     # Цвет живёт в переменных, иначе одна из двух тем ломается молча. Литерал
     # ищется после двоеточия: так селектор вроде #chartbox не считается цветом.
