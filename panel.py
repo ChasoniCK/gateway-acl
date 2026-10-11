@@ -3464,6 +3464,19 @@ def _adopt_xray(rows, backend, runner=None, applier=None):
     return None
 
 
+def _singbox_is_ours():
+    """Whether the sing-box config on disk is one this panel wrote: it holds an
+    outbound under a profile's prefix (`sub_prefix`). Somebody's own sing-box,
+    run beside a panel that manages no tunnel, has none and is left alone."""
+    try:
+        with open(SINGBOX_CONFIG) as f:
+            outs = json.load(f)["outbounds"]
+        return any(re.match(r"sub-t[0-9a-f]{12}-", str(out.get("tag")))
+                   for out in outs)
+    except (OSError, ValueError, LookupError, TypeError, AttributeError):
+        return False
+
+
 def reconcile_tunnels(runner=None, applier=None):
     """Reconcile disk and managed runtime without making HTTP depend on it."""
     with _vpn_lock:
@@ -3486,12 +3499,20 @@ def reconcile_tunnels(runner=None, applier=None):
             set_transit_closed(True, applier)
             return False
         if backend is None:
+            # sing-box is enabled at boot, and the config it starts with still
+            # names the nodes of whatever was on last: with Xray, ports of an
+            # Xray whose file went when the tunnel did. Off has to survive a
+            # reboot, or the gateway comes back refusing every proxied
+            # connection while this page says there is no tunnel.
+            if _singbox_is_ours():
+                with contextlib.suppress(VpnError):
+                    _stop_backend({"kind": "singbox"}, runner, quiet=True)
             save_tunnels(rows)
             _set_vpn_mark(0)
             set_transit_closed(broken, applier)
             return not broken
 
-        legacy = (backend["kind"] == "singbox" and any(
+        legacy =(backend["kind"] == "singbox" and any(
             row["enabled"] and row["error"] == "legacy/no-cache" for row in rows))
         try:
             try:
@@ -7940,6 +7961,24 @@ PersistentKeepalive = 25
             vpn_disable(sub["id"], runner=fake, applier=gate_apply)
             assert not os.path.exists(XRAY_CONFIG) and not fake.xray, \
                 "no tunnel, no node keys left on disk for Xray"
+
+            # sing-box starts at boot, and its config still names the nodes of
+            # the profile that was on last: ports of an Xray that went with its
+            # file. A reboot brought that half of a tunnel back while the
+            # catalog said off, and every proxied connection was refused.
+            fake.active = "singbox"                     # systemd's doing
+            assert reconcile_tunnels(runner=fake, applier=gate_apply)
+            assert fake.active is None and not _vpn_closed, \
+                "a tunnel that is off is off after a reboot as well"
+            left = open(SINGBOX_CONFIG).read()
+            write_private_text(SINGBOX_CONFIG, json.dumps(
+                {"outbounds": [{"type": "vless", "tag": "sub-by-hand"}]}))
+            fake.active = "singbox"
+            assert reconcile_tunnels(runner=fake, applier=gate_apply)
+            assert fake.active == "singbox", \
+                "a sing-box the panel never wrote a config for is not its to stop"
+            write_private_text(SINGBOX_CONFIG, left)
+            fake.active = None
 
             # An upgrade that brings Xray changes no node, so no refresh would
             # ever move a running tunnel onto it. The panel's start does, once.

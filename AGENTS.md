@@ -248,6 +248,16 @@ While `xray.json` exists the Xray unit is part of the same answer, since with it
 down every node in the group is a closed port on `127.0.0.1`, and a switch that
 fails restores both files together.
 
+**Off has to survive a reboot.** Turning the last profile off stops sing-box
+and deletes `xray.json`, but the unit stays enabled and
+`/etc/sing-box/config.json` still names that profile's nodes, which with Xray
+are ports on `127.0.0.1` that nothing listens on any more. A reboot brought back
+a tun that refused every proxied connection, DNS included, under a page saying
+no tunnel was on. `reconcile_tunnels()` stops it when the catalog has no backend
+and `_singbox_is_ours()` finds an outbound under a profile's prefix in that
+config. A sing-box the panel never wrote a config for has no such tag and is
+left alone.
+
 **Nothing that was just started is checked immediately.** `systemctl restart`
 returns when the process is running, and sing-box installs its nftables mark a
 moment later. `_check_backend`/`backend_mark` therefore take a `wait` and poll
